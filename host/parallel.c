@@ -2,6 +2,32 @@
 #include <openenclave/host.h>
 #include "parallel_u.h"
 
+static int world_rank;
+static int world_size;
+
+static int init_mpi(void) {
+    int ret;
+
+    /* Initialize MPI. */
+    ret = MPI_Init(NULL, NULL);
+    if (ret) {
+        goto exit;
+    }
+
+    /* Get world rank and size. */
+    ret = MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    if (ret) {
+        goto exit;
+    }
+    ret = MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (ret) {
+        goto exit;
+    }
+
+exit:
+    return ret;
+}
+
 int main(int argc, char *argv[]) {
     oe_enclave_t *enclave;
     oe_result_t result;
@@ -9,6 +35,13 @@ int main(int argc, char *argv[]) {
 
     if (argc < 2) {
         printf("usage: %s enclave_image\n", argv[0]);
+    }
+
+    ret = init_mpi();
+
+    if (ret) {
+        printf("Error initializing MPI\n");
+        goto exit;
     }
 
     result = oe_create_parallel_enclave(
@@ -25,11 +58,13 @@ int main(int argc, char *argv[]) {
         goto exit;
     }
 
-    ecall_main(enclave, &ret);
+    ecall_main(enclave, &ret, world_rank, world_size);
 
     if (ret) {
         printf("Enclave exited with return code %d\n", ret);
     }
+
+    MPI_Barrier(MPI_COMM_WORLD);
 
     oe_terminate_enclave(enclave);
 exit:
