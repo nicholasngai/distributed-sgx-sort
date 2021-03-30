@@ -40,7 +40,7 @@ int main(int argc, char *argv[]) {
     ret = init_mpi();
 
     if (ret) {
-        printf("Error initializing MPI\n");
+        fprintf(stderr, "Error initializing MPI\n");
         goto exit;
     }
 
@@ -53,7 +53,7 @@ int main(int argc, char *argv[]) {
             &enclave);
 
     if (result != OE_OK) {
-        printf("Enclave creation failed: %s\n", oe_result_str(result));
+        fprintf(stderr, "Enclave creation failed: %s\n", oe_result_str(result));
         ret = result;
         goto exit;
     }
@@ -61,7 +61,7 @@ int main(int argc, char *argv[]) {
     ecall_main(enclave, &ret, world_rank, world_size);
 
     if (ret) {
-        printf("Enclave exited with return code %d\n", ret);
+        fprintf(stderr, "Enclave exited with return code %d\n", ret);
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
