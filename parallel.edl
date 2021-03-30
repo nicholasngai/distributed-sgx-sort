@@ -19,6 +19,8 @@ enclave {
     };
 
     trusted {
-        public int ecall_main(int world_rank, int world_size);
+        public int ecall_main(void);
+        public void ecall_set_params(int world_rank, int world_size, size_t num_threads);
+        public void ecall_start_work(size_t thread_id);
     };
 };
