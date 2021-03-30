@@ -4,7 +4,7 @@
 #include <stdbool.h>
 
 typedef struct spinlock {
-    bool locked;
+    volatile bool locked;
 } spinlock_t;
 
 void spinlock_init(spinlock_t *lock);
@@ -12,7 +12,7 @@ void spinlock_lock(spinlock_t *lock);
 void spinlock_unlock(spinlock_t *lock);
 
 typedef struct sema {
-    unsigned int value;
+    volatile unsigned int value;
 } sema_t;
 
 void sema_init(sema_t *sema, unsigned int initial_value);

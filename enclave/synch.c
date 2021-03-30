@@ -9,7 +9,7 @@ void spinlock_init(spinlock_t *lock) {
 }
 
 void spinlock_lock(spinlock_t *lock) {
-    while (__atomic_test_and_set(&lock->locked, __ATOMIC_RELAXED)) {
+    while (lock->locked || __atomic_test_and_set(&lock->locked, __ATOMIC_RELAXED)) {
         PAUSE();
     }
 }
@@ -29,6 +29,7 @@ void sema_up(sema_t *sema) {
 void sema_down(sema_t *sema) {
     unsigned int val;
     do {
+        PAUSE();
         val = sema->value;
     } while (!val || !__atomic_compare_exchange_n(&sema->value, &val, val - 1,
                 false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
