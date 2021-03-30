@@ -10,7 +10,7 @@ COMMON_DEPS = $(COMMON_OBJS:.o=.d)
 
 HOST_DIR = host
 HOST_TARGET = $(HOST_DIR)/parallel
-HOST_OBJS = $(HOST_DIR)/parallel.o
+HOST_OBJS = $(HOST_DIR)/parallel.o $(HOST_DIR)/ocall_mpi.o
 HOST_DEPS = $(HOST_OBJS:.o=.d)
 
 ENCLAVE_DIR = enclave
@@ -22,7 +22,7 @@ ENCLAVE_PUBKEY = $(ENCLAVE_KEY:.pem=.pub)
 ENCLAVE_CONF = $(ENCLAVE_DIR)/$(APP_NAME).conf
 
 CPPFLAGS = -I.
-CFLAGS = -g -O3 -Wall -Wextra
+CFLAGS = -g -O3 -Wall -Wextra $(shell pkg-config mpi --cflags)
 LDFLAGS =
 LDLIBS =
 
@@ -62,7 +62,7 @@ CPPFLAGS += -MMD
 HOST_CPPFLAGS =
 HOST_CFLAGS =
 HOST_LDFLAGS =
-HOST_LDLIBS =
+HOST_LDLIBS = $(shell pkg-config mpi --libs)
 
 HOST_CFLAGS += $(shell pkg-config oehost-$(C_COMPILER) --cflags)
 HOST_LDLIBS += $(shell pkg-config oehost-$(C_COMPILER) --libs)
