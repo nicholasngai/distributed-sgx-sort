@@ -88,9 +88,12 @@ ENCLAVE_LDLIBS += $(shell pkg-config oeenclave-$(C_COMPILER) --variable=openssll
 $(ENCLAVE_DIR)/%.o: CPPFLAGS += $(ENCLAVE_CPPFLAGS)
 $(ENCLAVE_DIR)/%.o: CFLAGS += $(ENCLAVE_CFLAGS)
 
+$(ENCLAVE_DIR)/third_party/liboblivious/liboblivious.a:
+	$(MAKE) -C $(ENCLAVE_DIR)/third_party/liboblivious
+
 $(ENCLAVE_TARGET): LDFLAGS += $(ENCLAVE_LDFLAGS)
 $(ENCLAVE_TARGET): LDLIBS += $(ENCLAVE_LDLIBS)
-$(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(COMMON_OBJS)
+$(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(COMMON_OBJS) $(ENCLAVE_DIR)/third_party/liboblivious/liboblivious.a
 
 $(ENCLAVE_TARGET).signed: $(ENCLAVE_TARGET) $(ENCLAVE_KEY) $(ENCLAVE_PUBKEY) $(ENCLAVE_CONF)
 	$(SGX_SIGN) sign -e $< -k $(ENCLAVE_KEY) -c $(ENCLAVE_CONF)
@@ -105,6 +108,7 @@ $(ENCLAVE_PUBKEY): $(ENCLAVE_KEY) $(ENCLAVE_CONF)
 
 .PHONY: clean
 clean:
+	$(MAKE) -C $(ENCLAVE_DIR)/third_party/liboblivious clean
 	rm -f $(SGX_EDGE) \
 		$(COMMON_DEPS) $(COMMON_OBJS) \
 		$(HOST_TARGET) $(HOST_DEPS) $(HOST_OBJS) \

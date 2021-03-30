@@ -1,0 +1,3 @@
+[submodule "enclave/third_party/liboblivious"]
+	path = enclave/third_party/liboblivious
+	url = https://github.com/nicholasngai/liboblivious.git
