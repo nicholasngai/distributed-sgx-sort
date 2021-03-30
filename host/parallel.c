@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <openenclave/host.h>
 #include "parallel_u.h"
+#include "common/node_t.h"
 
 static int world_rank;
 static int world_size;
@@ -43,15 +44,27 @@ static void *start_thread_work(void *args_) {
 int main(int argc, char *argv[]) {
     oe_enclave_t *enclave;
     oe_result_t result;
-    int ret = 0;
+    int ret = -1;
     size_t num_threads = 1;
 
-    if (argc < 2) {
-        printf("usage: %s enclave_image [num_threads]\n", argv[0]);
+    /* Read arguments. */
+
+    if (argc < 3) {
+        printf("usage: %s enclave_image array_size [num_threads]\n", argv[0]);
     }
 
-    if (argc >= 3) {
-        int n = atol(argv[2]);
+    size_t length;
+    {
+        ssize_t l = atoll(argv[2]);
+        if (l < 0) {
+            fprintf(stderr, "Invalid array size\n");
+            return ret;
+        }
+        length = l;
+    }
+
+    if (argc >= 4) {
+        ssize_t n = atoll(argv[3]);
         if (n < 0) {
             fprintf(stderr, "Invalid number of threads\n");
             return ret;
@@ -62,11 +75,15 @@ int main(int argc, char *argv[]) {
     struct thread_args thread_args[num_threads - 1];
     pthread_t threads[num_threads - 1];
 
+    /* Init MPI. */
+
     ret = init_mpi();
+
+    /* Create enclave. */
 
     if (ret) {
         fprintf(stderr, "Error initializing MPI\n");
-        goto exit;
+        goto exit_mpi_finalize;
     }
 
     result = oe_create_parallel_enclave(
@@ -80,8 +97,10 @@ int main(int argc, char *argv[]) {
     if (result != OE_OK) {
         fprintf(stderr, "Enclave creation failed: %s\n", oe_result_str(result));
         ret = result;
-        goto exit;
+        goto exit_mpi_finalize;
     }
+
+    /* Init enclave with threads. */
 
     result = ecall_set_params(enclave, world_rank, world_size, num_threads);
 
@@ -101,7 +120,20 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    ecall_main(enclave, &ret);
+    /* Init random array. */
+
+    size_t local_length =
+        (world_rank + 1) * length / world_size
+            - world_rank * length / world_size;
+    node_t *arr = malloc(local_length * sizeof(*arr));
+    srand(world_rank + 1);
+    for (size_t i = 0; i < local_length; i++) {
+        arr[i].key = rand();
+    }
+
+    /* Sort and join. */
+
+    ecall_sort(enclave, &ret, arr, length);
 
     for (size_t i = 1; i < num_threads; i++) {
         pthread_join(threads[i - 1], NULL);
@@ -114,8 +146,18 @@ int main(int argc, char *argv[]) {
 
     MPI_Barrier(MPI_COMM_WORLD);
 
+    /* Check array. */
+
+    for (size_t i = 0; i < local_length - 1; i++) {
+        if (arr[i].key > arr[i + 1].key) {
+            printf("Not sorted correctly!\n");
+            break;
+        }
+    }
+
 exit_terminate_enclave:
     oe_terminate_enclave(enclave);
-exit:
+exit_mpi_finalize:
+    MPI_Finalize();
     return ret;
 }

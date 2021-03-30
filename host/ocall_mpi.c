@@ -12,12 +12,12 @@ int ocall_mpi_send_bytes(const unsigned char *buf, size_t count, int dest,
             MPI_COMM_WORLD);
 }
 
-int ocall_mpi_recv_bytes(unsigned char *buf, size_t count, int source, int tag,
-        MPI_Status *status) {
+int ocall_mpi_recv_bytes(unsigned char *buf, size_t count, int source,
+        int tag) {
     if (count > INT_MAX) {
         return MPI_ERR_COUNT;
     }
 
     return MPI_Recv(buf, (int) count, MPI_UNSIGNED_CHAR, source, tag,
-            MPI_COMM_WORLD, status);
+            MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 }

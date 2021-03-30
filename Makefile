@@ -76,10 +76,10 @@ $(HOST_TARGET): $(HOST_OBJS) $(COMMON_OBJS)
 
 # Enclave.
 
-ENCLAVE_CPPFLAGS =
+ENCLAVE_CPPFLAGS = -I$(ENCLAVE_DIR)/third_party/liboblivious/include
 ENCLAVE_CFLAGS =
 ENCLAVE_LDFLAGS =
-ENCLAVE_LDLIBS =
+ENCLAVE_LDLIBS = -L$(ENCLAVE_DIR)/third_party/liboblivious -l:liboblivious.a
 
 ENCLAVE_CFLAGS += $(shell pkg-config oehost-$(C_COMPILER) --cflags)
 ENCLAVE_LDLIBS += $(shell pkg-config oeenclave-$(C_COMPILER) --libs)

@@ -3,6 +3,7 @@ enclave {
     from "platform.edl" import *;
 
     include "mpi.h"
+    include "common/node_t.h"
 
     untrusted {
         int ocall_mpi_send_bytes(
@@ -14,13 +15,12 @@ enclave {
                 [out, count=count] unsigned char *buf,
                 size_t count,
                 int source,
-                int tag,
-                [out] MPI_Status *status);
+                int tag);
     };
 
     trusted {
-        public int ecall_main(void);
         public void ecall_set_params(int world_rank, int world_size, size_t num_threads);
         public void ecall_start_work(size_t thread_id);
+        public int ecall_sort([in, out, count=length] node_t *arr, size_t length);
     };
 };
