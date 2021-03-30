@@ -1,0 +1,13 @@
+host/parallel
+host/parallel_u.h
+host/parallel_u.c
+host/parallel_args.h
+enclave/parallel_enc
+enclave/parallel_enc.signed
+enclave/parallel_t.h
+enclave/parallel_t.c
+enclave/parallel_args.h
+enclave/parallel.pem
+enclave/parallel.pub
+*.d
+*.o
