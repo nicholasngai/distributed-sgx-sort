@@ -51,6 +51,7 @@ int main(int argc, char *argv[]) {
 
     if (argc < 3) {
         printf("usage: %s enclave_image array_size [num_threads]\n", argv[0]);
+        return 0;
     }
 
     size_t length;
