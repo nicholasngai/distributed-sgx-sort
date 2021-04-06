@@ -2,6 +2,7 @@
 #include <mpi.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <time.h>
 #include <openenclave/host.h>
 #include "parallel_u.h"
 #include "common/node_t.h"
@@ -158,7 +159,14 @@ int main(int argc, char **argv) {
         arr[i].key = rand();
     }
 
-    /* Sort and join. */
+    /* Time sort and join. */
+
+    struct timespec start;
+    ret = clock_gettime(CLOCK_REALTIME, &start);
+    if (ret) {
+        perror("starting clock_gettime");
+        goto exit_free_arr;
+    }
 
     result = ecall_sort(enclave, &ret, arr, length, local_length);
     if (result != OE_OK || ret) {
@@ -175,6 +183,13 @@ int main(int argc, char **argv) {
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
+
+    struct timespec end;
+    ret = clock_gettime(CLOCK_REALTIME, &end);
+    if (ret) {
+        perror("ending clock_gettime");
+        goto exit_free_arr;
+    }
 
     /* Check array. */
 
@@ -199,6 +214,16 @@ int main(int argc, char **argv) {
         if (prev_key > arr[0].key) {
             printf("Not sorted correctly!\n");
         }
+    }
+
+    /* Print time taken. */
+
+    if (world_rank == 0) {
+        double seconds_taken =
+            (double) ((end.tv_sec * 1000000000 + end.tv_nsec)
+                    - (start.tv_sec * 1000000000 + start.tv_nsec))
+            / 1000000000;
+        printf("%f\n", seconds_taken);
     }
 
 exit_free_arr:
