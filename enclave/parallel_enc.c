@@ -92,12 +92,12 @@ static int get_index_address(size_t index) {
     return index * world_size / total_length;
 }
 
-static size_t get_local_start(void) {
-    return (world_rank * total_length + world_size - 1) / world_size;
+static size_t get_local_start(int rank) {
+    return (rank * total_length + world_size - 1) / world_size;
 }
 
 static void swap_local(node_t *arr, size_t a, size_t b) {
-    size_t local_start = get_local_start();
+    size_t local_start = get_local_start(world_rank);
     bool cond = arr[a - local_start].key > arr[b - local_start].key;
     o_memswap(&arr[a - local_start], &arr[b - local_start], sizeof(*arr), cond);
 }
@@ -106,7 +106,7 @@ static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx) {
     oe_result_t result;
     int ret;
 
-    size_t local_start = get_local_start();
+    size_t local_start = get_local_start(world_rank);
 
     int remote_rank = get_index_address(remote_idx);
 
@@ -182,21 +182,32 @@ static void sort_threaded(node_t *arr, size_t start, size_t length, size_t skip,
              * right-heavy. */
             size_t left_length = (length + 1) / 2;
             size_t right_length = length / 2;
-            size_t right_threads = num_threads / 2;
-            struct thread_work right_work = {
-                .func = sort_threaded,
-                .arr = arr,
-                .start = start + skip * left_length,
-                .length = right_length,
-                .skip = skip,
-                .right_heavy = false,
-                .num_threads = right_threads,
-            };
-            sema_init(&right_work.done, 0);
-            push_thread_work(&right_work);
-            sort_threaded(arr, start, left_length, skip, false,
-                    num_threads - right_threads);
-            sema_down(&right_work.done);
+            size_t right_start = start + skip * left_length;
+            if (right_start >= get_local_start(world_rank + 1)) {
+                printf("Skip right\n");
+                sort_threaded(arr, start, left_length, skip, false,
+                        num_threads);
+            } else if (start < get_local_start(world_rank)) {
+                printf("Skip left\n");
+                sort_threaded(arr, right_start, right_length, skip, false,
+                        num_threads);
+            } else {
+                size_t right_threads = num_threads / 2;
+                struct thread_work right_work = {
+                    .func = sort_threaded,
+                    .arr = arr,
+                    .start = right_start,
+                    .length = right_length,
+                    .skip = skip,
+                    .right_heavy = false,
+                    .num_threads = right_threads,
+                };
+                sema_init(&right_work.done, 0);
+                push_thread_work(&right_work);
+                sort_threaded(arr, start, left_length, skip, false,
+                        num_threads - right_threads);
+                sema_down(&right_work.done);
+            }
 
             /* Odd-even merge. */
             merge_threaded(arr, start, length, skip, false, num_threads);
@@ -221,9 +232,18 @@ static void sort_single(node_t *arr, size_t start, size_t length, size_t skip,
              * right-heavy. */
             size_t left_length = (length + 1) / 2;
             size_t right_length = length / 2;
-            sort_single(arr, start, left_length, skip, false);
-            sort_single(arr, start + skip * left_length, right_length, skip,
-                    false);
+            size_t right_start = start + skip * left_length;
+            if (right_start >= get_local_start(world_rank + 1)) {
+                printf("Skip right\n");
+                sort_single(arr, start, left_length, skip, false);
+            } else if (start < get_local_start(world_rank)) {
+                printf("Skip left\n");
+                sort_single(arr, right_start, right_length, skip, false);
+            } else {
+                sort_single(arr, start, left_length, skip, false);
+                sort_single(arr, start + skip * left_length, right_length, skip,
+                        false);
+            }
 
             /* Odd-even merge. */
             merge_single(arr, start, length, skip, false);
