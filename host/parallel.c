@@ -8,12 +8,18 @@
 static int world_rank;
 static int world_size;
 
-static int init_mpi(void) {
+static int init_mpi(int *argc, char ***argv) {
     int ret;
 
     /* Initialize MPI. */
-    ret = MPI_Init(NULL, NULL);
+    int threading_provided;
+    ret = MPI_Init_thread(argc, argv, MPI_THREAD_MULTIPLE, &threading_provided);
     if (ret) {
+        goto exit;
+    }
+    if (threading_provided != MPI_THREAD_MULTIPLE) {
+        fprintf(stderr, "This program requires MPI_THREAD_MULTIPLE to be supported");
+        ret = 1;
         goto exit;
     }
 
@@ -40,7 +46,7 @@ static void *start_thread_work(void *enclave_) {
     return 0;
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char **argv) {
     oe_enclave_t *enclave;
     oe_result_t result;
     int ret = -1;
@@ -76,7 +82,7 @@ int main(int argc, char *argv[]) {
 
     /* Init MPI. */
 
-    ret = init_mpi();
+    ret = init_mpi(&argc, &argv);
 
     /* Create enclave. */
 
