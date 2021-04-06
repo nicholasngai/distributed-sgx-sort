@@ -124,8 +124,8 @@ int main(int argc, char *argv[]) {
     /* Init random array. */
 
     size_t local_length =
-        (world_rank + 1) * length / world_size
-            - world_rank * length / world_size;
+        ((world_rank + 1) * length + world_size - 1) / world_size
+            - (world_rank * length + world_size - 1) / world_size;
     node_t *arr = malloc(local_length * sizeof(*arr));
     srand(world_rank + 1);
     for (size_t i = 0; i < local_length; i++) {

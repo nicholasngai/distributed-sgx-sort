@@ -43,7 +43,7 @@ static void get_index_address(size_t index, size_t length, int *rank) {
 
 static size_t get_local_start(size_t length) {
     // TODO Make this world for individual threads, too.
-    return world_rank * length / world_size;
+    return (world_rank * length + world_size - 1) / world_size;
 }
 
 static void swap_local(node_t *arr, size_t length, size_t a, size_t b) {
