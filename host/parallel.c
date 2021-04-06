@@ -138,7 +138,7 @@ int main(int argc, char *argv[]) {
 
     /* Sort and join. */
 
-    result = ecall_sort(enclave, &ret, arr, length);
+    result = ecall_sort(enclave, &ret, arr, length, local_length);
     if (result != OE_OK || ret) {
         goto exit_free_arr;
     }

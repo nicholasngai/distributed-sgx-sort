@@ -5,6 +5,8 @@
 #include "parallel_t.h"
 #include "synch.h"
 
+#define UNUSED __attribute__((unused))
+
 static int world_rank;
 static int world_size;
 static size_t num_threads;
@@ -111,7 +113,7 @@ static void swap(size_t a, size_t b, void *args_) {
     }
 }
 
-int ecall_sort(node_t *arr, size_t length) {
+int ecall_sort(node_t *arr, size_t length, size_t local_length UNUSED) {
     /* Start work for this thread. */
     ecall_start_work(0);
 
