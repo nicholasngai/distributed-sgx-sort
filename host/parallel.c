@@ -127,6 +127,10 @@ int main(int argc, char *argv[]) {
         ((world_rank + 1) * length + world_size - 1) / world_size
             - (world_rank * length + world_size - 1) / world_size;
     node_t *arr = malloc(local_length * sizeof(*arr));
+    if (!arr) {
+        perror("malloc arr");
+        goto exit_terminate_enclave;
+    }
     srand(world_rank + 1);
     for (size_t i = 0; i < local_length; i++) {
         arr[i].key = rand();
@@ -134,7 +138,10 @@ int main(int argc, char *argv[]) {
 
     /* Sort and join. */
 
-    ecall_sort(enclave, &ret, arr, length);
+    result = ecall_sort(enclave, &ret, arr, length);
+    if (result != OE_OK || ret) {
+        goto exit_free_arr;
+    }
 
     for (size_t i = 1; i < num_threads; i++) {
         pthread_join(threads[i - 1], NULL);
@@ -156,6 +163,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
+exit_free_arr:
+    free(arr);
 exit_terminate_enclave:
     oe_terminate_enclave(enclave);
 exit_mpi_finalize:
