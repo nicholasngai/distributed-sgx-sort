@@ -1,3 +1,4 @@
+#include <mpi.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <openenclave/host.h>
@@ -160,6 +161,22 @@ int main(int argc, char *argv[]) {
         if (arr[i].key > arr[i + 1].key) {
             printf("Not sorted correctly!\n");
             break;
+        }
+    }
+
+    if (world_rank < world_size - 1) {
+        /* Send largest value to next node. */
+        MPI_Send(&arr[local_length - 1].key, 1, MPI_UNSIGNED_LONG_LONG,
+                world_rank + 1, 0, MPI_COMM_WORLD);
+    }
+
+    if (world_rank > 0) {
+        /* Receive previous node's largest value and compare. */
+        uint64_t prev_key;
+        MPI_Recv(&prev_key, 1, MPI_UNSIGNED_LONG_LONG, world_rank - 1, 0,
+                MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        if (prev_key > arr[0].key) {
+            printf("Not sorted correctly!\n");
         }
     }
 
