@@ -184,11 +184,9 @@ static void sort_threaded(node_t *arr, size_t start, size_t length, size_t skip,
             size_t right_length = length / 2;
             size_t right_start = start + skip * left_length;
             if (right_start >= get_local_start(world_rank + 1)) {
-                printf("Skip right\n");
                 sort_threaded(arr, start, left_length, skip, false,
                         num_threads);
             } else if (start < get_local_start(world_rank)) {
-                printf("Skip left\n");
                 sort_threaded(arr, right_start, right_length, skip, false,
                         num_threads);
             } else {
@@ -234,10 +232,8 @@ static void sort_single(node_t *arr, size_t start, size_t length, size_t skip,
             size_t right_length = length / 2;
             size_t right_start = start + skip * left_length;
             if (right_start >= get_local_start(world_rank + 1)) {
-                printf("Skip right\n");
                 sort_single(arr, start, left_length, skip, false);
             } else if (start < get_local_start(world_rank)) {
-                printf("Skip left\n");
                 sort_single(arr, right_start, right_length, skip, false);
             } else {
                 sort_single(arr, start, left_length, skip, false);
