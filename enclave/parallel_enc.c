@@ -14,8 +14,8 @@ static size_t total_length;
 /* Thread synchronization. */
 
 struct thread_work {
-    void (*func)(node_t *arr, size_t start, size_t length, size_t skip, bool right_heavy,
-            size_t num_threads);
+    void (*func)(node_t *arr, size_t start, size_t length, size_t skip, bool
+            right_heavy, size_t num_threads);
     node_t *arr;
     size_t start;
     size_t length;
@@ -156,8 +156,8 @@ static void sort_threaded(node_t *arr, size_t start, size_t length, size_t skip,
         bool right_heavy, size_t num_threads);
 static void sort_single(node_t *arr, size_t start, size_t length, size_t skip,
         bool right_heavy);
-static void merge_threaded(node_t *arr, size_t start, size_t length, size_t skip,
-        bool right_heavy, size_t num_threads);
+static void merge_threaded(node_t *arr, size_t start, size_t length, size_t
+        skip, bool right_heavy, size_t num_threads);
 static void merge_single(node_t *arr, size_t start, size_t length, size_t skip,
         bool right_heavy);
 
@@ -252,8 +252,8 @@ static void sort_single(node_t *arr, size_t start, size_t length, size_t skip,
     }
 }
 
-static void merge_threaded(node_t *arr, size_t start, size_t length, size_t skip,
-        bool right_heavy, size_t num_threads) {
+static void merge_threaded(node_t *arr, size_t start, size_t length, size_t
+        skip, bool right_heavy, size_t num_threads) {
     if (num_threads == 1) {
         merge_single(arr, start, length, skip, right_heavy);
         return;
