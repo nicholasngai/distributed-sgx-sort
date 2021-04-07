@@ -21,6 +21,6 @@ enclave {
     trusted {
         public void ecall_set_params(int world_rank, int world_size, size_t num_threads);
         public void ecall_start_work(void);
-        public int ecall_sort([in, out, count=local_length] node_t *arr, size_t total_length, size_t local_length);
+        public int ecall_sort(node_t *arr, size_t total_length, size_t local_length);
     };
 };
