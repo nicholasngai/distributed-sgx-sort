@@ -9,13 +9,13 @@ void spinlock_init(spinlock_t *lock) {
 }
 
 void spinlock_lock(spinlock_t *lock) {
-    while (lock->locked || __atomic_test_and_set(&lock->locked, __ATOMIC_RELAXED)) {
+    while (lock->locked || __atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE)) {
         PAUSE();
     }
 }
 
 void spinlock_unlock(spinlock_t *lock) {
-    __atomic_clear(&lock->locked, __ATOMIC_RELAXED);
+    __atomic_clear(&lock->locked, __ATOMIC_RELEASE);
 }
 
 void sema_init(sema_t *sema, unsigned int initial_value) {
@@ -23,7 +23,7 @@ void sema_init(sema_t *sema, unsigned int initial_value) {
 }
 
 void sema_up(sema_t *sema) {
-    __atomic_add_fetch(&sema->value, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&sema->value, 1, __ATOMIC_ACQUIRE);
 }
 
 void sema_down(sema_t *sema) {
@@ -32,7 +32,7 @@ void sema_down(sema_t *sema) {
         PAUSE();
         val = sema->value;
     } while (!val || !__atomic_compare_exchange_n(&sema->value, &val, val - 1,
-                false, __ATOMIC_RELAXED, __ATOMIC_RELAXED));
+                false, __ATOMIC_RELEASE, __ATOMIC_RELAXED));
 }
 
 struct condvar_waiter {
