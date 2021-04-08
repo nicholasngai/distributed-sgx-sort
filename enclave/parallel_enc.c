@@ -14,13 +14,12 @@ static size_t total_length;
 /* Thread synchronization. */
 
 struct thread_work {
-    void (*func)(node_t *arr, size_t start, size_t length, size_t skip, bool
-            right_heavy, size_t num_threads);
+    void (*func)(node_t *arr, size_t start, size_t length, bool descending,
+            size_t num_threads);
     node_t *arr;
     size_t start;
     size_t length;
-    size_t skip;
-    bool right_heavy;
+    bool descending;
     size_t num_threads;
 
     sema_t done;
@@ -96,13 +95,15 @@ static size_t get_local_start(int rank) {
     return (rank * total_length + world_size - 1) / world_size;
 }
 
-static void swap_local(node_t *arr, size_t a, size_t b) {
+static void swap_local(node_t *arr, size_t a, size_t b, bool descending) {
     size_t local_start = get_local_start(world_rank);
-    bool cond = arr[a - local_start].key > arr[b - local_start].key;
+    bool cond =
+        (arr[a - local_start].key > arr[b - local_start].key) != descending;
     o_memswap(&arr[a - local_start], &arr[b - local_start], sizeof(*arr), cond);
 }
 
-static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx) {
+static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx,
+        bool descending) {
     oe_result_t result;
     int ret;
 
@@ -127,44 +128,46 @@ static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx) {
     }
 
     /* Replace the local element with the received remote element if necessary.
-     * If the local index is lower, then we swap if the local element is lower.
-     * Likewise, if the local index is higher, than we swap if the local element
-     * is higher. */
+     * Assume we are sorting ascending. If the local index is lower, then we
+     * swap if the local element is lower.  Likewise, if the local index is
+     * higher, than we swap if the local element is higher. If descending,
+     * everything is reversed. */
     bool cond =
         (local_idx < remote_idx)
             == (arr[local_idx - local_start].key > recv.key);
+    cond = cond != descending;
     o_memcpy(&arr[local_idx - local_start], &recv,
             sizeof(arr[local_idx - local_start]), cond);
 }
 
-static void swap(node_t *arr, size_t a, size_t b) {
+static void swap(node_t *arr, size_t a, size_t b, bool descending) {
     int a_rank = get_index_address(a);
     int b_rank = get_index_address(b);
 
     if (a_rank == world_rank && b_rank == world_rank) {
-        swap_local(arr, a, b);
+        swap_local(arr, a, b, descending);
     } else if (a_rank == world_rank) {
-        swap_remote(arr, a, b);
+        swap_remote(arr, a, b, descending);
     } else if (b_rank == world_rank) {
-        swap_remote(arr, b, a);
+        swap_remote(arr, b, a, descending);
     }
 }
 
-/* Odd-even mergesort. */
+/* Bitonic sort. */
 
-static void sort_threaded(node_t *arr, size_t start, size_t length, size_t skip,
-        bool right_heavy, size_t num_threads);
-static void sort_single(node_t *arr, size_t start, size_t length, size_t skip,
-        bool right_heavy);
-static void merge_threaded(node_t *arr, size_t start, size_t length, size_t
-        skip, bool right_heavy, size_t num_threads);
-static void merge_single(node_t *arr, size_t start, size_t length, size_t skip,
-        bool right_heavy);
+static void sort_threaded(node_t *arr, size_t start, size_t length,
+        bool descending, size_t num_threads);
+static void sort_single(node_t *arr, size_t start, size_t length,
+        bool descending);
+static void merge_threaded(node_t *arr, size_t start, size_t length,
+        bool descending, size_t num_threads);
+static void merge_single(node_t *arr, size_t start, size_t length,
+        bool descending);
 
-static void sort_threaded(node_t *arr, size_t start, size_t length, size_t skip,
-        bool right_heavy UNUSED, size_t num_threads) {
+static void sort_threaded(node_t *arr, size_t start, size_t length,
+        bool descending UNUSED, size_t num_threads) {
     if (num_threads == 1) {
-        sort_single(arr, start, length, skip, right_heavy);
+        sort_single(arr, start, length, descending);
         return;
     }
 
@@ -174,84 +177,87 @@ static void sort_threaded(node_t *arr, size_t start, size_t length, size_t skip,
             /* Do nothing. */
             break;
         case 2: {
-            swap(arr, start, start + skip);
+            swap(arr, start, start + 1, descending);
             break;
         }
         default: {
-            /* Sort left and right halves. Sorting doesn't care if it's
-             * right-heavy. */
-            size_t left_length = (length + 1) / 2;
-            size_t right_length = length / 2;
-            size_t right_start = start + skip * left_length;
+            /* Sort left half forwards and right half in reverse to create a
+             * bitonic sequence. */
+            size_t left_length = length / 2;
+            size_t right_length = length - left_length;
+            size_t right_start = start + left_length;
             if (right_start >= get_local_start(world_rank + 1)) {
-                sort_threaded(arr, start, left_length, skip, false,
-                        num_threads);
+                /* Only sort the left. The right is completely remote. */
+                sort_threaded(arr, start, left_length, descending, num_threads);
             } else if (start < get_local_start(world_rank)) {
-                sort_threaded(arr, right_start, right_length, skip, false,
+                /* Only sort the right. The left is completely remote. */
+                sort_threaded(arr, right_start, right_length, !descending,
                         num_threads);
             } else {
-                size_t right_threads = num_threads / 2;
+                /* Sort both. */
+                size_t right_threads = num_threads * right_length / length;
                 struct thread_work right_work = {
                     .func = sort_threaded,
                     .arr = arr,
                     .start = right_start,
                     .length = right_length,
-                    .skip = skip,
-                    .right_heavy = false,
+                    .descending = !descending,
                     .num_threads = right_threads,
                 };
                 sema_init(&right_work.done, 0);
                 push_thread_work(&right_work);
-                sort_threaded(arr, start, left_length, skip, false,
+                sort_threaded(arr, start, left_length, descending,
                         num_threads - right_threads);
                 sema_down(&right_work.done);
             }
 
-            /* Odd-even merge. */
-            merge_threaded(arr, start, length, skip, false, num_threads);
+            /* Bitonic merge. */
+            merge_threaded(arr, start, length, descending, num_threads);
             break;
         }
     }
 }
 
-static void sort_single(node_t *arr, size_t start, size_t length, size_t skip,
-        bool right_heavy UNUSED) {
+static void sort_single(node_t *arr, size_t start, size_t length,
+        bool descending) {
     switch (length) {
         case 0:
         case 1:
             /* Do nothing. */
             break;
         case 2: {
-            swap(arr, start, start + skip);
+            swap(arr, start, start + 1, descending);
             break;
         }
         default: {
-            /* Sort left and right halves. Sorting doesn't care if it's
-             * right-heavy. */
-            size_t left_length = (length + 1) / 2;
-            size_t right_length = length / 2;
-            size_t right_start = start + skip * left_length;
+            /* Sort left half forwards and right half in reverse to create a
+             * bitonic sequence. */
+            size_t left_length = length / 2;
+            size_t right_length = length - left_length;
+            size_t right_start = start + left_length;
             if (right_start >= get_local_start(world_rank + 1)) {
-                sort_single(arr, start, left_length, skip, false);
+                /* Only sort the left. The right is completely remote. */
+                sort_single(arr, start, left_length, descending);
             } else if (start < get_local_start(world_rank)) {
-                sort_single(arr, right_start, right_length, skip, false);
+                /* Only sort the right. The left is completely remote. */
+                sort_single(arr, right_start, right_length, !descending);
             } else {
-                sort_single(arr, start, left_length, skip, false);
-                sort_single(arr, start + skip * left_length, right_length, skip,
-                        false);
+                /* Sort both. */
+                sort_single(arr, start, left_length, descending);
+                sort_single(arr, right_start, right_length, !descending);
             }
 
-            /* Odd-even merge. */
-            merge_single(arr, start, length, skip, false);
+            /* Bitonic merge. */
+            merge_single(arr, start, length, descending);
             break;
         }
     }
 }
 
-static void merge_threaded(node_t *arr, size_t start, size_t length, size_t
-        skip, bool right_heavy, size_t num_threads) {
+static void merge_threaded(node_t *arr, size_t start, size_t length,
+        bool descending, size_t num_threads) {
     if (num_threads == 1) {
-        merge_single(arr, start, length, skip, right_heavy);
+        merge_single(arr, start, length, descending);
         return;
     }
 
@@ -261,103 +267,94 @@ static void merge_threaded(node_t *arr, size_t start, size_t length, size_t
             /* Do nothing. */
             break;
         case 2: {
-            swap(arr, start, start + skip);
+            swap(arr, start, start + 1, descending);
             break;
         }
         default: {
-            /* Odd slices are right-heavy iff the odd slice has an odd length
-             * and either the current slice is right-heavy or the current slice
-             * has an even length. Again, the short-circuit operator is fine
-             * because it will be deterministic. */
-            size_t odd_length = length / 2;
-            bool odd_right_heavy = odd_length % 2 == 1
-                && (right_heavy || length % 2 == 0);
-            size_t odd_threads = num_threads / 2;
-            struct thread_work odd_work = {
-                .func = merge_threaded,
-                .arr = arr,
-                .start = start + skip,
-                .length = odd_length,
-                .skip = skip * 2,
-                .right_heavy = odd_right_heavy,
-                .num_threads = odd_threads,
-            };
-            sema_init(&odd_work.done, 0);
-            push_thread_work(&odd_work);
-
-            /* Even slices are right-heavy iff the even slice has an odd length
-             * and the current slice is right-heavy. The short-circuit operator
-             * is fine because the whole sort is determinstic. */
-            size_t even_length = (length + 1) / 2;
-            bool even_right_heavy = even_length % 2 == 1 && right_heavy;
-            merge_threaded(arr, start, even_length, skip * 2, even_right_heavy,
-                    num_threads - odd_threads);
-
-            sema_down(&odd_work.done);
-
-            /* Sort adjacent pairs such that one pair crosses the left-right
-             * boundary, which depends on whether the sorted list is
-             * right-heavy. If the left sorted half has an even length, then we
-             * start at 1; otherweise, we start at 0. We compute this by taking
-             * half the total length, and the left half will have an extra
-             * member if the total length is odd, and we are not right-heavy.
-             * The short-circuit operator is deterministic. Taking this mod 2
-             * and then inverting it by subtracting it from 1 gives the
-             * starting index. */
-            for (size_t i = 1 - (length / 2 + (length % 2 == 1 && !right_heavy)) % 2;
-                    i < length - 1; i += 2) {
-                swap(arr, start + skip * i, start + skip * (i + 1));
+            /* If the length is odd, bubble sort an element to the end of the
+             * array and leave it there. */
+            size_t left_length = length / 2;
+            size_t right_length = length - left_length;
+            size_t right_start = start + left_length;
+            for (size_t i = 0; i + left_length < length; i++) {
+                swap(arr, start + i, start + i + left_length, descending);
+            }
+            if (right_start >= get_local_start(world_rank + 1)) {
+                /* Only merge the left. The right is completely remote. */
+                merge_threaded(arr, start, left_length, descending,
+                        num_threads);
+            } else if (start < get_local_start(world_rank)) {
+                /* Only merge the right. The left is completely remote. */
+                merge_threaded(arr, right_start, right_length, descending,
+                        num_threads);
+            } else {
+                /* Merge both. */
+                size_t right_threads = num_threads / 2;
+                struct thread_work right_work = {
+                    .func = merge_threaded,
+                    .arr = arr,
+                    .start = right_start,
+                    .length = right_length,
+                    .descending = descending,
+                    .num_threads = right_threads,
+                };
+                sema_init(&right_work.done, 0);
+                push_thread_work(&right_work);
+                merge_threaded(arr, start, left_length, descending,
+                        num_threads - right_threads);
+                sema_down(&right_work.done);
             }
             break;
          }
     }
 }
 
-static void merge_single(node_t *arr, size_t start, size_t length, size_t skip,
-        bool right_heavy) {
+static void merge_single(node_t *arr, size_t start, size_t length,
+        bool descending) {
     switch (length) {
         case 0:
         case 1:
             /* Do nothing. */
             break;
         case 2: {
-            swap(arr, start, start + skip);
+            swap(arr, start, start + 1, descending);
             break;
         }
         default: {
-            /* Even slices are right-heavy iff the even slice has an odd length
-             * and the current slice is right-heavy. The short-circuit operator
-             * is fine because the whole sort is determinstic. */
-            size_t even_length = (length + 1) / 2;
-            bool even_right_heavy = even_length % 2 == 1 && right_heavy;
-            merge_single(arr, start, even_length, skip * 2, even_right_heavy);
-
-            /* Odd slices are right-heavy iff the odd slice has an odd length
-             * and either the current slice is right-heavy or the current slice
-             * has an even length. Again, the short-circuit operator is fine
-             * because it will be deterministic. */
-            size_t odd_length = length / 2;
-            bool odd_right_heavy = odd_length % 2 == 1
-                && (right_heavy || length % 2 == 0);
-            merge_single(arr, start + skip, odd_length, skip * 2,
-                    odd_right_heavy);
-
-            /* Sort adjacent pairs such that one pair crosses the left-right
-             * boundary, which depends on whether the sorted list is
-             * right-heavy. If the left sorted half has an even length, then we
-             * start at 1; otherweise, we start at 0. We compute this by taking
-             * half the total length, and the left half will have an extra
-             * member if the total length is odd, and we are not right-heavy.
-             * The short-circuit operator is deterministic. Taking this mod 2
-             * and then inverting it by subtracting it from 1 gives the
-             * starting index. */
-            for (size_t i = 1 - (length / 2 + (length % 2 == 1 && !right_heavy)) % 2;
-                    i < length - 1; i += 2) {
-                swap(arr, start + skip * i, start + skip * (i + 1));
+            /* If the length is odd, bubble sort an element to the end of the
+             * array and leave it there. */
+            size_t left_length = length / 2;
+            size_t right_length = length - left_length;
+            size_t right_start = start + left_length;
+            for (size_t i = 0; i + left_length < length; i++) {
+                swap(arr, start + i, start + i + left_length, descending);
+            }
+            if (right_start >= get_local_start(world_rank + 1)) {
+                /* Only merge the left. The right is completely remote. */
+                merge_single(arr, start, left_length, descending);
+            } else if (start < get_local_start(world_rank)) {
+                /* Only merge the right. The left is completely remote. */
+                merge_single(arr, right_start, right_length, descending);
+            } else {
+                /* Merge both. */
+                merge_single(arr, start, left_length, descending);
+                merge_single(arr, right_start, right_length, descending);
             }
             break;
          }
     }
+}
+
+/* Helpers. */
+
+static size_t popcount(size_t n) {
+    size_t count = 0;
+    for (size_t t = n; t > 0; t >>= 1) {
+        if ((t & 0x1) == 1) {
+            count++;
+        }
+    }
+    return count;
 }
 
 /* ecalls. */
@@ -375,8 +372,8 @@ void ecall_start_work(void) {
 
     struct thread_work *work = pop_thread_work();
     while (work) {
-        work->func(work->arr, work->start, work->length, work->skip,
-                work->right_heavy, work->num_threads);
+        work->func(work->arr, work->start, work->length, work->descending,
+                work->num_threads);
         sema_up(&work->done);
         work = pop_thread_work();
     }
@@ -386,6 +383,11 @@ void ecall_start_work(void) {
 }
 
 int ecall_sort(node_t *arr, size_t total_length_, size_t local_length UNUSED) {
+    if (popcount(total_length_) != 1) {
+        fprintf(stderr, "Length must be a multiple of 2\n");
+        return -1;
+    }
+
     total_length = total_length_;
 
     /* Wait for all threads to enter the enclave. */
@@ -393,7 +395,7 @@ int ecall_sort(node_t *arr, size_t total_length_, size_t local_length UNUSED) {
     wait_for_all_threads();
 
     /* Start work for this thread. */
-    sort_threaded(arr, 0, total_length, 1, false, total_num_threads);
+    sort_threaded(arr, 0, total_length, false, total_num_threads);
 
     /* Release threads and wait until all leave. */
     __atomic_store_n(&work_done, true, __ATOMIC_RELAXED);
