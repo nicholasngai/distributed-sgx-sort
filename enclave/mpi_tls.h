@@ -3,7 +3,7 @@
 
 #include <stddef.h>
 
-int mpi_tls_init(size_t world_size);
+int mpi_tls_init(size_t world_rank, size_t world_size);
 void mpi_tls_free(void);
 int mpi_tls_send_bytes(const unsigned char *buf, size_t count, int dest,
         int tag);

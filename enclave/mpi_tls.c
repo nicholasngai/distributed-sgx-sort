@@ -1,6 +1,7 @@
 #include "mpi_tls.h"
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
 #include <openssl/ssl.h>
 #include <openenclave/enclave.h>
 #include "parallel_t.h"
@@ -11,10 +12,10 @@ struct mpi_tls_session {
     BIO *wbio;
 };
 
+static size_t world_rank;
 static size_t world_size;
 static SSL_CTX *ctx;
-static struct mpi_tls_session server_session;
-static struct mpi_tls_session *client_sessions;
+static struct mpi_tls_session *sessions;
 
 static int init_session(struct mpi_tls_session *session) {
     session->ssl = SSL_new(ctx);
@@ -49,7 +50,8 @@ static void free_session(struct mpi_tls_session *session) {
     /* The BIOs are already freed by SSL_free. */
 }
 
-int mpi_tls_init(size_t world_size_) {
+int mpi_tls_init(size_t world_rank_, size_t world_size_) {
+    world_rank = world_rank_;
     world_size = world_size_;
 
     /* Initialize global context. */
@@ -60,35 +62,39 @@ int mpi_tls_init(size_t world_size_) {
         goto exit;
     }
 
-    /* Initialize server session. */
-    if (init_session(&server_session)) {
+    /* Initialize TLS sessions. */
+    sessions = malloc(world_size * sizeof(*sessions));
+    if (!sessions) {
         goto exit_free_ctx;
     }
-
-    /* Initialize client sessions. */
-    client_sessions = malloc(world_size * sizeof(*client_sessions));
-    if (!client_sessions) {
-        goto exit_free_server_session;
-    }
     for (size_t i = 0; i < world_size; i++) {
-        int ret = init_session(&client_sessions[i]);
+        if (i == world_size) {
+            /* Skip our own rank and zero out all memory. */
+            memset(&sessions[i], '\0', sizeof(sessions[i]));
+            continue;
+        }
+
+        int ret = init_session(&sessions[i]);
         if (ret) {
             for (size_t j = 0; j < i; j++) {
-                free_session(&client_sessions[j]);
+                free_session(&sessions[j]);
             }
-            free(client_sessions);
-            goto exit_free_server_session;
+            free(sessions);
+            goto exit_free_ctx;
+        }
+
+        /* We act as clients to lower ranks and servers to higher ranks. */
+        if (i > world_rank) {
+            SSL_set_accept_state(sessions[i].ssl);
         }
     }
 
     return 0;
 
     for (size_t i = 0; i < world_size; i++) {
-        free_session(&client_sessions[i]);
+        free_session(&sessions[i]);
     }
-    free(client_sessions);
-exit_free_server_session:
-    free_session(&server_session);
+    free(sessions);
 exit_free_ctx:
     SSL_CTX_free(ctx);
 exit:
@@ -97,10 +103,9 @@ exit:
 
 void mpi_tls_free(void) {
     for (size_t i = 0; i < world_size; i++) {
-        free_session(&client_sessions[i]);
+        free_session(&sessions[i]);
     }
-    free(client_sessions);
-    free_session(&server_session);
+    free(sessions);
     SSL_CTX_free(ctx);
 }
 

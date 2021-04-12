@@ -390,7 +390,7 @@ int ecall_sort(node_t *arr, size_t total_length_, size_t local_length UNUSED) {
     total_length = total_length_;
 
     /* Initialize TLS over MPI. */
-    if (mpi_tls_init((size_t) world_size)) {
+    if (mpi_tls_init((size_t) world_rank, (size_t) world_size)) {
         perror("mpi_tls_init");
         return -1;
     }
