@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <liboblivious/primitives.h>
 #include <openenclave/enclave.h>
+#include "mpi_tls.h"
 #include "parallel_t.h"
 #include "synch.h"
 
@@ -104,7 +105,6 @@ static void swap_local(node_t *arr, size_t a, size_t b, bool descending) {
 
 static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx,
         bool descending) {
-    oe_result_t result;
     int ret;
 
     size_t local_start = get_local_start(world_rank);
@@ -112,19 +112,18 @@ static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx,
     int remote_rank = get_index_address(remote_idx);
 
     /* Send our current node. */
-    result = ocall_mpi_send_bytes(&ret,
-            (unsigned char *) &arr[local_idx - local_start],
+    ret = mpi_tls_send_bytes((unsigned char *) &arr[local_idx - local_start],
             sizeof(arr[local_idx - local_start]), remote_rank, remote_idx);
-    if (result != OE_OK || ret) {
-        fprintf(stderr, "ocall_mpi_send_bytes: %s\n", oe_result_str(result));
+    if (ret) {
+        perror("mpi_tls_send_bytes");
     }
 
     /* Receive their node. */
     node_t recv;
-    result = ocall_mpi_recv_bytes(&ret, (unsigned char *) &recv, sizeof(recv),
-            remote_rank, local_idx);
-    if (result != OE_OK || ret) {
-        fprintf(stderr, "ocall_mpi_recv_bytes: %s\n", oe_result_str(result));
+    ret = mpi_tls_recv_bytes((unsigned char *) &recv, sizeof(recv), remote_rank,
+            local_idx);
+    if (ret) {
+        perror("mpi_tls_recv_bytes");
     }
 
     /* Replace the local element with the received remote element if necessary.
@@ -390,6 +389,12 @@ int ecall_sort(node_t *arr, size_t total_length_, size_t local_length UNUSED) {
 
     total_length = total_length_;
 
+    /* Initialize TLS over MPI. */
+    if (mpi_tls_init((size_t) world_size)) {
+        perror("mpi_tls_init");
+        return -1;
+    }
+
     /* Wait for all threads to enter the enclave. */
     work_done = false;
     wait_for_all_threads();
@@ -401,6 +406,9 @@ int ecall_sort(node_t *arr, size_t total_length_, size_t local_length UNUSED) {
     __atomic_store_n(&work_done, true, __ATOMIC_RELAXED);
     wait_for_all_threads();
     work_done = false;
+
+    /* Free TLS over MPI. */
+    mpi_tls_free();
 
     return 0;
 }
