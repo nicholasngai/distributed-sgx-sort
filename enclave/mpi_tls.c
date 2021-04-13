@@ -258,7 +258,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_) {
 
         int ret = init_session(&sessions[i]);
         if (ret) {
-            printf("Failed to initialize TLS session structures\n");
+            fprintf(stderr, "Failed to initialize TLS session structures\n");
             for (size_t j = 0; j < i; j++) {
                 free_session(&sessions[j]);
             }
@@ -306,7 +306,13 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_) {
             if (bytes_to_send > 0) {
                 result = ocall_mpi_send_bytes(&ret, buffer, bytes_to_send, i,
                         0);
-                if (result != OE_OK || ret) {
+                if (result != OE_OK) {
+                    fprintf(stderr, "ocall_mpi_send_bytes: %s\n",
+                            oe_result_str(result));
+                    goto exit_free_sessions;
+                }
+                if (ret) {
+                    fprintf(stderr, "Failed to send TLS handshake bytes\n");
                     goto exit_free_sessions;
                 }
             }
@@ -315,7 +321,13 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_) {
             int bytes_received;
             result = ocall_mpi_try_recv_bytes(&bytes_received, buffer,
                     BUFFER_SIZE, i, 0);
-            if (result != OE_OK || bytes_received < 0) {
+            if (result != OE_OK) {
+                fprintf(stderr, "ocall_mpi_try_recv_bytes: %s\n",
+                        oe_result_str(result));
+                goto exit_free_sessions;
+            }
+            if (bytes_received < 0) {
+                fprintf(stderr, "Failed to recieve TLS handshake bytes\n");
                 goto exit_free_sessions;
             }
             if (bytes_received > 0) {
