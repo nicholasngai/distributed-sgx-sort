@@ -156,10 +156,14 @@ int main(int argc, char **argv) {
         goto exit_mpi_finalize;
     }
 
+    int flags = OE_ENCLAVE_FLAG_DEBUG;
+#ifdef OE_SIMULATION
+    flags |= OE_ENCLAVE_FLAG_SIMULATE;
+#endif
     result = oe_create_parallel_enclave(
             argv[1],
             OE_ENCLAVE_TYPE_AUTO,
-            OE_ENCLAVE_FLAG_DEBUG | OE_ENCLAVE_FLAG_SIMULATE,
+            flags,
             NULL,
             0,
             &enclave);
