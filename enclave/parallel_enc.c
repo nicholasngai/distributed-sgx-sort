@@ -115,7 +115,7 @@ static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx,
     ret = mpi_tls_send_bytes((unsigned char *) &arr[local_idx - local_start],
             sizeof(arr[local_idx - local_start]), remote_rank, remote_idx);
     if (ret) {
-        perror("mpi_tls_send_bytes");
+        fprintf(stderr, "mpi_tls_send_bytes: Error sending bytes\n");
     }
 
     /* Receive their node. */
@@ -123,7 +123,7 @@ static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx,
     ret = mpi_tls_recv_bytes((unsigned char *) &recv, sizeof(recv), remote_rank,
             local_idx);
     if (ret) {
-        perror("mpi_tls_recv_bytes");
+        fprintf(stderr, "mpi_tls_recv_bytes: Error receiving bytes\n");
     }
 
     /* Replace the local element with the received remote element if necessary.
@@ -391,7 +391,7 @@ int ecall_sort(node_t *arr, size_t total_length_, size_t local_length UNUSED) {
 
     /* Initialize TLS over MPI. */
     if (mpi_tls_init((size_t) world_rank, (size_t) world_size)) {
-        perror("mpi_tls_init");
+        fprintf(stderr, "mpi_tls_init: Error\n");
         return -1;
     }
 

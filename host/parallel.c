@@ -59,6 +59,49 @@ int ocall_mpi_recv_bytes(unsigned char *buf, size_t count, int source,
             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 }
 
+int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
+        int tag) {
+    if (count > INT_MAX) {
+        return MPI_ERR_COUNT;
+    }
+
+    MPI_Status status;
+    int flag;
+    int ret;
+
+    /* Probe for an available message. */
+    ret = MPI_Iprobe(source, tag, MPI_COMM_WORLD, &flag, &status);
+    if (ret) {
+        return -1;
+    }
+
+    /* Return if no message available. */
+    if (!flag) {
+        return 0;
+    }
+
+    /* Get the number of bytes to receive. */
+    int bytes_to_recv;
+    ret = MPI_Get_count(&status, MPI_UNSIGNED_CHAR, &bytes_to_recv);
+    if (ret) {
+        return -1;
+    }
+
+    /* Return an error if the number of bytes is larger than the buffer. */
+    if (bytes_to_recv > (int) count) {
+        return -1;
+    }
+
+    /* Read in that number of bytes. */
+    ret = MPI_Recv(buf, bytes_to_recv, MPI_UNSIGNED_CHAR, source, tag,
+            MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    if (ret) {
+        return -1;
+    }
+
+    return bytes_to_recv;
+}
+
 static void *start_thread_work(void *enclave_) {
     oe_enclave_t *enclave = enclave_;
     oe_result_t result = ecall_start_work(enclave);

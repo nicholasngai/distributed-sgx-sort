@@ -16,6 +16,11 @@ enclave {
                 size_t count,
                 int source,
                 int tag);
+        int ocall_mpi_try_recv_bytes(
+                [out, count=count] unsigned char *buf,
+                size_t count,
+                int source,
+                int tag);
     };
 
     trusted {
