@@ -162,7 +162,7 @@ static int load_certificate_and_key(X509 **cert, EVP_PKEY **privkey) {
                 "C=US,"
                 "ST=California,"
                 "L=Berkeley,"
-                "O=\"University of California, Berkeley\","
+                "O=University of California\\, Berkeley,"
                 "CN=Distributed SGX Sort",
             privkey_buf, privkey_buf_size, pubkey_buf, pubkey_buf_size, NULL, 0,
             &cert_buf, &cert_buf_size);
