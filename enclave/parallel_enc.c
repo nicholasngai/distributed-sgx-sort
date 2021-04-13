@@ -188,7 +188,7 @@ static void sort_threaded(node_t *arr, size_t start, size_t length,
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only sort the left. The right is completely remote. */
                 sort_threaded(arr, start, left_length, descending, num_threads);
-            } else if (start < get_local_start(world_rank)) {
+            } else if (right_start <= get_local_start(world_rank)) {
                 /* Only sort the right. The left is completely remote. */
                 sort_threaded(arr, right_start, right_length, !descending,
                         num_threads);
@@ -237,7 +237,7 @@ static void sort_single(node_t *arr, size_t start, size_t length,
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only sort the left. The right is completely remote. */
                 sort_single(arr, start, left_length, descending);
-            } else if (start < get_local_start(world_rank)) {
+            } else if (right_start <= get_local_start(world_rank)) {
                 /* Only sort the right. The left is completely remote. */
                 sort_single(arr, right_start, right_length, !descending);
             } else {
@@ -282,7 +282,7 @@ static void merge_threaded(node_t *arr, size_t start, size_t length,
                 /* Only merge the left. The right is completely remote. */
                 merge_threaded(arr, start, left_length, descending,
                         num_threads);
-            } else if (start < get_local_start(world_rank)) {
+            } else if (right_start <= get_local_start(world_rank)) {
                 /* Only merge the right. The left is completely remote. */
                 merge_threaded(arr, right_start, right_length, descending,
                         num_threads);
@@ -331,7 +331,7 @@ static void merge_single(node_t *arr, size_t start, size_t length,
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only merge the left. The right is completely remote. */
                 merge_single(arr, start, left_length, descending);
-            } else if (start < get_local_start(world_rank)) {
+            } else if (right_start <= get_local_start(world_rank)) {
                 /* Only merge the right. The left is completely remote. */
                 merge_single(arr, right_start, right_length, descending);
             } else {
