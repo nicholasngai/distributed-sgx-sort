@@ -338,6 +338,32 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_) {
 
     ocall_mpi_barrier();
 
+    /* Read all remaining bytes and write them to the BIO. */
+    for (size_t i = 0; i < world_size; i++) {
+        /* Skip our own rank. */
+        if (i == world_rank) {
+            continue;
+        }
+
+        int bytes_received;
+        do {
+            result = ocall_mpi_try_recv_bytes(&bytes_received, buffer,
+                    BUFFER_SIZE, i, 0);
+            if (result != OE_OK) {
+                fprintf(stderr, "ocall_mpi_try_recv_bytes: %s\n",
+                        oe_result_str(result));
+                goto exit_free_sessions;
+            }
+            if (bytes_received < 0) {
+                fprintf(stderr, "Failed to recieve TLS handshake tail bytes\n");
+                goto exit_free_sessions;
+            }
+            BIO_write(sessions[i].rbio, buffer, bytes_received);
+        } while (bytes_received > 0);
+    }
+
+    ocall_mpi_barrier();
+
     return 0;
 
 exit_free_sessions:
