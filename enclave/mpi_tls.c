@@ -6,6 +6,7 @@
 #include <openenclave/enclave.h>
 #include <openenclave/attestation/attester.h>
 #include <openenclave/attestation/sgx/evidence.h>
+#include "common/defs.h"
 #include "parallel_t.h"
 
 #define BUFFER_SIZE 4096
@@ -209,6 +210,12 @@ exit:
     return ret;
 }
 
+static int verify_callback(int preverify_ok UNUSED,
+        X509_STORE_CTX *ctx UNUSED) {
+    // TODO Implement actual SGX attestation verification.
+    return 1;
+}
+
 int mpi_tls_init(size_t world_rank_, size_t world_size_) {
     oe_result_t result;
 
@@ -242,6 +249,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_) {
     }
     SSL_CTX_use_certificate(ctx, cert);
     SSL_CTX_use_PrivateKey(ctx, privkey);
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, verify_callback);
 
     /* Initialize TLS sessions. */
     sessions = malloc(world_size * sizeof(*sessions));

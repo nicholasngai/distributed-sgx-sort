@@ -1,7 +1,7 @@
 #include "synch.h"
 #include <stddef.h>
+#include "common/defs.h"
 
-#define UNUSED __attribute__((unused))
 #define PAUSE() asm("pause")
 
 void spinlock_init(spinlock_t *lock) {

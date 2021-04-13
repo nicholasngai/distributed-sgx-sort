@@ -1,11 +1,10 @@
 #include <stdio.h>
 #include <liboblivious/primitives.h>
 #include <openenclave/enclave.h>
+#include "common/defs.h"
 #include "mpi_tls.h"
 #include "parallel_t.h"
 #include "synch.h"
-
-#define UNUSED __attribute__((unused))
 
 static int world_rank;
 static int world_size;
