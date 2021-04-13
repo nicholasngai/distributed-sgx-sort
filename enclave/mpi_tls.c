@@ -393,19 +393,50 @@ int mpi_tls_send_bytes(const unsigned char *buf, size_t count, int dest,
         int tag) {
     oe_result_t result;
     int ret = -1;
-    result = ocall_mpi_send_bytes(&ret, buf, count, dest, tag);
+
+    SSL_write(sessions[dest].ssl, buf, count);
+
+    size_t bytes_to_send = BIO_read(sessions[dest].wbio, buffer, BUFFER_SIZE);
+    result = ocall_mpi_send_bytes(&ret, buffer, bytes_to_send, dest, tag);
     if (result != OE_OK || ret) {
         fprintf(stderr, "ocall_mpi_send_bytes: %s\n", oe_result_str(result));
     }
+
     return ret;
 }
 
 int mpi_tls_recv_bytes(unsigned char *buf, size_t count, int src, int tag) {
     oe_result_t result;
     int ret = -1;
-    result = ocall_mpi_recv_bytes(&ret, buf, count, src, tag);
-    if (result != OE_OK || ret) {
-        fprintf(stderr, "ocall_mpi_recv_bytes: %s\n", oe_result_str(result));
+
+    size_t bytes_read = 0;
+    while (bytes_read < count) {
+        int bytes_received;
+        result = ocall_mpi_try_recv_bytes(&bytes_received, buffer,
+                BUFFER_SIZE, src, tag);
+        if (result != OE_OK) {
+            fprintf(stderr, "ocall_mpi_recv_bytes: %s\n",
+                    oe_result_str(result));
+            goto exit;
+        }
+        if (bytes_received < 0) {
+            fprintf(stderr, "Error receiving TLS bytes\n");
+            goto exit;
+        }
+        if (bytes_received > 0) {
+            BIO_write(sessions[src].rbio, buffer, bytes_received);
+            int read = SSL_read(sessions[src].ssl, buf + bytes_read,
+                    count - bytes_read);
+            if (read <= 0) {
+                fprintf(stderr, "Error reading decrypted TLS bytes\n");
+                goto exit;
+            }
+            bytes_read += read;
+        }
     }
+
+    ret = 0;
+
+exit:
     return ret;
 }
