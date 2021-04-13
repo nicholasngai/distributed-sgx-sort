@@ -102,6 +102,10 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
     return bytes_to_recv;
 }
 
+void ocall_mpi_barrier(void) {
+    MPI_Barrier(MPI_COMM_WORLD);
+}
+
 static void *start_thread_work(void *enclave_) {
     oe_enclave_t *enclave = enclave_;
     oe_result_t result = ecall_start_work(enclave);

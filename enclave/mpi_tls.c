@@ -336,6 +336,8 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_) {
         }
     } while (!all_init_finished);
 
+    ocall_mpi_barrier();
+
     return 0;
 
 exit_free_sessions:

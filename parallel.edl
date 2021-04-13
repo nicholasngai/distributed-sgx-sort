@@ -21,6 +21,7 @@ enclave {
                 size_t count,
                 int source,
                 int tag);
+        void ocall_mpi_barrier(void);
     };
 
     trusted {
