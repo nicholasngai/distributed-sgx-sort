@@ -307,40 +307,51 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_) {
             all_init_finished = false;
 
             /* Do handshake. */
-            SSL_do_handshake(sessions[i].ssl);
-
-            /* Send bytes. */
-            int bytes_to_send = BIO_read(sessions[i].wbio, buffer, BUFFER_SIZE);
-            if (bytes_to_send > 0) {
-                result = ocall_mpi_send_bytes(&ret, buffer, bytes_to_send, i,
-                        0);
-                if (result != OE_OK) {
-                    fprintf(stderr, "ocall_mpi_send_bytes: %s\n",
-                            oe_result_str(result));
-                    goto exit_free_sessions;
-                }
-                if (ret) {
-                    fprintf(stderr, "Failed to send TLS handshake bytes\n");
+            ret = SSL_do_handshake(sessions[i].ssl);
+            if (ret < 0) {
+                int err = SSL_get_error(sessions[i].ssl, ret);
+                if (err != SSL_ERROR_NONE && err != SSL_ERROR_WANT_READ
+                        && err != SSL_ERROR_WANT_WRITE) {
+                    fprintf(stderr, "SSL_do_handshake: %d\n", err);
                     goto exit_free_sessions;
                 }
             }
+
+            /* Send bytes. */
+            int bytes_to_send;
+            do {
+               bytes_to_send = BIO_read(sessions[i].wbio, buffer, BUFFER_SIZE);
+               if (bytes_to_send > 0) {
+                   result = ocall_mpi_send_bytes(&ret, buffer, bytes_to_send, i,
+                           0);
+                   if (result != OE_OK) {
+                       fprintf(stderr, "ocall_mpi_send_bytes: %s\n",
+                               oe_result_str(result));
+                       goto exit_free_sessions;
+                   }
+                   if (ret) {
+                       fprintf(stderr, "Failed to send TLS handshake bytes\n");
+                       goto exit_free_sessions;
+                   }
+               }
+            } while (bytes_to_send == BUFFER_SIZE);
 
             /* Receive bytes. */
             int bytes_received;
-            result = ocall_mpi_try_recv_bytes(&bytes_received, buffer,
-                    BUFFER_SIZE, i, 0);
-            if (result != OE_OK) {
-                fprintf(stderr, "ocall_mpi_try_recv_bytes: %s\n",
-                        oe_result_str(result));
-                goto exit_free_sessions;
-            }
-            if (bytes_received < 0) {
-                fprintf(stderr, "Failed to recieve TLS handshake bytes\n");
-                goto exit_free_sessions;
-            }
-            if (bytes_received > 0) {
+            do {
+                result = ocall_mpi_try_recv_bytes(&bytes_received, buffer,
+                        BUFFER_SIZE, i, 0);
+                if (result != OE_OK) {
+                    fprintf(stderr, "ocall_mpi_try_recv_bytes: %s\n",
+                            oe_result_str(result));
+                    goto exit_free_sessions;
+                }
+                if (bytes_received < 0) {
+                    fprintf(stderr, "Failed to recieve TLS handshake bytes\n");
+                    goto exit_free_sessions;
+                }
                 BIO_write(sessions[i].rbio, buffer, bytes_received);
-            }
+            } while (bytes_received == BUFFER_SIZE);
         }
     } while (!all_init_finished);
 
@@ -363,11 +374,11 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_) {
                 goto exit_free_sessions;
             }
             if (bytes_received < 0) {
-                fprintf(stderr, "Failed to recieve TLS handshake tail bytes\n");
+                fprintf(stderr, "Failed to receive TLS handshake tail bytes\n");
                 goto exit_free_sessions;
             }
             BIO_write(sessions[i].rbio, buffer, bytes_received);
-        } while (bytes_received > 0);
+        } while (bytes_received == BUFFER_SIZE);
     }
 
     ocall_mpi_barrier();
@@ -404,11 +415,17 @@ int mpi_tls_send_bytes(const unsigned char *buf, size_t count, int dest,
 
     SSL_write(sessions[dest].ssl, buf, count);
 
-    size_t bytes_to_send = BIO_read(sessions[dest].wbio, buffer, BUFFER_SIZE);
-    result = ocall_mpi_send_bytes(&ret, buffer, bytes_to_send, dest, tag);
-    if (result != OE_OK || ret) {
-        fprintf(stderr, "ocall_mpi_send_bytes: %s\n", oe_result_str(result));
-    }
+    int bytes_to_send;
+    do {
+        bytes_to_send = BIO_read(sessions[dest].wbio, buffer, BUFFER_SIZE);
+        if (bytes_to_send > 0) {
+            result = ocall_mpi_send_bytes(&ret, buffer, bytes_to_send, dest, tag);
+            if (result != OE_OK || ret) {
+                fprintf(stderr, "ocall_mpi_send_bytes: %s\n",
+                        oe_result_str(result));
+            }
+        }
+    } while (bytes_to_send == BUFFER_SIZE);
 
     return ret;
 }
@@ -423,7 +440,7 @@ int mpi_tls_recv_bytes(unsigned char *buf, size_t count, int src, int tag) {
         result = ocall_mpi_try_recv_bytes(&bytes_received, buffer,
                 BUFFER_SIZE, src, tag);
         if (result != OE_OK) {
-            fprintf(stderr, "ocall_mpi_recv_bytes: %s\n",
+            fprintf(stderr, "ocall_mpi_try_recv_bytes: %s\n",
                     oe_result_str(result));
             goto exit;
         }
@@ -431,14 +448,17 @@ int mpi_tls_recv_bytes(unsigned char *buf, size_t count, int src, int tag) {
             fprintf(stderr, "Error receiving TLS bytes\n");
             goto exit;
         }
-        if (bytes_received > 0) {
-            BIO_write(sessions[src].rbio, buffer, bytes_received);
-            int read = SSL_read(sessions[src].ssl, buf + bytes_read,
-                    count - bytes_read);
-            if (read <= 0) {
-                fprintf(stderr, "Error reading decrypted TLS bytes\n");
+        BIO_write(sessions[src].rbio, buffer, bytes_received);
+        int read = SSL_read(sessions[src].ssl, buf + bytes_read,
+                count - bytes_read);
+        if (read <= 0) {
+            int err = SSL_get_error(sessions[src].ssl, read);
+            if (err != SSL_ERROR_WANT_READ) {
+                fprintf(stderr, "SSL_read: %d\n", err);
                 goto exit;
             }
+        }
+        if (read > 0) {
             bytes_read += read;
         }
     }
