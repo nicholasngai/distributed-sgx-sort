@@ -2,6 +2,7 @@
 #include <liboblivious/primitives.h>
 #include <openenclave/enclave.h>
 #include "common/defs.h"
+#include "common/node_t.h"
 #include "mpi_tls.h"
 #include "parallel_t.h"
 #include "synch.h"
@@ -95,14 +96,14 @@ static size_t get_local_start(int rank) {
     return (rank * total_length + world_size - 1) / world_size;
 }
 
-static void swap_local(node_t *arr, size_t a, size_t b, bool descending) {
+static void swap_local(void *arr, size_t a, size_t b, bool descending) {
     size_t local_start = get_local_start(world_rank);
     bool cond =
         (arr[a - local_start].key > arr[b - local_start].key) != descending;
     o_memswap(&arr[a - local_start], &arr[b - local_start], sizeof(*arr), cond);
 }
 
-static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx,
+static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
         bool descending) {
     int ret;
 
@@ -127,7 +128,7 @@ static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx,
 
     /* Replace the local element with the received remote element if necessary.
      * Assume we are sorting ascending. If the local index is lower, then we
-     * swap if the local element is lower.  Likewise, if the local index is
+     * swap if the local element is lower. Likewise, if the local index is
      * higher, than we swap if the local element is higher. If descending,
      * everything is reversed. */
     bool cond =
@@ -138,7 +139,7 @@ static void swap_remote(node_t *arr, size_t local_idx, size_t remote_idx,
             sizeof(arr[local_idx - local_start]), cond);
 }
 
-static void swap(node_t *arr, size_t a, size_t b, bool descending) {
+static void swap(void *arr, size_t a, size_t b, bool descending) {
     int a_rank = get_index_address(a);
     int b_rank = get_index_address(b);
 
@@ -153,16 +154,16 @@ static void swap(node_t *arr, size_t a, size_t b, bool descending) {
 
 /* Bitonic sort. */
 
-static void sort_threaded(node_t *arr, size_t start, size_t length,
+static void sort_threaded(void *arr, size_t start, size_t length,
         bool descending, size_t num_threads);
-static void sort_single(node_t *arr, size_t start, size_t length,
+static void sort_single(void *arr, size_t start, size_t length,
         bool descending);
-static void merge_threaded(node_t *arr, size_t start, size_t length,
+static void merge_threaded(void *arr, size_t start, size_t length,
         bool descending, size_t num_threads);
-static void merge_single(node_t *arr, size_t start, size_t length,
+static void merge_single(void *arr, size_t start, size_t length,
         bool descending);
 
-static void sort_threaded(node_t *arr, size_t start, size_t length,
+static void sort_threaded(void *arr, size_t start, size_t length,
         bool descending UNUSED, size_t num_threads) {
     if (num_threads == 1) {
         sort_single(arr, start, length, descending);
@@ -216,7 +217,7 @@ static void sort_threaded(node_t *arr, size_t start, size_t length,
     }
 }
 
-static void sort_single(node_t *arr, size_t start, size_t length,
+static void sort_single(void *arr, size_t start, size_t length,
         bool descending) {
     switch (length) {
         case 0:
@@ -252,7 +253,7 @@ static void sort_single(node_t *arr, size_t start, size_t length,
     }
 }
 
-static void merge_threaded(node_t *arr, size_t start, size_t length,
+static void merge_threaded(void *arr, size_t start, size_t length,
         bool descending, size_t num_threads) {
     if (num_threads == 1) {
         merge_single(arr, start, length, descending);
@@ -307,7 +308,7 @@ static void merge_threaded(node_t *arr, size_t start, size_t length,
     }
 }
 
-static void merge_single(node_t *arr, size_t start, size_t length,
+static void merge_single(void *arr, size_t start, size_t length,
         bool descending) {
     switch (length) {
         case 0:
@@ -380,10 +381,13 @@ void ecall_start_work(void) {
     wait_for_all_threads();
 }
 
-int ecall_sort(node_t *arr, size_t total_length_, size_t local_length UNUSED) {
+int ecall_sort(unsigned char *arr, size_t total_length_,
+        size_t local_length UNUSED) {
+    int ret = -1;
+
     if (popcount(total_length_) != 1) {
         fprintf(stderr, "Length must be a multiple of 2\n");
-        return -1;
+        goto exit;
     }
 
     total_length = total_length_;
@@ -391,7 +395,13 @@ int ecall_sort(node_t *arr, size_t total_length_, size_t local_length UNUSED) {
     /* Initialize TLS over MPI. */
     if (mpi_tls_init((size_t) world_rank, (size_t) world_size)) {
         fprintf(stderr, "mpi_tls_init: Error\n");
-        return -1;
+        goto exit;
+    }
+
+    /* Initialize random. */
+    if (rand_init()) {
+        fprintf(stderr, "Error initializing enclave random number generator\n");
+        goto exit_free_mpi_tls;
     }
 
     /* Wait for all threads to enter the enclave. */
@@ -401,13 +411,17 @@ int ecall_sort(node_t *arr, size_t total_length_, size_t local_length UNUSED) {
     /* Start work for this thread. */
     sort_threaded(arr, 0, total_length, false, total_num_threads);
 
+    ret = 0;
+
+    rand_free();
+exit_free_mpi_tls:
+    /* Free TLS over MPI. */
+    mpi_tls_free();
+exit:
     /* Release threads and wait until all leave. */
     __atomic_store_n(&work_done, true, __ATOMIC_RELAXED);
     wait_for_all_threads();
     work_done = false;
 
-    /* Free TLS over MPI. */
-    mpi_tls_free();
-
-    return 0;
+    return ret;
 }

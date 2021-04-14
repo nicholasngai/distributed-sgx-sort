@@ -4,11 +4,14 @@
 #include <stdio.h>
 #include <time.h>
 #include <openenclave/host.h>
-#include "parallel_u.h"
+#include "common/crypto.h"
 #include "common/node_t.h"
+#include "parallel_u.h"
 
 static int world_rank;
 static int world_size;
+
+static unsigned char key[16];
 
 static int init_mpi(int *argc, char ***argv) {
     int ret;
@@ -200,15 +203,38 @@ int main(int argc, char **argv) {
     size_t local_length =
         ((world_rank + 1) * length + world_size - 1) / world_size
             - (world_rank * length + world_size - 1) / world_size;
-    node_t *arr = malloc(local_length * sizeof(*arr));
+    size_t local_start = (world_rank * length + world_size - 1) / world_size;
+    unsigned char *arr =
+        malloc(local_length * AAD_CIPHERTEXT_LEN(sizeof(node_t)));
     if (!arr) {
         perror("malloc arr");
         goto exit_terminate_enclave;
     }
-    srand(world_rank + 1);
-    for (size_t i = 0; i < local_length; i++) {
-        arr[i].key = rand();
+    if (rand_init()) {
+        fprintf(stderr, "Error initializing host random number generator\n");
+        goto exit_free_arr;
     }
+    srand(world_rank + 1);
+    for (size_t i = local_start; i < local_start + local_length; i++) {
+        /* Initialize node. */
+        node_t node;
+        memset(&node, '\0', sizeof(node));
+        node.key = rand();
+
+        /* Encrypt to array. The IV is the first 12 bytes. The tag is the next
+         * 16 bytes. The ciphertext is the remaining 128 bytes. */
+        unsigned char *start =
+            arr + (i - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
+        if (rand_read(start, IV_LEN)) {
+            fprintf(stderr,
+                    "Error reading from host random number generator\n");
+        }
+        if (aad_encrypt(key, &node, sizeof(node), &i, sizeof(i), start,
+                    start + IV_LEN + TAG_LEN, start + IV_LEN)) {
+            fprintf(stderr, "Error encrypting node in host\n");
+        }
+    }
+    rand_free();
 
     /* Time sort and join. */
 
@@ -244,25 +270,39 @@ int main(int argc, char **argv) {
 
     /* Check array. */
 
-    for (size_t i = 0; i < local_length - 1; i++) {
-        if (arr[i].key > arr[i + 1].key) {
+    uint64_t first_key = 0;
+    uint64_t prev_key = 0;
+    for (size_t i = local_start; i < local_start + local_length; i++) {
+        /* Decrypt node. As above, the IV is the first 12 bytes. The tag is the
+         * next 16 bytes. The ciphertext is the remaining 128 bytes. */
+        node_t node;
+        unsigned char *start =
+            arr + (i - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
+        if (aad_decrypt(key, start + IV_LEN + TAG_LEN, sizeof(node_t), &i,
+                    sizeof(i), start, start + IV_LEN, &node)) {
+            fprintf(stderr, "Error decrypting node in host\n");
+        }
+        if (i == local_start) {
+           first_key = node.key;
+        } else if (prev_key > node.key) {
             printf("Not sorted correctly!\n");
             break;
         }
+        prev_key = node.key;
     }
 
     if (world_rank < world_size - 1) {
-        /* Send largest value to next node. */
-        MPI_Send(&arr[local_length - 1].key, 1, MPI_UNSIGNED_LONG_LONG,
-                world_rank + 1, 0, MPI_COMM_WORLD);
+        /* Send largest value to next node. prev_key now contains the last item
+         * in the array. */
+        MPI_Send(&prev_key, 1, MPI_UNSIGNED_LONG_LONG, world_rank + 1, 0,
+                MPI_COMM_WORLD);
     }
 
     if (world_rank > 0) {
         /* Receive previous node's largest value and compare. */
-        uint64_t prev_key;
         MPI_Recv(&prev_key, 1, MPI_UNSIGNED_LONG_LONG, world_rank - 1, 0,
                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        if (prev_key > arr[0].key) {
+        if (prev_key > first_key) {
             printf("Not sorted correctly!\n");
         }
     }
