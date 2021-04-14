@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <liboblivious/primitives.h>
 #include <openenclave/enclave.h>
+#include "common/crypto.h"
 #include "common/defs.h"
 #include "common/node_t.h"
 #include "mpi_tls.h"
@@ -12,12 +13,14 @@ static int world_size;
 static size_t total_num_threads;
 static size_t total_length;
 
+static unsigned char key[16];
+
 /* Thread synchronization. */
 
 struct thread_work {
-    void (*func)(node_t *arr, size_t start, size_t length, bool descending,
+    void (*func)(void *arr, size_t start, size_t length, bool descending,
             size_t num_threads);
-    node_t *arr;
+    void *arr;
     size_t start;
     size_t length;
     bool descending;
@@ -86,6 +89,51 @@ static void wait_for_all_threads(void) {
     spinlock_unlock(&all_threads_lock);
 }
 
+/* Node encryption and decryption. */
+
+static int encrypt_node(node_t *node, void *dst_, size_t idx) {
+    int ret;
+    unsigned char *dst = dst_;
+
+    /* The IV is the first 12 bytes. The tag is the next 16 bytes. The
+     * ciphertext is the remaining 128 bytes. */
+    ret = rand_read(dst, IV_LEN);
+    if (ret) {
+        fprintf(stderr, "Error generating random IV\n");
+        goto exit;
+    }
+    ret = aad_encrypt(key, node, sizeof(*node), &idx, sizeof(idx), dst,
+            dst + IV_LEN + TAG_LEN, dst + IV_LEN);
+    if (ret < 0) {
+        fprintf(stderr, "Error encrypting node %lu\n", idx);
+        goto exit;
+    }
+
+    ret = 0;
+
+exit:
+    return ret;
+}
+
+static int decrypt_node(node_t *node, void *src_, size_t idx) {
+    int ret;
+    unsigned char *src = src_;
+
+    /* The IV is the first 12 bytes. The tag is the next 16 bytes. The
+     * ciphertext is the remaining 128 bytes. */
+    ret = aad_decrypt(key, src + IV_LEN + TAG_LEN, sizeof(*node), &idx,
+            sizeof(idx), src, src + IV_LEN, node);
+    if (ret < 0) {
+        fprintf(stderr, "Error decrypting node %lu\n", idx);
+        goto exit;
+    }
+
+    ret = 0;
+
+exit:
+    return ret;
+}
+
 /* Swapping. */
 
 static int get_index_address(size_t index) {
@@ -98,32 +146,73 @@ static size_t get_local_start(int rank) {
 
 static void swap_local(void *arr, size_t a, size_t b, bool descending) {
     size_t local_start = get_local_start(world_rank);
-    bool cond =
-        (arr[a - local_start].key > arr[b - local_start].key) != descending;
-    o_memswap(&arr[a - local_start], &arr[b - local_start], sizeof(*arr), cond);
+    unsigned char *a_addr =
+        (unsigned char *) arr
+            + (a - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
+    unsigned char *b_addr =
+        (unsigned char *) arr
+            + (b - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
+    int ret;
+
+    /* Decrypt both nodes. The IV is the first 12 bytes. The tag is the next 16
+     * bytes. The ciphertext is the remaining 128 bytes. */
+    node_t node_a;
+    node_t node_b;
+    ret = decrypt_node(&node_a, a_addr, a);
+    if (ret) {
+        return;
+    }
+    ret = decrypt_node(&node_b, b_addr, b);
+    if (ret) {
+        return;
+    }
+
+    /* Oblivious comparison and swap. */
+    bool cond = (node_a.key > node_b.key) != descending;
+    o_memswap(&node_a, &node_b, sizeof(node_a), cond);
+
+    /* Encrypt both nodes using the same layout as above. */
+    ret = encrypt_node(&node_a, a_addr, a);
+    if (ret) {
+        return;
+    }
+    ret = encrypt_node(&node_b, b_addr, b);
+    if (ret) {
+        return;
+    }
 }
 
 static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
         bool descending) {
+    size_t local_start = get_local_start(world_rank);
+    unsigned char *local_addr =
+        (unsigned char *) arr +
+            (local_idx - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
+    int remote_rank = get_index_address(remote_idx);
     int ret;
 
-    size_t local_start = get_local_start(world_rank);
-
-    int remote_rank = get_index_address(remote_idx);
+    /* Decrypt both the local node. */
+    node_t local_node;
+    ret = decrypt_node(&local_node, local_addr, local_idx);
+    if (ret) {
+        return;
+    }
 
     /* Send our current node. */
-    ret = mpi_tls_send_bytes((unsigned char *) &arr[local_idx - local_start],
-            sizeof(arr[local_idx - local_start]), remote_rank, remote_idx);
+    ret = mpi_tls_send_bytes((unsigned char *) &local_node, sizeof(local_node),
+            remote_rank, remote_idx);
     if (ret) {
         fprintf(stderr, "mpi_tls_send_bytes: Error sending bytes\n");
+        return;
     }
 
     /* Receive their node. */
-    node_t recv;
-    ret = mpi_tls_recv_bytes((unsigned char *) &recv, sizeof(recv), remote_rank,
-            local_idx);
+    node_t remote_node;
+    ret = mpi_tls_recv_bytes((unsigned char *) &remote_node,
+            sizeof(remote_node), remote_rank, local_idx);
     if (ret) {
         fprintf(stderr, "mpi_tls_recv_bytes: Error receiving bytes\n");
+        return;
     }
 
     /* Replace the local element with the received remote element if necessary.
@@ -131,12 +220,12 @@ static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
      * swap if the local element is lower. Likewise, if the local index is
      * higher, than we swap if the local element is higher. If descending,
      * everything is reversed. */
-    bool cond =
-        (local_idx < remote_idx)
-            == (arr[local_idx - local_start].key > recv.key);
+    bool cond = (local_idx < remote_idx) == (local_node.key > remote_node.key);
     cond = cond != descending;
-    o_memcpy(&arr[local_idx - local_start], &recv,
-            sizeof(arr[local_idx - local_start]), cond);
+    o_memcpy(&local_node, &remote_node, sizeof(local_node), cond);
+
+    /* Encrypt the local node (which is either old or new) back to memory. */
+    ret = encrypt_node(&local_node, local_addr, local_idx);
 }
 
 static void swap(void *arr, size_t a, size_t b, bool descending) {

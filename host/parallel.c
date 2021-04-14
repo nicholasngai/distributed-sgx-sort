@@ -229,8 +229,9 @@ int main(int argc, char **argv) {
             fprintf(stderr,
                     "Error reading from host random number generator\n");
         }
-        if (aad_encrypt(key, &node, sizeof(node), &i, sizeof(i), start,
-                    start + IV_LEN + TAG_LEN, start + IV_LEN)) {
+        ret = aad_encrypt(key, &node, sizeof(node), &i, sizeof(i), start,
+                start + IV_LEN + TAG_LEN, start + IV_LEN);
+        if (ret < 0) {
             fprintf(stderr, "Error encrypting node in host\n");
         }
     }
@@ -278,8 +279,9 @@ int main(int argc, char **argv) {
         node_t node;
         unsigned char *start =
             arr + (i - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
-        if (aad_decrypt(key, start + IV_LEN + TAG_LEN, sizeof(node_t), &i,
-                    sizeof(i), start, start + IV_LEN, &node)) {
+        ret = aad_decrypt(key, start + IV_LEN + TAG_LEN, sizeof(node_t), &i,
+                    sizeof(i), start, start + IV_LEN, &node);
+        if (ret < 0) {
             fprintf(stderr, "Error decrypting node in host\n");
         }
         if (i == local_start) {
