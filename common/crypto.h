@@ -6,8 +6,6 @@
 #define IV_LEN 12
 #define TAG_LEN 16
 
-#define AAD_CIPHERTEXT_LEN(plaintext_len) ((plaintext_len) + IV_LEN + TAG_LEN)
-
 int rand_init(void);
 void rand_free(void);
 int rand_read(void *buf, size_t n);

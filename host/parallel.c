@@ -204,8 +204,7 @@ int main(int argc, char **argv) {
         ((world_rank + 1) * length + world_size - 1) / world_size
             - (world_rank * length + world_size - 1) / world_size;
     size_t local_start = (world_rank * length + world_size - 1) / world_size;
-    unsigned char *arr =
-        malloc(local_length * AAD_CIPHERTEXT_LEN(sizeof(node_t)));
+    unsigned char *arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE);
     if (!arr) {
         perror("malloc arr");
         goto exit_terminate_enclave;
@@ -221,16 +220,9 @@ int main(int argc, char **argv) {
         memset(&node, '\0', sizeof(node));
         node.key = rand();
 
-        /* Encrypt to array. The IV is the first 12 bytes. The tag is the next
-         * 16 bytes. The ciphertext is the remaining 128 bytes. */
-        unsigned char *start =
-            arr + (i - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
-        if (rand_read(start, IV_LEN)) {
-            fprintf(stderr,
-                    "Error reading from host random number generator\n");
-        }
-        ret = aad_encrypt(key, &node, sizeof(node), &i, sizeof(i), start,
-                start + IV_LEN + TAG_LEN, start + IV_LEN);
+        /* Encrypt to array. */
+        unsigned char *start = arr + (i - local_start) * SIZEOF_ENCRYPTED_NODE;
+        ret = node_encrypt(key, &node, start, i);
         if (ret < 0) {
             fprintf(stderr, "Error encrypting node in host\n");
         }
@@ -274,13 +266,10 @@ int main(int argc, char **argv) {
     uint64_t first_key = 0;
     uint64_t prev_key = 0;
     for (size_t i = local_start; i < local_start + local_length; i++) {
-        /* Decrypt node. As above, the IV is the first 12 bytes. The tag is the
-         * next 16 bytes. The ciphertext is the remaining 128 bytes. */
+        /* Decrypt node. */
         node_t node;
-        unsigned char *start =
-            arr + (i - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
-        ret = aad_decrypt(key, start + IV_LEN + TAG_LEN, sizeof(node_t), &i,
-                    sizeof(i), start, start + IV_LEN, &node);
+        unsigned char *start = arr + (i - local_start) * SIZEOF_ENCRYPTED_NODE;
+        ret = node_decrypt(key, &node, start, i);
         if (ret < 0) {
             fprintf(stderr, "Error decrypting node in host\n");
         }

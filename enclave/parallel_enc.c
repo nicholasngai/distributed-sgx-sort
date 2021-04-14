@@ -89,51 +89,6 @@ static void wait_for_all_threads(void) {
     spinlock_unlock(&all_threads_lock);
 }
 
-/* Node encryption and decryption. */
-
-static int encrypt_node(node_t *node, void *dst_, size_t idx) {
-    int ret;
-    unsigned char *dst = dst_;
-
-    /* The IV is the first 12 bytes. The tag is the next 16 bytes. The
-     * ciphertext is the remaining 128 bytes. */
-    ret = rand_read(dst, IV_LEN);
-    if (ret) {
-        fprintf(stderr, "Error generating random IV\n");
-        goto exit;
-    }
-    ret = aad_encrypt(key, node, sizeof(*node), &idx, sizeof(idx), dst,
-            dst + IV_LEN + TAG_LEN, dst + IV_LEN);
-    if (ret < 0) {
-        fprintf(stderr, "Error encrypting node %lu\n", idx);
-        goto exit;
-    }
-
-    ret = 0;
-
-exit:
-    return ret;
-}
-
-static int decrypt_node(node_t *node, void *src_, size_t idx) {
-    int ret;
-    unsigned char *src = src_;
-
-    /* The IV is the first 12 bytes. The tag is the next 16 bytes. The
-     * ciphertext is the remaining 128 bytes. */
-    ret = aad_decrypt(key, src + IV_LEN + TAG_LEN, sizeof(*node), &idx,
-            sizeof(idx), src, src + IV_LEN, node);
-    if (ret < 0) {
-        fprintf(stderr, "Error decrypting node %lu\n", idx);
-        goto exit;
-    }
-
-    ret = 0;
-
-exit:
-    return ret;
-}
-
 /* Swapping. */
 
 static int get_index_address(size_t index) {
@@ -147,22 +102,20 @@ static size_t get_local_start(int rank) {
 static void swap_local(void *arr, size_t a, size_t b, bool descending) {
     size_t local_start = get_local_start(world_rank);
     unsigned char *a_addr =
-        (unsigned char *) arr
-            + (a - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
+        (unsigned char *) arr + (a - local_start) * SIZEOF_ENCRYPTED_NODE;
     unsigned char *b_addr =
-        (unsigned char *) arr
-            + (b - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
+        (unsigned char *) arr + (b - local_start) * SIZEOF_ENCRYPTED_NODE;
     int ret;
 
     /* Decrypt both nodes. The IV is the first 12 bytes. The tag is the next 16
      * bytes. The ciphertext is the remaining 128 bytes. */
     node_t node_a;
     node_t node_b;
-    ret = decrypt_node(&node_a, a_addr, a);
+    ret = node_decrypt(key, &node_a, a_addr, a);
     if (ret) {
         return;
     }
-    ret = decrypt_node(&node_b, b_addr, b);
+    ret = node_decrypt(key, &node_b, b_addr, b);
     if (ret) {
         return;
     }
@@ -172,11 +125,11 @@ static void swap_local(void *arr, size_t a, size_t b, bool descending) {
     o_memswap(&node_a, &node_b, sizeof(node_a), cond);
 
     /* Encrypt both nodes using the same layout as above. */
-    ret = encrypt_node(&node_a, a_addr, a);
+    ret = node_encrypt(key, &node_a, a_addr, a);
     if (ret) {
         return;
     }
-    ret = encrypt_node(&node_b, b_addr, b);
+    ret = node_encrypt(key, &node_b, b_addr, b);
     if (ret) {
         return;
     }
@@ -187,13 +140,13 @@ static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
     size_t local_start = get_local_start(world_rank);
     unsigned char *local_addr =
         (unsigned char *) arr +
-            (local_idx - local_start) * AAD_CIPHERTEXT_LEN(sizeof(node_t));
+            (local_idx - local_start) * SIZEOF_ENCRYPTED_NODE;
     int remote_rank = get_index_address(remote_idx);
     int ret;
 
     /* Decrypt both the local node. */
     node_t local_node;
-    ret = decrypt_node(&local_node, local_addr, local_idx);
+    ret = node_decrypt(key, &local_node, local_addr, local_idx);
     if (ret) {
         return;
     }
@@ -225,7 +178,7 @@ static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
     o_memcpy(&local_node, &remote_node, sizeof(local_node), cond);
 
     /* Encrypt the local node (which is either old or new) back to memory. */
-    ret = encrypt_node(&local_node, local_addr, local_idx);
+    ret = node_encrypt(key, &local_node, local_addr, local_idx);
 }
 
 static void swap(void *arr, size_t a, size_t b, bool descending) {
