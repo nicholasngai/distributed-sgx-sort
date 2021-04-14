@@ -7,6 +7,7 @@
 #include <openenclave/attestation/attester.h>
 #include <openenclave/attestation/sgx/evidence.h>
 #include "common/defs.h"
+#include "synch.h"
 #include "parallel_t.h"
 
 #define BUFFER_SIZE 4096
@@ -82,6 +83,7 @@ struct mpi_tls_session {
     SSL *ssl;
     BIO *rbio;
     BIO *wbio;
+    spinlock_t lock;
 };
 
 static size_t world_rank;
@@ -107,6 +109,8 @@ static int init_session(struct mpi_tls_session *session) {
     }
 
     SSL_set_bio(session->ssl, session->rbio, session->wbio);
+
+    spinlock_init(&session->lock);
 
     return 0;
 
@@ -240,7 +244,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_) {
     /* Initialize global context. */
     // TODO Think about downgrade attacks. All clients will be on the same
     // version, anyway.
-    ctx = SSL_CTX_new(TLS_method());
+    ctx = SSL_CTX_new(DTLS_method());
     if (!ctx) {
         fprintf(stderr, "Failed to allocate SSL context\n");
         X509_free(cert);
@@ -413,19 +417,24 @@ int mpi_tls_send_bytes(const unsigned char *buf, size_t count, int dest,
     oe_result_t result;
     int ret = -1;
 
+    spinlock_lock(&sessions[dest].lock);
+
     SSL_write(sessions[dest].ssl, buf, count);
 
     int bytes_to_send;
     do {
         bytes_to_send = BIO_read(sessions[dest].wbio, buffer, BUFFER_SIZE);
         if (bytes_to_send > 0) {
-            result = ocall_mpi_send_bytes(&ret, buffer, bytes_to_send, dest, tag);
+            result = ocall_mpi_send_bytes(&ret, buffer, bytes_to_send, dest,
+                    tag);
             if (result != OE_OK || ret) {
                 fprintf(stderr, "ocall_mpi_send_bytes: %s\n",
                         oe_result_str(result));
             }
         }
     } while (bytes_to_send == BUFFER_SIZE);
+
+    spinlock_unlock(&sessions[dest].lock);
 
     return ret;
 }
@@ -448,9 +457,11 @@ int mpi_tls_recv_bytes(unsigned char *buf, size_t count, int src, int tag) {
             fprintf(stderr, "Error receiving TLS bytes\n");
             goto exit;
         }
+        spinlock_lock(&sessions[src].lock);
         BIO_write(sessions[src].rbio, buffer, bytes_received);
         int read = SSL_read(sessions[src].ssl, buf + bytes_read,
                 count - bytes_read);
+        spinlock_unlock(&sessions[src].lock);
         if (read <= 0) {
             int err = SSL_get_error(sessions[src].ssl, read);
             if (err != SSL_ERROR_WANT_READ) {
