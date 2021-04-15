@@ -408,7 +408,7 @@ void ecall_set_params(int world_rank_, int world_size_, size_t num_threads) {
 }
 
 void ecall_start_work(void) {
-    /* Wait for master. */
+    /* Wait for all threads to start work. */
     wait_for_all_threads();
 
     struct thread_work *work = pop_thread_work();
@@ -419,8 +419,15 @@ void ecall_start_work(void) {
         work = pop_thread_work();
     }
 
-    /* Wait for master. */
+    /* Wait for all threads to exit work loop. */
     wait_for_all_threads();
+}
+
+static void root_work_function(void *arr, size_t start, size_t length,
+        bool descending, size_t num_threads) {
+    sort_threaded(arr, start, length, descending, num_threads);
+    /* Release threads. */
+    work_done = true;
 }
 
 int ecall_sort(unsigned char *arr, size_t total_length_,
@@ -446,12 +453,21 @@ int ecall_sort(unsigned char *arr, size_t total_length_,
         goto exit_free_mpi_tls;
     }
 
-    /* Wait for all threads to enter the enclave. */
-    work_done = false;
-    wait_for_all_threads();
-
     /* Start work for this thread. */
-    sort_threaded(arr, 0, total_length, false, total_num_threads);
+    struct thread_work root_work = {
+        .func = root_work_function,
+        .arr = arr,
+        .start = 0,
+        .length = total_length,
+        .descending = false,
+        .num_threads = total_num_threads,
+    };
+    push_thread_work(&root_work);
+    ecall_start_work();
+
+    /* The thread does not return until work_done = true, so set it back to
+     * false. */
+    work_done = false;
 
     ret = 0;
 
@@ -460,10 +476,6 @@ exit_free_mpi_tls:
     /* Free TLS over MPI. */
     mpi_tls_free();
 exit:
-    /* Release threads and wait until all leave. */
-    __atomic_store_n(&work_done, true, __ATOMIC_RELAXED);
-    wait_for_all_threads();
-    work_done = false;
 
     return ret;
 }
