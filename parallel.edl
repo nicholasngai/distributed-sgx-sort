@@ -2,8 +2,6 @@ enclave {
     from "openenclave/edl/syscall.edl" import *;
     from "platform.edl" import *;
 
-    include "mpi.h"
-
     untrusted {
         int ocall_mpi_send_bytes(
                 [in, count=count] const unsigned char *buf,

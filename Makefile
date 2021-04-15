@@ -22,7 +22,7 @@ ENCLAVE_PUBKEY = $(ENCLAVE_KEY:.pem=.pub)
 ENCLAVE_CONF = $(ENCLAVE_DIR)/$(APP_NAME).conf
 
 CPPFLAGS = -I.
-CFLAGS = -g -O3 -Wall -Wextra $(shell pkg-config mpi --cflags)
+CFLAGS = -g -O3 -Wall -Wextra
 LDFLAGS =
 LDLIBS =
 
@@ -60,7 +60,7 @@ CPPFLAGS += -MMD
 # Host.
 
 HOST_CPPFLAGS =
-HOST_CFLAGS =
+HOST_CFLAGS = $(shell pkg-config mpi --cflags)
 HOST_LDFLAGS =
 HOST_LDLIBS = $(shell pkg-config mpi --libs)
 
