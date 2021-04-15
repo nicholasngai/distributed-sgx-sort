@@ -59,7 +59,7 @@ int aad_encrypt(void *key, void *plaintext, size_t plaintext_len, void *aad,
     }
 
     /* Initialize encryption cipher. */
-    if (EVP_EncryptInit(ctx, EVP_aes_128_gcm(), key, iv) != 1) {
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, key, iv) != 1) {
         goto exit_free_ctx;
     }
 
@@ -78,7 +78,7 @@ int aad_encrypt(void *key, void *plaintext, size_t plaintext_len, void *aad,
     ciphertext_len += len;
 
     /* Finalize encryption. */
-    if (EVP_EncryptFinal(ctx, ciphertext + ciphertext_len, &len) != 1) {
+    if (EVP_EncryptFinal_ex(ctx, ciphertext + ciphertext_len, &len) != 1) {
         goto exit_free_ctx;
     }
     ciphertext_len += len;
@@ -107,7 +107,7 @@ int aad_decrypt(void *key, void *ciphertext, size_t ciphertext_len, void *aad,
     }
 
     /* Initialize decryption cipher. */
-    if (EVP_DecryptInit(ctx, EVP_aes_128_gcm(), key, iv) != 1) {
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, key, iv) != 1) {
         goto exit_free_ctx;
     }
 
@@ -131,7 +131,7 @@ int aad_decrypt(void *key, void *ciphertext, size_t ciphertext_len, void *aad,
     }
 
     /* Finalize decryption. */
-    if (EVP_DecryptFinal(ctx, plaintext + plaintext_len, &len) != 1) {
+    if (EVP_DecryptFinal_ex(ctx, plaintext + plaintext_len, &len) != 1) {
         goto exit_free_ctx;
     }
     plaintext_len += len;
