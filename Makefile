@@ -5,7 +5,7 @@ include config.mk
 APP_NAME = parallel
 
 COMMON_DIR = common
-COMMON_OBJS = $(COMMON_DIR)/crypto.o $(COMMON_DIR)/node_t.o
+COMMON_OBJS = $(COMMON_DIR)/crypto.o $(COMMON_DIR)/error.o $(COMMON_DIR)/node_t.o
 COMMON_DEPS = $(COMMON_OBJS:.o=.d)
 
 HOST_DIR = host
@@ -62,7 +62,8 @@ CPPFLAGS += -MMD
 HOST_CPPFLAGS =
 HOST_CFLAGS = $(shell pkg-config mpi --cflags)
 HOST_LDFLAGS =
-HOST_LDLIBS = $(shell pkg-config mpi --libs)
+HOST_LDLIBS = -lmbedcrypto \
+	$(shell pkg-config mpi --libs)
 
 HOST_CFLAGS += $(shell pkg-config oehost-$(C_COMPILER) --cflags)
 HOST_LDLIBS += $(shell pkg-config oehost-$(C_COMPILER) --libs)
@@ -84,6 +85,7 @@ ENCLAVE_LDLIBS = -L$(ENCLAVE_DIR)/third_party/liboblivious -l:liboblivious.a
 ENCLAVE_CFLAGS += $(shell pkg-config oehost-$(C_COMPILER) --cflags)
 ENCLAVE_LDLIBS += $(shell pkg-config oeenclave-$(C_COMPILER) --libs)
 ENCLAVE_LDLIBS += $(shell pkg-config oeenclave-$(C_COMPILER) --variable=openssllibs)
+ENCLAVE_LDLIBS += $(shell pkg-config oeenclave-$(C_COMPILER) --variable=mbedtlslibs)
 
 $(ENCLAVE_DIR)/%.o: CPPFLAGS += $(ENCLAVE_CPPFLAGS)
 $(ENCLAVE_DIR)/%.o: CFLAGS += $(ENCLAVE_CFLAGS)

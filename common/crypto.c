@@ -1,44 +1,32 @@
 #include "crypto.h"
-#include <openssl/engine.h>
-#include <openssl/evp.h>
+#include <mbedtls/gcm.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/ctr_drbg.h>
+#include "common/error.h"
+//#include <string.h>
 
-static ENGINE *rand_eng;
+mbedtls_entropy_context entropy_ctx;
+mbedtls_ctr_drbg_context drbg_ctx;
 
 int rand_init(void) {
-    ENGINE_load_rdrand();
-    rand_eng = ENGINE_by_id("rdrand");
-    if (!rand_eng) {
-        goto exit;
-    }
-
-    if (!ENGINE_init(rand_eng)) {
-        goto exit_free_eng;
-    }
-
-    if (!ENGINE_set_default(rand_eng, ENGINE_METHOD_RAND)) {
-        goto exit_free_eng;
-    }
-
+    mbedtls_entropy_init(&entropy_ctx);
+    mbedtls_ctr_drbg_init(&drbg_ctx);
+    mbedtls_ctr_drbg_seed(&drbg_ctx, mbedtls_entropy_func, &entropy_ctx, NULL,
+            0);
     return 0;
-
-exit_free_eng:
-    ENGINE_finish(rand_eng);
-    ENGINE_free(rand_eng);
-    ENGINE_cleanup();
-exit:
-    return -1;
 }
 
 void rand_free(void) {
-    ENGINE_finish(rand_eng);
-    ENGINE_free(rand_eng);
-    ENGINE_cleanup();
+    mbedtls_entropy_free(&entropy_ctx);
+    mbedtls_ctr_drbg_free(&drbg_ctx);
 }
 
 int rand_read(void *buf, size_t n) {
     int ret = -1;
 
-    if (!RAND_bytes(buf, n)) {
+    ret = mbedtls_ctr_drbg_random(&drbg_ctx, buf, n);
+    if (ret) {
+        handle_mbedtls_error(ret);
         goto exit;
     }
 
@@ -53,46 +41,32 @@ int aad_encrypt(void *key, void *plaintext, size_t plaintext_len, void *aad,
     int ret = -1;
 
     /* Initialize encryption context. */
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) {
-        goto exit;
-    }
+    mbedtls_gcm_context ctx;
+    mbedtls_gcm_init(&ctx);
 
-    /* Initialize encryption cipher. */
-    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, key, iv) != 1) {
+    /* Initialize key. */
+    ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+    if (ret) {
+        handle_mbedtls_error(ret);
         goto exit_free_ctx;
     }
 
-    /* Input AAD. */
-    int len;
-    if (EVP_EncryptUpdate(ctx, NULL, &len, aad, aad_len) != 1) {
+    //memcpy(ciphertext, plaintext, plaintext_len);
+    //ret = 0;
+    //goto exit_free_ctx;
+
+    /* Encrypt. */
+    ret = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_ENCRYPT, plaintext_len,
+            iv, IV_LEN, aad, aad_len, plaintext, ciphertext, TAG_LEN, tag);
+    if (ret) {
+        handle_mbedtls_error(ret);
         goto exit_free_ctx;
     }
 
-    /* Input plaintext and output to ciphertext. */
-    int ciphertext_len = 0;
-    if (EVP_EncryptUpdate(ctx, ciphertext, &len, plaintext,
-            plaintext_len) != 1) {
-        goto exit;
-    }
-    ciphertext_len += len;
-
-    /* Finalize encryption. */
-    if (EVP_EncryptFinal_ex(ctx, ciphertext + ciphertext_len, &len) != 1) {
-        goto exit_free_ctx;
-    }
-    ciphertext_len += len;
-
-    /* Output tag. */
-    if (EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, TAG_LEN, tag) != 1) {
-        goto exit_free_ctx;
-    }
-
-    ret = ciphertext_len;
+    ret = 0;
 
 exit_free_ctx:
-    EVP_CIPHER_CTX_free(ctx);
-exit:
+    mbedtls_gcm_free(&ctx);
     return ret;
 }
 
@@ -100,46 +74,32 @@ int aad_decrypt(void *key, void *ciphertext, size_t ciphertext_len, void *aad,
         size_t aad_len, void *iv, void *tag, void *plaintext) {
     int ret = -1;
 
-    /* Initialize decryption context. */
-    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) {
-        goto exit;
-    }
+    /* Initialize encryption context. */
+    mbedtls_gcm_context ctx;
+    mbedtls_gcm_init(&ctx);
 
-    /* Initialize decryption cipher. */
-    if (EVP_DecryptInit_ex(ctx, EVP_aes_128_gcm(), NULL, key, iv) != 1) {
+    /* Initialize key. */
+    ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+    if (ret) {
+        handle_mbedtls_error(ret);
         goto exit_free_ctx;
     }
 
-    /* Input AAD. */
-    int len;
-    if (EVP_DecryptUpdate(ctx, NULL, &len, aad, aad_len) != 1) {
+    //memcpy(ciphertext, plaintext, plaintext_len);
+    //ret = 0;
+    //goto exit_free_ctx;
+
+    /* Decrypt. */
+    ret = mbedtls_gcm_auth_decrypt(&ctx, ciphertext_len, iv, IV_LEN, aad,
+            aad_len, tag, TAG_LEN, ciphertext, plaintext);
+    if (ret) {
+        handle_mbedtls_error(ret);
         goto exit_free_ctx;
     }
 
-    /* Input ciphertext and output to plaintext. */
-    int plaintext_len = 0;
-    if (EVP_DecryptUpdate(ctx, plaintext, &len, ciphertext,
-            ciphertext_len) != 1) {
-        goto exit;
-    }
-    plaintext_len += len;
-
-    /* Input tag. */
-    if (!EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_LEN, tag)) {
-        goto exit_free_ctx;
-    }
-
-    /* Finalize decryption. */
-    if (EVP_DecryptFinal_ex(ctx, plaintext + plaintext_len, &len) != 1) {
-        goto exit_free_ctx;
-    }
-    plaintext_len += len;
-
-    ret = plaintext_len;
+    ret = 0;
 
 exit_free_ctx:
-    EVP_CIPHER_CTX_free(ctx);
-exit:
+    mbedtls_gcm_free(&ctx);
     return ret;
 }
