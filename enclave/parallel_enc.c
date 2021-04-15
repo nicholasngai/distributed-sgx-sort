@@ -408,6 +408,11 @@ void ecall_set_params(int world_rank_, int world_size_, size_t num_threads) {
 }
 
 void ecall_start_work(void) {
+    /* Initialize random. */
+    if (rand_init()) {
+        fprintf(stderr, "Error initializing enclave random number generator\n");
+    }
+
     /* Wait for all threads to start work. */
     wait_for_all_threads();
 
@@ -421,6 +426,8 @@ void ecall_start_work(void) {
 
     /* Wait for all threads to exit work loop. */
     wait_for_all_threads();
+
+    rand_free();
 }
 
 static void root_work_function(void *arr, size_t start, size_t length,
@@ -447,12 +454,6 @@ int ecall_sort(unsigned char *arr, size_t total_length_,
         goto exit;
     }
 
-    /* Initialize random. */
-    if (rand_init()) {
-        fprintf(stderr, "Error initializing enclave random number generator\n");
-        goto exit_free_mpi_tls;
-    }
-
     /* Start work for this thread. */
     struct thread_work root_work = {
         .func = root_work_function,
@@ -471,8 +472,6 @@ int ecall_sort(unsigned char *arr, size_t total_length_,
 
     ret = 0;
 
-    rand_free();
-exit_free_mpi_tls:
     /* Free TLS over MPI. */
     mpi_tls_free();
 exit:

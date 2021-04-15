@@ -2,22 +2,28 @@
 #include <mbedtls/gcm.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
+#include <stdbool.h>
 #include "common/error.h"
 //#include <string.h>
 
-mbedtls_entropy_context entropy_ctx;
-mbedtls_ctr_drbg_context drbg_ctx;
+static mbedtls_entropy_context entropy_ctx;
+static bool entropy_ctx_is_init;
+static _Thread_local mbedtls_ctr_drbg_context drbg_ctx;
 
 int rand_init(void) {
-    mbedtls_entropy_init(&entropy_ctx);
+    if (!__atomic_test_and_set(&entropy_ctx_is_init, __ATOMIC_RELAXED)) {
+        mbedtls_entropy_init(&entropy_ctx);
+    }
     mbedtls_ctr_drbg_init(&drbg_ctx);
-    mbedtls_ctr_drbg_seed(&drbg_ctx, mbedtls_entropy_func, &entropy_ctx, NULL,
-            0);
+    mbedtls_ctr_drbg_seed(&drbg_ctx, mbedtls_entropy_func, &entropy_ctx,
+            NULL, 0);
     return 0;
 }
 
 void rand_free(void) {
-    mbedtls_entropy_free(&entropy_ctx);
+    if (__atomic_exchange_n(&entropy_ctx_is_init, false, __ATOMIC_RELAXED)) {
+        mbedtls_entropy_free(&entropy_ctx);
+    }
     mbedtls_ctr_drbg_free(&drbg_ctx);
 }
 
