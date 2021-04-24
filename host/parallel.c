@@ -1,12 +1,12 @@
 #include <limits.h>
-#include <mpi.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <time.h>
+#include <mpi.h>
 #include <openenclave/host.h>
+#include <pthread.h>
 #include "common/crypto.h"
 #include "common/node_t.h"
-#include "parallel_u.h"
+#include "host/parallel_u.h"
 
 static int world_rank;
 static int world_size;

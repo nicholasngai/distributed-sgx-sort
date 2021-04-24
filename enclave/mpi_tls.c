@@ -1,4 +1,4 @@
-#include "mpi_tls.h"
+#include "enclave/mpi_tls.h"
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -10,8 +10,8 @@
 #include <openenclave/attestation/sgx/evidence.h>
 #include "common/defs.h"
 #include "common/error.h"
-#include "synch.h"
-#include "parallel_t.h"
+#include "enclave/parallel_t.h"
+#include "enclave/synch.h"
 
 #define BUFFER_SIZE 4096
 

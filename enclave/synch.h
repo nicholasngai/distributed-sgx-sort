@@ -1,5 +1,5 @@
-#ifndef __SYNCH_H
-#define __SYNCH_H
+#ifndef __DISTRIBUTED_SGX_SORT_ENCLAVE_SYNCH_H
+#define __DISTRIBUTED_SGX_SORT_ENCLAVE_SYNCH_H
 
 #include <stdbool.h>
 
@@ -29,4 +29,4 @@ void condvar_wait(condvar_t *condvar, spinlock_t *lock);
 void condvar_signal(condvar_t *condvar, spinlock_t *lock);
 void condvar_broadcast(condvar_t *condvar, spinlock_t *lock);
 
-#endif /* synch.h */
+#endif /* distributed-sgx-sort/enclave/synch.h */

@@ -1,4 +1,4 @@
-#include "synch.h"
+#include "enclave/synch.h"
 #include <stddef.h>
 #include "common/defs.h"
 

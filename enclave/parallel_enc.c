@@ -1,12 +1,12 @@
 #include <stdio.h>
-#include <liboblivious/primitives.h>
 #include <openenclave/enclave.h>
+#include <liboblivious/primitives.h>
 #include "common/crypto.h"
 #include "common/defs.h"
 #include "common/node_t.h"
-#include "mpi_tls.h"
-#include "parallel_t.h"
-#include "synch.h"
+#include "enclave/mpi_tls.h"
+#include "enclave/parallel_t.h"
+#include "enclave/synch.h"
 
 static int world_rank;
 static int world_size;
