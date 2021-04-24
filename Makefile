@@ -10,7 +10,7 @@ COMMON_DEPS = $(COMMON_OBJS:.o=.d)
 
 HOST_DIR = host
 HOST_TARGET = $(HOST_DIR)/parallel
-HOST_OBJS = $(HOST_DIR)/parallel.o
+HOST_OBJS = $(HOST_DIR)/parallel.o $(HOST_DIR)/error.o
 HOST_DEPS = $(HOST_OBJS:.o=.d)
 
 ENCLAVE_DIR = enclave

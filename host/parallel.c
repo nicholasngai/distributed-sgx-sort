@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include "common/crypto.h"
 #include "common/node_t.h"
+#include "host/error.h"
 #include "host/parallel_u.h"
 
 static int world_rank;
@@ -20,6 +21,7 @@ static int init_mpi(int *argc, char ***argv) {
     int threading_provided;
     ret = MPI_Init_thread(argc, argv, MPI_THREAD_MULTIPLE, &threading_provided);
     if (ret) {
+        handle_mpi_error(ret);
         goto exit;
     }
     if (threading_provided != MPI_THREAD_MULTIPLE) {
@@ -31,10 +33,12 @@ static int init_mpi(int *argc, char ***argv) {
     /* Get world rank and size. */
     ret = MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
     if (ret) {
+        handle_mpi_error(ret);
         goto exit;
     }
     ret = MPI_Comm_size(MPI_COMM_WORLD, &world_size);
     if (ret) {
+        handle_mpi_error(ret);
         goto exit;
     }
 
@@ -45,6 +49,7 @@ exit:
 int ocall_mpi_send_bytes(const unsigned char *buf, size_t count, int dest,
         int tag) {
     if (count > INT_MAX) {
+        handle_mpi_error(MPI_ERR_COUNT);
         return MPI_ERR_COUNT;
     }
 
@@ -55,6 +60,7 @@ int ocall_mpi_send_bytes(const unsigned char *buf, size_t count, int dest,
 int ocall_mpi_recv_bytes(unsigned char *buf, size_t count, int source,
         int tag) {
     if (count > INT_MAX) {
+        handle_mpi_error(MPI_ERR_COUNT);
         return MPI_ERR_COUNT;
     }
 
@@ -65,7 +71,8 @@ int ocall_mpi_recv_bytes(unsigned char *buf, size_t count, int source,
 int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
         int tag) {
     if (count > INT_MAX) {
-        return MPI_ERR_COUNT;
+        handle_mpi_error(MPI_ERR_COUNT);
+        return -1;
     }
 
     MPI_Status status;
@@ -74,6 +81,7 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
     /* Probe for an available message. */
     ret = MPI_Probe(source, tag, MPI_COMM_WORLD, &status);
     if (ret) {
+        handle_mpi_error(ret);
         return -1;
     }
 
@@ -81,18 +89,15 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
     int bytes_to_recv;
     ret = MPI_Get_count(&status, MPI_UNSIGNED_CHAR, &bytes_to_recv);
     if (ret) {
-        return -1;
-    }
-
-    /* Return an error if the number of bytes is larger than the buffer. */
-    if (bytes_to_recv > (int) count) {
+        handle_mpi_error(ret);
         return -1;
     }
 
     /* Read in that number of bytes. */
-    ret = MPI_Recv(buf, bytes_to_recv, MPI_UNSIGNED_CHAR, source, tag,
+    ret = MPI_Recv(buf, count, MPI_UNSIGNED_CHAR, source, tag,
             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     if (ret) {
+        handle_mpi_error(ret);
         return -1;
     }
 
