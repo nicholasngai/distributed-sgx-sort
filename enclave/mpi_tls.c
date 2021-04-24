@@ -13,7 +13,7 @@
 #include "enclave/parallel_t.h"
 #include "enclave/synch.h"
 
-#define BUFFER_SIZE 4096
+#define BUFFER_SIZE 8192
 
 #ifdef OE_SIMULATION
 static unsigned char SIM_PRIVKEY[303] = {
