@@ -84,7 +84,6 @@ ENCLAVE_LDLIBS = -L$(ENCLAVE_DIR)/third_party/liboblivious -l:liboblivious.a
 
 ENCLAVE_CFLAGS += $(shell pkg-config oehost-$(C_COMPILER) --cflags)
 ENCLAVE_LDLIBS += $(shell pkg-config oeenclave-$(C_COMPILER) --libs)
-ENCLAVE_LDLIBS += $(shell pkg-config oeenclave-$(C_COMPILER) --variable=openssllibs)
 ENCLAVE_LDLIBS += $(shell pkg-config oeenclave-$(C_COMPILER) --variable=mbedtlslibs)
 
 $(ENCLAVE_DIR)/%.o: CPPFLAGS += $(ENCLAVE_CPPFLAGS)

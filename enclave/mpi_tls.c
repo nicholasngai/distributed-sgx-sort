@@ -2,18 +2,21 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <openssl/ssl.h>
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/ssl.h>
 #include <openenclave/enclave.h>
 #include <openenclave/attestation/attester.h>
 #include <openenclave/attestation/sgx/evidence.h>
 #include "common/defs.h"
+#include "common/error.h"
 #include "synch.h"
 #include "parallel_t.h"
 
 #define BUFFER_SIZE 4096
 
 #ifdef OE_SIMULATION
-static unsigned char SIM_PRIVKEY[302] = {
+static unsigned char SIM_PRIVKEY[303] = {
     0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x42, 0x45, 0x47, 0x49, 0x4e, 0x20, 0x45, 0x43, 0x20, 0x50, 0x41,
     0x52, 0x41, 0x4d, 0x45, 0x54, 0x45, 0x52, 0x53, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x0a, 0x42, 0x67,
     0x67, 0x71, 0x68, 0x6b, 0x6a, 0x4f, 0x50, 0x51, 0x4d, 0x42, 0x42, 0x77, 0x3d, 0x3d, 0x0a, 0x2d,
@@ -32,7 +35,7 @@ static unsigned char SIM_PRIVKEY[302] = {
     0x7a, 0x55, 0x78, 0x55, 0x49, 0x5a, 0x38, 0x64, 0x2f, 0x47, 0x6d, 0x47, 0x4a, 0x4d, 0x76, 0x46,
     0x61, 0x42, 0x4d, 0x49, 0x66, 0x4a, 0x46, 0x65, 0x38, 0x65, 0x36, 0x75, 0x65, 0x77, 0x3d, 0x3d,
     0x0a, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x45, 0x4e, 0x44, 0x20, 0x45, 0x43, 0x20, 0x50, 0x52, 0x49,
-    0x56, 0x41, 0x54, 0x45, 0x20, 0x4b, 0x45, 0x59, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x0a,
+    0x56, 0x41, 0x54, 0x45, 0x20, 0x4b, 0x45, 0x59, 0x2d, 0x2d, 0x2d, 0x2d, 0x2d, 0x0a, 0x00,
 };
 
 static unsigned char SIM_CERT[639] = {
@@ -80,64 +83,187 @@ static unsigned char SIM_CERT[639] = {
 #endif /* OE_SIMULATION */
 
 struct mpi_tls_session {
-    SSL *ssl;
-    BIO *rbio;
-    BIO *wbio;
+    mbedtls_ssl_config conf;
+    mbedtls_ssl_context ssl;
+    mbedtls_ctr_drbg_context drbg;
     spinlock_t lock;
+    unsigned char *buffer;
+    size_t buffer_offset;
+    size_t buffer_bytes_left;
+
+    /* Parameters used by send and recv callbacks. */
+    int rank;
+    int tag;
 };
 
 static size_t world_rank;
 static size_t world_size;
-static unsigned char *buffer;
-static SSL_CTX *ctx;
+static mbedtls_x509_crt cert;
+static mbedtls_pk_context privkey;
 static struct mpi_tls_session *sessions;
 
-static int init_session(struct mpi_tls_session *session) {
-    session->ssl = SSL_new(ctx);
-    if (!session->ssl) {
+static int verify_callback(void *data UNUSED, mbedtls_x509_crt *crt UNUSED,
+        int depth UNUSED, uint32_t *flags UNUSED) {
+    // TODO Implement actual SGX attestation verification.
+    return 0;
+}
+
+static int send_callback(void *session_, const unsigned char *buf, size_t len) {
+    struct mpi_tls_session *session = session_;
+    oe_result_t result;
+    int ret = -1;
+
+    result = ocall_mpi_send_bytes(&ret, buf, len, session->rank, session->tag);
+    if (result != OE_OK) {
+        fprintf(stderr, "ocall_mpi_send_bytes: %s\n", oe_result_str(result));
+        goto exit;
+    }
+    if (ret) {
+        fprintf(stderr, "Failed to send TLS encrypted bytes\n");
         goto exit;
     }
 
-    session->rbio = BIO_new(BIO_s_mem());
-    if (!session->rbio) {
+    ret = len;
+
+exit:
+    return ret;
+}
+
+static int recv_callback(void *session_, unsigned char *buf, size_t len,
+        uint32_t timeout UNUSED) {
+    struct mpi_tls_session *session = session_;
+    oe_result_t result;
+    int ret = -1;
+    size_t bytes_remaining = len;
+
+    /* Copy excess bytes in the buffer from earlier if we have any. */
+    if (session->buffer_bytes_left) {
+        size_t bytes_to_copy = MIN(bytes_remaining, session->buffer_bytes_left);
+        memcpy(buf, session->buffer + session->buffer_offset, bytes_to_copy);
+        session->buffer_offset += bytes_to_copy;
+        session->buffer_bytes_left -= bytes_to_copy;
+        bytes_remaining -= bytes_to_copy;
+        buf += bytes_to_copy;
+    }
+
+    /* If there are bytes remaining afterwards, receive bytes from MPI. */
+    while (bytes_remaining) {
+        result = ocall_mpi_try_recv_bytes(&ret, session->buffer, BUFFER_SIZE,
+                session->rank, session->tag);
+        if (result != OE_OK) {
+            fprintf(stderr, "ocall_mpi_recv_bytes: %s\n", oe_result_str(result));
+            goto exit;
+        }
+        if (ret < 0) {
+            fprintf(stderr, "Failed to recv TLS encrypted bytes\n");
+            goto exit;
+        }
+
+        /* Copy as many bytes as requested to the destination buffer. */
+        size_t bytes_to_copy = MIN(bytes_remaining, (size_t) ret);
+        memcpy(buf, session->buffer, bytes_to_copy);
+        session->buffer_offset = bytes_to_copy;
+        session->buffer_bytes_left += ret - bytes_to_copy;
+        bytes_remaining -= bytes_to_copy;
+        buf += bytes_to_copy;
+    }
+
+    ret = len;
+
+exit:
+    return ret;
+}
+
+static int init_session(struct mpi_tls_session *session, bool is_server,
+        mbedtls_x509_crt *cert, mbedtls_pk_context *privkey,
+        mbedtls_entropy_context *entropy, int rank) {
+    int ret = -1;
+
+    /* Initialize DRBG. */
+    mbedtls_ctr_drbg_init(&session->drbg);
+    ret = mbedtls_ctr_drbg_seed(&session->drbg, mbedtls_entropy_func, entropy,
+            NULL, 0);
+    if (ret) {
+        handle_mbedtls_error(ret);
+        goto exit_free_drbg;
+    }
+
+    /* Initialize config. */
+    // TODO Think about downgrade attacks. All clients will be on the same
+    // version, anyway.
+    mbedtls_ssl_config_init(&session->conf);
+    ret = mbedtls_ssl_config_defaults(&session->conf,
+            is_server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
+            MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
+    if (ret) {
+        handle_mbedtls_error(ret);
+        goto exit_free_config;
+    }
+    mbedtls_ssl_conf_rng(&session->conf, mbedtls_ctr_drbg_random, &session->drbg);
+    mbedtls_ssl_conf_authmode(&session->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+    mbedtls_ssl_conf_verify(&session->conf, verify_callback, NULL);
+    mbedtls_ssl_conf_ca_chain(&session->conf, cert->next, NULL);
+    ret = mbedtls_ssl_conf_own_cert(&session->conf, cert, privkey);
+    if (ret) {
+        handle_mbedtls_error(ret);
+        goto exit_free_config;
+    }
+
+    /* Initialize SSL. */
+    mbedtls_ssl_init(&session->ssl);
+    ret = mbedtls_ssl_setup(&session->ssl, &session->conf);
+    if (ret) {
+        handle_mbedtls_error(ret);
         goto exit_free_ssl;
     }
+    mbedtls_ssl_set_bio(&session->ssl, session, send_callback, NULL,
+            recv_callback);
 
-    session->wbio = BIO_new(BIO_s_mem());
-    if (!session->wbio) {
-        goto exit_free_rbio;
-    }
-
-    SSL_set_bio(session->ssl, session->rbio, session->wbio);
-
+    /* Initialize spinlock. */
     spinlock_init(&session->lock);
+
+    /* Allocate buffer. */
+    session->buffer = malloc(BUFFER_SIZE);
+    if (!session->buffer) {
+        perror("malloc MPI TLS buffer");
+        goto exit_free_ssl;
+    }
+    session->buffer_offset = 0;
+    session->buffer_bytes_left = 0;
+
+    /* Initialize rank. */
+    session->rank = rank;
 
     return 0;
 
-exit_free_rbio:
-    BIO_free_all(session->rbio);
 exit_free_ssl:
-    SSL_free(session->ssl);
-exit:
-    return -1;
+    mbedtls_ssl_free(&session->ssl);
+exit_free_config:
+    mbedtls_ssl_config_free(&session->conf);
+exit_free_drbg:
+    mbedtls_ctr_drbg_free(&session->drbg);
+    return ret;
 }
 
 static void free_session(struct mpi_tls_session *session) {
-    SSL_free(session->ssl);
-    /* The BIOs are already freed by SSL_free. */
+    free(session->buffer);
+    mbedtls_ctr_drbg_free(&session->drbg);
+    mbedtls_ssl_free(&session->ssl);
+    mbedtls_ssl_config_free(&session->conf);
 }
 
-static int load_certificate_and_key(X509 **cert, EVP_PKEY **privkey) {
+static int load_certificate_and_key(mbedtls_x509_crt *cert,
+        mbedtls_pk_context *privkey) {
     /* Generate public/private key pair and certificate buffers. */
-    unsigned char *privkey_buf;
     unsigned char *cert_buf;
     size_t cert_buf_size;
+    unsigned char *privkey_buf;
+    size_t privkey_buf_size;
     int ret = -1;
 
 #ifndef OE_SIMULATION
     unsigned char *pubkey_buf;
     size_t pubkey_buf_size;
-    size_t privkey_buf_size;
     oe_result_t result;
 
     oe_asymmetric_key_params_t key_params;
@@ -176,32 +302,24 @@ static int load_certificate_and_key(X509 **cert, EVP_PKEY **privkey) {
         goto exit_free_privkey_buf;
     }
 #else /* OE_SIMULATION */
-    privkey_buf = SIM_PRIVKEY;
     cert_buf = SIM_CERT;
     cert_buf_size = sizeof(SIM_CERT);
+    privkey_buf = SIM_PRIVKEY;
+    privkey_buf_size = sizeof(SIM_PRIVKEY);
 #endif
-    BIO *privkey_buf_bio = BIO_new_mem_buf(privkey_buf, -1);
-    if (!privkey_buf_bio) {
-        fprintf(stderr, "Failed to allocate BIO for private key\n");
+    ret = mbedtls_x509_crt_parse_der(cert, cert_buf, cert_buf_size);
+    if (ret) {
+        handle_mbedtls_error(ret);
         goto exit_free_cert_buf;
     }
-    *privkey = PEM_read_bio_PrivateKey(privkey_buf_bio, NULL, NULL, NULL);
-    if (!*privkey) {
-        fprintf(stderr, "Failed to parse private key from PEM\n");
-        goto exit_free_privkey_bio;
-    }
-    const unsigned char *cert_buf_ptr = cert_buf;
-    *cert = d2i_X509(NULL, &cert_buf_ptr, cert_buf_size);
-    if (!*cert) {
-        EVP_PKEY_free(*privkey);
-        fprintf(stderr, "Failed to parse X.509 certificate from DER\n");
-        goto exit_free_privkey_bio;
+    ret = mbedtls_pk_parse_key(privkey, privkey_buf, privkey_buf_size, NULL, 0);
+    if (ret) {
+        handle_mbedtls_error(ret);
+        goto exit_free_cert_buf;
     }
 
     ret = 0;
 
-exit_free_privkey_bio:
-    BIO_free(privkey_buf_bio);
 exit_free_cert_buf:
 #ifndef OE_SIMULATION
     oe_free_attestation_certificate(cert_buf);
@@ -214,78 +332,48 @@ exit:
     return ret;
 }
 
-static int verify_callback(int preverify_ok UNUSED,
-        X509_STORE_CTX *ctx UNUSED) {
-    // TODO Implement actual SGX attestation verification.
-    return 1;
-}
-
-int mpi_tls_init(size_t world_rank_, size_t world_size_) {
-    oe_result_t result;
+int mpi_tls_init(size_t world_rank_, size_t world_size_,
+        mbedtls_entropy_context *entropy) {
+    int ret = -1;
 
     world_rank = world_rank_;
     world_size = world_size_;
 
-    /* Initialize buffer. */
-    buffer = malloc(BUFFER_SIZE);
-    if (!buffer) {
-        perror("malloc buffer");
-        goto exit;
-    }
-
     /* Load certificate and private key. */
-    X509 *cert;
-    EVP_PKEY *privkey;
+    mbedtls_x509_crt_init(&cert);
+    mbedtls_pk_init(&privkey);
     if (load_certificate_and_key(&cert, &privkey)) {
         fprintf(stderr, "Failed to load certificate and private key\n");
-        goto exit_free_buffer;
+        goto exit;
     }
-
-    /* Initialize global context. */
-    // TODO Think about downgrade attacks. All clients will be on the same
-    // version, anyway.
-    ctx = SSL_CTX_new(DTLS_method());
-    if (!ctx) {
-        fprintf(stderr, "Failed to allocate SSL context\n");
-        X509_free(cert);
-        EVP_PKEY_free(privkey);
-        goto exit_free_buffer;
-    }
-    SSL_CTX_use_certificate(ctx, cert);
-    SSL_CTX_use_PrivateKey(ctx, privkey);
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, verify_callback);
 
     /* Initialize TLS sessions. */
     sessions = malloc(world_size * sizeof(*sessions));
     if (!sessions) {
         perror("malloc TLS sessions");
-        goto exit_free_ctx;
+        goto exit_free_keys;
     }
     for (size_t i = 0; i < world_size; i++) {
         if (i == world_rank) {
-            /* Skip our own rank and zero out all memory. */
-            memset(&sessions[i], '\0', sizeof(sessions[i]));
+            /* Skip our own rank. */
             continue;
         }
 
-        int ret = init_session(&sessions[i]);
+        /* Initialize SSL. We act as clients to lower ranks and servers to
+         * higher ranks. */
+        ret = init_session(&sessions[i], i > world_rank, &cert, &privkey,
+                entropy, i);
         if (ret) {
             fprintf(stderr, "Failed to initialize TLS session structures\n");
             for (size_t j = 0; j < i; j++) {
                 free_session(&sessions[j]);
             }
             free(sessions);
-            goto exit_free_ctx;
+            goto exit_free_keys;
         }
 
-        /* We act as clients to lower ranks and servers to higher ranks. */
-        if (i > world_rank) {
-            /* Server. */
-            SSL_set_accept_state(sessions[i].ssl);
-        } else {
-            /* Client. */
-            SSL_set_connect_state(sessions[i].ssl);
-        }
+        /* Use tag of 0 for SSL handshake. */
+        sessions[i].tag = 0;
     }
 
     /* Handshake with all nodes. Reepatedly loop until all handshakes are
@@ -299,91 +387,22 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_) {
                 continue;
             }
 
-            /* Skip if init finished. */
-            if (SSL_is_init_finished(sessions[i].ssl)) {
+            /* Skip if handshake finished. */
+            if (sessions[i].ssl.state == MBEDTLS_SSL_HANDSHAKE_OVER) {
                 continue;
             }
 
-            /* Init not finished. */
-
-            int ret;
-
+            /* Handshake not finished. */
             all_init_finished = false;
 
             /* Do handshake. */
-            ret = SSL_do_handshake(sessions[i].ssl);
-            if (ret < 0) {
-                int err = SSL_get_error(sessions[i].ssl, ret);
-                if (err != SSL_ERROR_NONE && err != SSL_ERROR_WANT_READ
-                        && err != SSL_ERROR_WANT_WRITE) {
-                    fprintf(stderr, "SSL_do_handshake: %d\n", err);
-                    goto exit_free_sessions;
-                }
+            ret = mbedtls_ssl_handshake_step(&sessions[i].ssl);
+            if (ret) {
+                handle_mbedtls_error(ret);
+                goto exit_free_sessions;
             }
-
-            /* Send bytes. */
-            int bytes_to_send;
-            do {
-               bytes_to_send = BIO_read(sessions[i].wbio, buffer, BUFFER_SIZE);
-               if (bytes_to_send > 0) {
-                   result = ocall_mpi_send_bytes(&ret, buffer, bytes_to_send, i,
-                           0);
-                   if (result != OE_OK) {
-                       fprintf(stderr, "ocall_mpi_send_bytes: %s\n",
-                               oe_result_str(result));
-                       goto exit_free_sessions;
-                   }
-                   if (ret) {
-                       fprintf(stderr, "Failed to send TLS handshake bytes\n");
-                       goto exit_free_sessions;
-                   }
-               }
-            } while (bytes_to_send == BUFFER_SIZE);
-
-            /* Receive bytes. */
-            int bytes_received;
-            do {
-                result = ocall_mpi_try_recv_bytes(&bytes_received, buffer,
-                        BUFFER_SIZE, i, 0);
-                if (result != OE_OK) {
-                    fprintf(stderr, "ocall_mpi_try_recv_bytes: %s\n",
-                            oe_result_str(result));
-                    goto exit_free_sessions;
-                }
-                if (bytes_received < 0) {
-                    fprintf(stderr, "Failed to recieve TLS handshake bytes\n");
-                    goto exit_free_sessions;
-                }
-                BIO_write(sessions[i].rbio, buffer, bytes_received);
-            } while (bytes_received == BUFFER_SIZE);
         }
     } while (!all_init_finished);
-
-    ocall_mpi_barrier();
-
-    /* Read all remaining bytes and write them to the BIO. */
-    for (size_t i = 0; i < world_size; i++) {
-        /* Skip our own rank. */
-        if (i == world_rank) {
-            continue;
-        }
-
-        int bytes_received;
-        do {
-            result = ocall_mpi_try_recv_bytes(&bytes_received, buffer,
-                    BUFFER_SIZE, i, 0);
-            if (result != OE_OK) {
-                fprintf(stderr, "ocall_mpi_try_recv_bytes: %s\n",
-                        oe_result_str(result));
-                goto exit_free_sessions;
-            }
-            if (bytes_received < 0) {
-                fprintf(stderr, "Failed to receive TLS handshake tail bytes\n");
-                goto exit_free_sessions;
-            }
-            BIO_write(sessions[i].rbio, buffer, bytes_received);
-        } while (bytes_received == BUFFER_SIZE);
-    }
 
     ocall_mpi_barrier();
 
@@ -394,84 +413,64 @@ exit_free_sessions:
         free_session(&sessions[i]);
     }
     free(sessions);
-exit_free_ctx:
-    SSL_CTX_free(ctx);
-    /* X509 and EVP_PKEY freed with SSL_CTX_free. */
-exit_free_buffer:
-    free(buffer);
+exit_free_keys:
+    mbedtls_x509_crt_free(&cert);
+    mbedtls_pk_free(&privkey);
 exit:
     return -1;
 }
 
 void mpi_tls_free(void) {
     for (size_t i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            /* Skip our own rank. */
+            continue;
+        }
         free_session(&sessions[i]);
     }
     free(sessions);
-    SSL_CTX_free(ctx);
-    free(buffer);
+    mbedtls_x509_crt_free(&cert);
+    mbedtls_pk_free(&privkey);
 }
 
 int mpi_tls_send_bytes(const unsigned char *buf, size_t count, int dest,
         int tag) {
-    oe_result_t result;
     int ret = -1;
 
-    spinlock_lock(&sessions[dest].lock);
-
-    SSL_write(sessions[dest].ssl, buf, count);
-
-    int bytes_to_send;
-    do {
-        bytes_to_send = BIO_read(sessions[dest].wbio, buffer, BUFFER_SIZE);
-        if (bytes_to_send > 0) {
-            result = ocall_mpi_send_bytes(&ret, buffer, bytes_to_send, dest,
-                    tag);
-            if (result != OE_OK || ret) {
-                fprintf(stderr, "ocall_mpi_send_bytes: %s\n",
-                        oe_result_str(result));
-            }
+    size_t bytes_to_write = count;
+    while (bytes_to_write) {
+        spinlock_lock(&sessions[dest].lock);
+        sessions[dest].tag = tag;
+        ret = mbedtls_ssl_write(&sessions[dest].ssl, buf, count);
+        spinlock_unlock(&sessions[dest].lock);
+        if (ret < 0) {
+            handle_mbedtls_error(ret);
+            spinlock_unlock(&sessions[dest].lock);
+            goto exit;
         }
-    } while (bytes_to_send == BUFFER_SIZE);
+        bytes_to_write -= ret;
+    }
 
-    spinlock_unlock(&sessions[dest].lock);
+    ret = 0;
 
+exit:
     return ret;
 }
 
 int mpi_tls_recv_bytes(unsigned char *buf, size_t count, int src, int tag) {
-    oe_result_t result;
     int ret = -1;
 
-    size_t bytes_read = 0;
-    while (bytes_read < count) {
-        int bytes_received;
-        result = ocall_mpi_try_recv_bytes(&bytes_received, buffer,
-                BUFFER_SIZE, src, tag);
-        if (result != OE_OK) {
-            fprintf(stderr, "ocall_mpi_try_recv_bytes: %s\n",
-                    oe_result_str(result));
-            goto exit;
-        }
-        if (bytes_received < 0) {
-            fprintf(stderr, "Error receiving TLS bytes\n");
-            goto exit;
-        }
+    size_t bytes_to_read = count;
+    while (bytes_to_read) {
         spinlock_lock(&sessions[src].lock);
-        BIO_write(sessions[src].rbio, buffer, bytes_received);
-        int read = SSL_read(sessions[src].ssl, buf + bytes_read,
-                count - bytes_read);
+        sessions[src].tag = tag;
+        ret = mbedtls_ssl_read(&sessions[src].ssl, buf, count);
         spinlock_unlock(&sessions[src].lock);
-        if (read <= 0) {
-            int err = SSL_get_error(sessions[src].ssl, read);
-            if (err != SSL_ERROR_WANT_READ) {
-                fprintf(stderr, "SSL_read: %d\n", err);
-                goto exit;
-            }
+        if (ret < 0) {
+            handle_mbedtls_error(ret);
+            goto exit;
         }
-        if (read > 0) {
-            bytes_read += read;
-        }
+        bytes_to_read -= ret;
     }
 
     ret = 0;

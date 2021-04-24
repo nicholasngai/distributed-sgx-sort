@@ -69,18 +69,12 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
     }
 
     MPI_Status status;
-    int flag;
     int ret;
 
     /* Probe for an available message. */
-    ret = MPI_Iprobe(source, tag, MPI_COMM_WORLD, &flag, &status);
+    ret = MPI_Probe(source, tag, MPI_COMM_WORLD, &status);
     if (ret) {
         return -1;
-    }
-
-    /* Return if no message available. */
-    if (!flag) {
-        return 0;
     }
 
     /* Get the number of bytes to receive. */
@@ -209,8 +203,13 @@ int main(int argc, char **argv) {
         perror("malloc arr");
         goto exit_terminate_enclave;
     }
+    if (entropy_init()) {
+        fprintf(stderr, "Error initializing host entropy context\n");
+        goto exit_free_arr;
+    }
     if (rand_init()) {
         fprintf(stderr, "Error initializing host random number generator\n");
+        entropy_free();
         goto exit_free_arr;
     }
     srand(world_rank + 1);
@@ -228,6 +227,7 @@ int main(int argc, char **argv) {
         }
     }
     rand_free();
+    entropy_free();
 
     /* Time sort and join. */
 

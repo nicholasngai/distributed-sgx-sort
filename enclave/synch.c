@@ -2,6 +2,8 @@
 #include <stddef.h>
 #include "common/defs.h"
 
+#define ADAPTIVE_TIMEOUT 10000
+
 #define PAUSE() asm("pause")
 
 void spinlock_init(spinlock_t *lock) {
@@ -28,7 +30,9 @@ void sema_up(sema_t *sema) {
 
 void sema_down(sema_t *sema) {
     unsigned int val;
+    size_t spin_count = 0;
     do {
+        spin_count++;
         PAUSE();
         val = sema->value;
     } while (!val || !__atomic_compare_exchange_n(&sema->value, &val, val - 1,

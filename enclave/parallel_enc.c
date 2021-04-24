@@ -408,13 +408,14 @@ void ecall_set_params(int world_rank_, int world_size_, size_t num_threads) {
 }
 
 void ecall_start_work(void) {
-    /* Initialize random. */
+    /* Wait for all threads to start work. */
+    wait_for_all_threads();
+
+    /* Initialize random. It is not safe to do this until passing the barrier,
+     * since the master thread initializes the entropy source. */
     if (rand_init()) {
         fprintf(stderr, "Error initializing enclave random number generator\n");
     }
-
-    /* Wait for all threads to start work. */
-    wait_for_all_threads();
 
     struct thread_work *work = pop_thread_work();
     while (work) {
@@ -448,10 +449,16 @@ int ecall_sort(unsigned char *arr, size_t total_length_,
 
     total_length = total_length_;
 
-    /* Initialize TLS over MPI. */
-    if (mpi_tls_init((size_t) world_rank, (size_t) world_size)) {
-        fprintf(stderr, "mpi_tls_init: Error\n");
+    /* Initialize entropy. */
+    if (entropy_init()) {
+        fprintf(stderr, "Error initializing entropy\n");
         goto exit;
+    }
+
+    /* Initialize TLS over MPI. */
+    if (mpi_tls_init((size_t) world_rank, (size_t) world_size, &entropy_ctx)) {
+        fprintf(stderr, "mpi_tls_init: Error\n");
+        goto exit_free_entropy;
     }
 
     /* Start work for this thread. */
@@ -474,7 +481,8 @@ int ecall_sort(unsigned char *arr, size_t total_length_,
 
     /* Free TLS over MPI. */
     mpi_tls_free();
+exit_free_entropy:
+    entropy_free();
 exit:
-
     return ret;
 }

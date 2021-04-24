@@ -1,7 +1,9 @@
 #include "error.h"
+#include <stdio.h>
 #include <mbedtls/error.h>
 
-void handle_mbedtls_error(int errno) {
-    char error[16];
+void _handle_mbedtls_error(int errno, const char *file, int line) {
+    char error[256];
     mbedtls_strerror(errno, error, sizeof(error));
+    printf("%s:%d: %s\n", file, line, error);
 }

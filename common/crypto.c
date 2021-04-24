@@ -6,24 +6,32 @@
 #include "common/error.h"
 //#include <string.h>
 
-static mbedtls_entropy_context entropy_ctx;
-static bool entropy_ctx_is_init;
+mbedtls_entropy_context entropy_ctx;
 static _Thread_local mbedtls_ctr_drbg_context drbg_ctx;
 
-int rand_init(void) {
-    if (!__atomic_test_and_set(&entropy_ctx_is_init, __ATOMIC_RELAXED)) {
-        mbedtls_entropy_init(&entropy_ctx);
-    }
-    mbedtls_ctr_drbg_init(&drbg_ctx);
-    mbedtls_ctr_drbg_seed(&drbg_ctx, mbedtls_entropy_func, &entropy_ctx,
-            NULL, 0);
+int entropy_init(void) {
+    mbedtls_entropy_init(&entropy_ctx);
     return 0;
 }
 
-void rand_free(void) {
-    if (__atomic_exchange_n(&entropy_ctx_is_init, false, __ATOMIC_RELAXED)) {
-        mbedtls_entropy_free(&entropy_ctx);
+void entropy_free(void) {
+    mbedtls_entropy_free(&entropy_ctx);
+}
+
+int rand_init(void) {
+    int ret;
+
+    mbedtls_ctr_drbg_init(&drbg_ctx);
+    ret = mbedtls_ctr_drbg_seed(&drbg_ctx, mbedtls_entropy_func, &entropy_ctx,
+            NULL, 0);
+    if (ret) {
+        handle_mbedtls_error(ret);
     }
+
+    return ret;
+}
+
+void rand_free(void) {
     mbedtls_ctr_drbg_free(&drbg_ctx);
 }
 
