@@ -157,7 +157,10 @@ int main(int argc, char **argv) {
         goto exit_mpi_finalize;
     }
 
-    int flags = OE_ENCLAVE_FLAG_DEBUG;
+    int flags = 0;
+#ifdef OE_DEBUG
+    flags |= OE_ENCLAVE_FLAG_DEBUG;
+#endif
 #ifdef OE_SIMULATION
     flags |= OE_ENCLAVE_FLAG_SIMULATE;
 #endif
