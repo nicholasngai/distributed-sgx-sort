@@ -1,6 +1,6 @@
 #include "node_t.h"
-#include <stdio.h>
 #include <stdlib.h>
+#include "common/error.h"
 
 /* Node encryption and decryption. */
 
@@ -12,13 +12,13 @@ int node_encrypt(void *key, node_t *node, void *dst_, size_t idx) {
      * ciphertext is the remaining 128 bytes. */
     ret = rand_read(dst, IV_LEN);
     if (ret) {
-        fprintf(stderr, "Error generating random IV\n");
+        handle_error_string("Error generating random IV");
         goto exit;
     }
     ret = aad_encrypt(key, node, sizeof(*node), &idx, sizeof(idx), dst,
             dst + IV_LEN + TAG_LEN, dst + IV_LEN);
     if (ret < 0) {
-        fprintf(stderr, "Error encrypting node %lu\n", idx);
+        handle_error_string("Error in encryption");
         goto exit;
     }
 
@@ -37,7 +37,7 @@ int node_decrypt(void *key, node_t *node, void *src_, size_t idx) {
     ret = aad_decrypt(key, src + IV_LEN + TAG_LEN, sizeof(*node), &idx,
             sizeof(idx), src, src + IV_LEN, node);
     if (ret < 0) {
-        fprintf(stderr, "Error decrypting node %lu\n", idx);
+        handle_error_string("Error in decryption");
         goto exit;
     }
 

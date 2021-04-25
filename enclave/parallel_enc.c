@@ -3,6 +3,7 @@
 #include <liboblivious/primitives.h>
 #include "common/crypto.h"
 #include "common/defs.h"
+#include "common/error.h"
 #include "common/node_t.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_t.h"
@@ -113,10 +114,12 @@ static void swap_local(void *arr, size_t a, size_t b, bool descending) {
     node_t node_b;
     ret = node_decrypt(key, &node_a, a_addr, a);
     if (ret) {
+        handle_error_string("Error decrypting node");
         return;
     }
     ret = node_decrypt(key, &node_b, b_addr, b);
     if (ret) {
+        handle_error_string("Error decrypting node");
         return;
     }
 
@@ -127,10 +130,12 @@ static void swap_local(void *arr, size_t a, size_t b, bool descending) {
     /* Encrypt both nodes using the same layout as above. */
     ret = node_encrypt(key, &node_a, a_addr, a);
     if (ret) {
+        handle_error_string("Error encrypting node");
         return;
     }
     ret = node_encrypt(key, &node_b, b_addr, b);
     if (ret) {
+        handle_error_string("Error encrypting node");
         return;
     }
 }
@@ -148,6 +153,7 @@ static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
     node_t local_node;
     ret = node_decrypt(key, &local_node, local_addr, local_idx);
     if (ret) {
+        handle_error_string("Error decrypting node");
         return;
     }
 
@@ -155,7 +161,7 @@ static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
     ret = mpi_tls_send_bytes((unsigned char *) &local_node, sizeof(local_node),
             remote_rank, remote_idx);
     if (ret) {
-        fprintf(stderr, "mpi_tls_send_bytes: Error sending bytes\n");
+        handle_error_string("Error sending node bytes");
         return;
     }
 
@@ -164,7 +170,7 @@ static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
     ret = mpi_tls_recv_bytes((unsigned char *) &remote_node,
             sizeof(remote_node), remote_rank, local_idx);
     if (ret) {
-        fprintf(stderr, "mpi_tls_recv_bytes: Error receiving bytes\n");
+        handle_error_string("Error receiving node bytes");
         return;
     }
 
@@ -179,6 +185,9 @@ static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
 
     /* Encrypt the local node (which is either old or new) back to memory. */
     ret = node_encrypt(key, &local_node, local_addr, local_idx);
+    if (ret) {
+        handle_error_string("Error encrypting node");
+    }
 }
 
 static void swap(void *arr, size_t a, size_t b, bool descending) {
@@ -414,7 +423,7 @@ void ecall_start_work(void) {
     /* Initialize random. It is not safe to do this until passing the barrier,
      * since the master thread initializes the entropy source. */
     if (rand_init()) {
-        fprintf(stderr, "Error initializing enclave random number generator\n");
+        handle_error_string("Error initializing enclave random number generator");
     }
 
     struct thread_work *work = pop_thread_work();
@@ -443,7 +452,7 @@ int ecall_sort(unsigned char *arr, size_t total_length_,
     int ret = -1;
 
     if (popcount(total_length_) != 1) {
-        fprintf(stderr, "Length must be a multiple of 2\n");
+        printf("Length must be a multiple of 2\n");
         goto exit;
     }
 
@@ -451,13 +460,13 @@ int ecall_sort(unsigned char *arr, size_t total_length_,
 
     /* Initialize entropy. */
     if (entropy_init()) {
-        fprintf(stderr, "Error initializing entropy\n");
+        handle_error_string("Error initializing entropy");
         goto exit;
     }
 
     /* Initialize TLS over MPI. */
     if (mpi_tls_init((size_t) world_rank, (size_t) world_size, &entropy_ctx)) {
-        fprintf(stderr, "mpi_tls_init: Error\n");
+        handle_error_string("Error initializing TLS over MPI");
         goto exit_free_entropy;
     }
 

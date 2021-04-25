@@ -25,7 +25,7 @@ int rand_init(void) {
     ret = mbedtls_ctr_drbg_seed(&drbg_ctx, mbedtls_entropy_func, &entropy_ctx,
             NULL, 0);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_ctr_drbg_seed");
     }
 
     return ret;
@@ -40,7 +40,7 @@ int rand_read(void *buf, size_t n) {
 
     ret = mbedtls_ctr_drbg_random(&drbg_ctx, buf, n);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_ctr_drbg_random");
         goto exit;
     }
 
@@ -61,7 +61,7 @@ int aad_encrypt(void *key, void *plaintext, size_t plaintext_len, void *aad,
     /* Initialize key. */
     ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_gcm_setkey");
         goto exit_free_ctx;
     }
 
@@ -73,7 +73,7 @@ int aad_encrypt(void *key, void *plaintext, size_t plaintext_len, void *aad,
     ret = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_ENCRYPT, plaintext_len,
             iv, IV_LEN, aad, aad_len, plaintext, ciphertext, TAG_LEN, tag);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_gcm_crypt_and_tag");
         goto exit_free_ctx;
     }
 
@@ -95,7 +95,7 @@ int aad_decrypt(void *key, void *ciphertext, size_t ciphertext_len, void *aad,
     /* Initialize key. */
     ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_gcm_setkey");
         goto exit_free_ctx;
     }
 
@@ -107,7 +107,7 @@ int aad_decrypt(void *key, void *ciphertext, size_t ciphertext_len, void *aad,
     ret = mbedtls_gcm_auth_decrypt(&ctx, ciphertext_len, iv, IV_LEN, aad,
             aad_len, tag, TAG_LEN, ciphertext, plaintext);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_gcm_auth_decrypt");
         goto exit_free_ctx;
     }
 
