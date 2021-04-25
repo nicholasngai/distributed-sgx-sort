@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include "common/crypto.h"
 #include "common/node_t.h"
+#include "common/error.h"
 #include "host/error.h"
 #include "host/parallel_u.h"
 
@@ -21,11 +22,11 @@ static int init_mpi(int *argc, char ***argv) {
     int threading_provided;
     ret = MPI_Init_thread(argc, argv, MPI_THREAD_MULTIPLE, &threading_provided);
     if (ret) {
-        handle_mpi_error(ret);
+        handle_mpi_error(ret, "MPI_Init_thread");
         goto exit;
     }
     if (threading_provided != MPI_THREAD_MULTIPLE) {
-        fprintf(stderr, "This program requires MPI_THREAD_MULTIPLE to be supported");
+        printf("This program requires MPI_THREAD_MULTIPLE to be supported");
         ret = 1;
         goto exit;
     }
@@ -33,12 +34,12 @@ static int init_mpi(int *argc, char ***argv) {
     /* Get world rank and size. */
     ret = MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
     if (ret) {
-        handle_mpi_error(ret);
+        handle_mpi_error(ret, "MPI_Comm_rank");
         goto exit;
     }
     ret = MPI_Comm_size(MPI_COMM_WORLD, &world_size);
     if (ret) {
-        handle_mpi_error(ret);
+        handle_mpi_error(ret, "MPI_Comm_size");
         goto exit;
     }
 
@@ -49,7 +50,7 @@ exit:
 int ocall_mpi_send_bytes(const unsigned char *buf, size_t count, int dest,
         int tag) {
     if (count > INT_MAX) {
-        handle_mpi_error(MPI_ERR_COUNT);
+        handle_error_string("Count too large");
         return MPI_ERR_COUNT;
     }
 
@@ -60,7 +61,7 @@ int ocall_mpi_send_bytes(const unsigned char *buf, size_t count, int dest,
 int ocall_mpi_recv_bytes(unsigned char *buf, size_t count, int source,
         int tag) {
     if (count > INT_MAX) {
-        handle_mpi_error(MPI_ERR_COUNT);
+        handle_error_string("Count too large");
         return MPI_ERR_COUNT;
     }
 
@@ -71,7 +72,7 @@ int ocall_mpi_recv_bytes(unsigned char *buf, size_t count, int source,
 int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
         int tag) {
     if (count > INT_MAX) {
-        handle_mpi_error(MPI_ERR_COUNT);
+        handle_error_string("Count too large");
         return -1;
     }
 
@@ -81,7 +82,7 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
     /* Probe for an available message. */
     ret = MPI_Probe(source, tag, MPI_COMM_WORLD, &status);
     if (ret) {
-        handle_mpi_error(ret);
+        handle_mpi_error(ret, "MPI_Probe");
         return -1;
     }
 
@@ -89,7 +90,7 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
     int bytes_to_recv;
     ret = MPI_Get_count(&status, MPI_UNSIGNED_CHAR, &bytes_to_recv);
     if (ret) {
-        handle_mpi_error(ret);
+        handle_mpi_error(ret, "MPI_Get_count");
         return -1;
     }
 
@@ -97,7 +98,7 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
     ret = MPI_Recv(buf, count, MPI_UNSIGNED_CHAR, source, tag,
             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     if (ret) {
-        handle_mpi_error(ret);
+        handle_mpi_error(ret, "MPI_Recv");
         return -1;
     }
 
@@ -112,7 +113,7 @@ static void *start_thread_work(void *enclave_) {
     oe_enclave_t *enclave = enclave_;
     oe_result_t result = ecall_start_work(enclave);
     if (result != OE_OK) {
-        fprintf(stderr, "ecall_start_work: %s\n", oe_result_str(result));
+        handle_oe_error(result, "ecall_start_work");
     }
     return 0;
 }
@@ -134,7 +135,7 @@ int main(int argc, char **argv) {
     {
         ssize_t l = atoll(argv[2]);
         if (l < 0) {
-            fprintf(stderr, "Invalid array size\n");
+            printf("Invalid array size\n");
             return ret;
         }
         length = l;
@@ -143,7 +144,7 @@ int main(int argc, char **argv) {
     if (argc >= 4) {
         ssize_t n = atoll(argv[3]);
         if (n < 0) {
-            fprintf(stderr, "Invalid number of threads\n");
+            printf("Invalid number of threads\n");
             return ret;
         }
         num_threads = n;
@@ -158,7 +159,7 @@ int main(int argc, char **argv) {
     /* Create enclave. */
 
     if (ret) {
-        fprintf(stderr, "Error initializing MPI\n");
+        handle_error_string("init_mpi");
         goto exit_mpi_finalize;
     }
 
@@ -178,7 +179,7 @@ int main(int argc, char **argv) {
             &enclave);
 
     if (result != OE_OK) {
-        fprintf(stderr, "Enclave creation failed: %s\n", oe_result_str(result));
+        handle_oe_error(result, "oe_create_parallel_enclave");
         ret = result;
         goto exit_mpi_finalize;
     }
@@ -188,7 +189,7 @@ int main(int argc, char **argv) {
     result = ecall_set_params(enclave, world_rank, world_size, num_threads);
 
     if (result != OE_OK) {
-        fprintf(stderr, "ecall_set_num_threads: %s\n", oe_result_str(result));
+        handle_oe_error(result, "ecall_set_params");
         goto exit_terminate_enclave;
     }
 
@@ -212,11 +213,11 @@ int main(int argc, char **argv) {
         goto exit_terminate_enclave;
     }
     if (entropy_init()) {
-        fprintf(stderr, "Error initializing host entropy context\n");
+        handle_error_string("Error initializing host entropy context");
         goto exit_free_arr;
     }
     if (rand_init()) {
-        fprintf(stderr, "Error initializing host random number generator\n");
+        handle_error_string("Error initializing host random number generator");
         entropy_free();
         goto exit_free_arr;
     }
@@ -231,7 +232,7 @@ int main(int argc, char **argv) {
         unsigned char *start = arr + (i - local_start) * SIZEOF_ENCRYPTED_NODE;
         ret = node_encrypt(key, &node, start, i);
         if (ret < 0) {
-            fprintf(stderr, "Error encrypting node in host\n");
+            handle_error_string("Error encrypting node in host");
         }
     }
     rand_free();
@@ -256,7 +257,7 @@ int main(int argc, char **argv) {
     }
 
     if (ret) {
-        fprintf(stderr, "Enclave exited with return code %d\n", ret);
+        handle_error_string("Enclave exited with return code %d", ret);
         goto exit_terminate_enclave;
     }
 
@@ -279,7 +280,7 @@ int main(int argc, char **argv) {
         unsigned char *start = arr + (i - local_start) * SIZEOF_ENCRYPTED_NODE;
         ret = node_decrypt(key, &node, start, i);
         if (ret < 0) {
-            fprintf(stderr, "Error decrypting node in host\n");
+            handle_error_string("Error decrypting node in host");
         }
         if (i == local_start) {
            first_key = node.key;

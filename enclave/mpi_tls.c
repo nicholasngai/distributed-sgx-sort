@@ -1,6 +1,5 @@
 #include "enclave/mpi_tls.h"
 #include <stddef.h>
-#include <stdio.h>
 #include <string.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
@@ -53,11 +52,11 @@ static int send_callback(void *session_, const unsigned char *buf, size_t len) {
 
     result = ocall_mpi_send_bytes(&ret, buf, len, session->rank, session->tag);
     if (result != OE_OK) {
-        fprintf(stderr, "ocall_mpi_send_bytes: %s\n", oe_result_str(result));
+        handle_oe_error(result, "ocall_mpi_send_bytes");
         goto exit;
     }
     if (ret) {
-        fprintf(stderr, "Failed to send TLS encrypted bytes\n");
+        handle_error_string("Failed to send TLS encrypted bytes");
         goto exit;
     }
 
@@ -71,8 +70,8 @@ static int recv_callback(void *session_, unsigned char *buf, size_t len,
         uint32_t timeout UNUSED) {
     struct mpi_tls_session *session = session_;
     oe_result_t result;
-    int ret = -1;
     size_t bytes_remaining = len;
+    int ret = -1;
 
     /* Copy excess bytes in the buffer from earlier if we have any. */
     if (session->buffer_bytes_left) {
@@ -89,11 +88,11 @@ static int recv_callback(void *session_, unsigned char *buf, size_t len,
         result = ocall_mpi_try_recv_bytes(&ret, session->buffer, BUFFER_SIZE,
                 session->rank, session->tag);
         if (result != OE_OK) {
-            fprintf(stderr, "ocall_mpi_recv_bytes: %s\n", oe_result_str(result));
+            handle_oe_error(result, "ocall_mpi_try_recv_bytes");
             goto exit;
         }
         if (ret < 0) {
-            fprintf(stderr, "Failed to recv TLS encrypted bytes\n");
+            handle_error_string("Failed to receive TLS encrypted bytes");
             goto exit;
         }
 
@@ -122,7 +121,7 @@ static int init_session(struct mpi_tls_session *session, bool is_server,
     ret = mbedtls_ctr_drbg_seed(&session->drbg, mbedtls_entropy_func, entropy,
             NULL, 0);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_ctr_drbg_init");
         goto exit_free_drbg;
     }
 
@@ -134,7 +133,7 @@ static int init_session(struct mpi_tls_session *session, bool is_server,
             is_server ? MBEDTLS_SSL_IS_SERVER : MBEDTLS_SSL_IS_CLIENT,
             MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_ssl_config_defaults");
         goto exit_free_config;
     }
     mbedtls_ssl_conf_rng(&session->conf, mbedtls_ctr_drbg_random, &session->drbg);
@@ -143,7 +142,7 @@ static int init_session(struct mpi_tls_session *session, bool is_server,
     mbedtls_ssl_conf_ca_chain(&session->conf, cert->next, NULL);
     ret = mbedtls_ssl_conf_own_cert(&session->conf, cert, privkey);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_ssl_conf_own_cert");
         goto exit_free_config;
     }
 
@@ -151,7 +150,7 @@ static int init_session(struct mpi_tls_session *session, bool is_server,
     mbedtls_ssl_init(&session->ssl);
     ret = mbedtls_ssl_setup(&session->ssl, &session->conf);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_ssl_setup");
         goto exit_free_ssl;
     }
     mbedtls_ssl_set_bio(&session->ssl, session, send_callback, NULL,
@@ -212,15 +211,13 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
     result = oe_get_public_key_by_policy(OE_SEAL_POLICY_UNIQUE, &key_params,
             &pubkey_buf, &pubkey_buf_size, NULL, 0);
     if (result != OE_OK) {
-        fprintf(stderr, "oe_get_public_key_by_policy: %s\n",
-                oe_result_str(result));
+        handle_oe_error(result, "oe_get_public_key_by_policy")
         goto exit;
     }
     result = oe_get_private_key_by_policy(OE_SEAL_POLICY_UNIQUE, &key_params,
             &privkey_buf, &privkey_buf_size, NULL, 0);
     if (result != OE_OK) {
-        fprintf(stderr, "oe_get_private_key_by_policy: %s\n",
-                oe_result_str(result));
+        handle_oe_error(result, "oe_get_private_key_by_policy");
         goto exit_free_pubkey_buf;
     }
     oe_uuid_t uuid_sgx_ecdsa = { OE_FORMAT_UUID_SGX_ECDSA };
@@ -235,8 +232,7 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
             privkey_buf, privkey_buf_size, pubkey_buf, pubkey_buf_size, NULL, 0,
             &cert_buf, &cert_buf_size);
     if (result != OE_OK) {
-        fprintf(stderr, "oe_get_attestation_cert_buf_with_evidence_v2: %s\n",
-                oe_result_str(result));
+        handle_oe_error(result, "oe_get_attestation_cert_buf_with_evidence_v2");
         goto exit_free_privkey_buf;
     }
 #else /* OE_SIMULATION */
@@ -247,12 +243,12 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
 #endif
     ret = mbedtls_x509_crt_parse_der(cert, cert_buf, cert_buf_size);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_x509_crt_parse_der");
         goto exit_free_cert_buf;
     }
     ret = mbedtls_pk_parse_key(privkey, privkey_buf, privkey_buf_size, NULL, 0);
     if (ret) {
-        handle_mbedtls_error(ret);
+        handle_mbedtls_error(ret, "mbedtls_pk_parse_key");
         goto exit_free_cert_buf;
     }
 
@@ -281,7 +277,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
     mbedtls_x509_crt_init(&cert);
     mbedtls_pk_init(&privkey);
     if (load_certificate_and_key(&cert, &privkey)) {
-        fprintf(stderr, "Failed to load certificate and private key\n");
+        handle_error_string("Failed to load certificate and private key");
         goto exit;
     }
 
@@ -302,7 +298,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
         ret = init_session(&sessions[i], i > world_rank, &cert, &privkey,
                 entropy, i);
         if (ret) {
-            fprintf(stderr, "Failed to initialize TLS session structures\n");
+            handle_error_string("Failed to initialize TLS session structures");
             for (size_t j = 0; j < i; j++) {
                 free_session(&sessions[j]);
             }
@@ -336,7 +332,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
             /* Do handshake. */
             ret = mbedtls_ssl_handshake_step(&sessions[i].ssl);
             if (ret) {
-                handle_mbedtls_error(ret);
+                handle_mbedtls_error(ret, "mbedtls_ssl_handshake_step");
                 goto exit_free_sessions;
             }
         }
@@ -382,7 +378,7 @@ int mpi_tls_send_bytes(const unsigned char *buf, size_t count, int dest,
         ret = mbedtls_ssl_write(&sessions[dest].ssl, buf, count);
         spinlock_unlock(&sessions[dest].lock);
         if (ret < 0) {
-            handle_mbedtls_error(ret);
+            handle_mbedtls_error(ret, "mbedtls_ssl_write");
             spinlock_unlock(&sessions[dest].lock);
             goto exit;
         }
@@ -405,7 +401,7 @@ int mpi_tls_recv_bytes(unsigned char *buf, size_t count, int src, int tag) {
         ret = mbedtls_ssl_read(&sessions[src].ssl, buf, count);
         spinlock_unlock(&sessions[src].lock);
         if (ret < 0) {
-            handle_mbedtls_error(ret);
+            handle_mbedtls_error(ret, "mbedtls_ssl_read");
             goto exit;
         }
         bytes_to_read -= ret;
