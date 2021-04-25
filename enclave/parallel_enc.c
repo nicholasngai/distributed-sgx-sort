@@ -100,43 +100,50 @@ static size_t get_local_start(int rank) {
     return (rank * total_length + world_size - 1) / world_size;
 }
 
-static void swap_local(void *arr, size_t a, size_t b, bool descending) {
+static void swap_local_range(void *arr, size_t a, size_t b, size_t count,
+        bool descending) {
     size_t local_start = get_local_start(world_rank);
-    unsigned char *a_addr =
-        (unsigned char *) arr + (a - local_start) * SIZEOF_ENCRYPTED_NODE;
-    unsigned char *b_addr =
-        (unsigned char *) arr + (b - local_start) * SIZEOF_ENCRYPTED_NODE;
     int ret;
 
-    /* Decrypt both nodes. The IV is the first 12 bytes. The tag is the next 16
-     * bytes. The ciphertext is the remaining 128 bytes. */
-    node_t node_a;
-    node_t node_b;
-    ret = node_decrypt(key, &node_a, a_addr, a);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        return;
-    }
-    ret = node_decrypt(key, &node_b, b_addr, b);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        return;
-    }
+    for (size_t i = 0; i < count; i++) {
+        size_t a_index = a + i;
+        size_t b_index = b + i;
+        unsigned char *a_addr =
+            (unsigned char *) arr
+                + (a_index - local_start) * SIZEOF_ENCRYPTED_NODE;
+        unsigned char *b_addr =
+            (unsigned char *) arr
+                + (b_index - local_start) * SIZEOF_ENCRYPTED_NODE;
 
-    /* Oblivious comparison and swap. */
-    bool cond = (node_a.key > node_b.key) != descending;
-    o_memswap(&node_a, &node_b, sizeof(node_a), cond);
+        /* Decrypt both nodes. */
+        node_t node_a;
+        node_t node_b;
+        ret = node_decrypt(key, &node_a, a_addr, a_index);
+        if (ret) {
+            handle_error_string("Error decrypting node");
+            return;
+        }
+        ret = node_decrypt(key, &node_b, b_addr, b_index);
+        if (ret) {
+            handle_error_string("Error decrypting node");
+            return;
+        }
 
-    /* Encrypt both nodes using the same layout as above. */
-    ret = node_encrypt(key, &node_a, a_addr, a);
-    if (ret) {
-        handle_error_string("Error encrypting node");
-        return;
-    }
-    ret = node_encrypt(key, &node_b, b_addr, b);
-    if (ret) {
-        handle_error_string("Error encrypting node");
-        return;
+        /* Oblivious comparison and swap. */
+        bool cond = (node_a.key > node_b.key) != descending;
+        o_memswap(&node_a, &node_b, sizeof(node_a), cond);
+
+        /* Encrypt both nodes using the same layout as above. */
+        ret = node_encrypt(key, &node_a, a_addr, a_index);
+        if (ret) {
+            handle_error_string("Error encrypting node");
+            return;
+        }
+        ret = node_encrypt(key, &node_b, b_addr, b_index);
+        if (ret) {
+            handle_error_string("Error encrypting node");
+            return;
+        }
     }
 }
 
@@ -195,12 +202,33 @@ static void swap(void *arr, size_t a, size_t b, bool descending) {
     int b_rank = get_index_address(b);
 
     if (a_rank == world_rank && b_rank == world_rank) {
-        swap_local(arr, a, b, descending);
+        swap_local_range(arr, a, b, 1, descending);
     } else if (a_rank == world_rank) {
         swap_remote(arr, a, b, descending);
     } else if (b_rank == world_rank) {
         swap_remote(arr, b, a, descending);
     }
+}
+
+static void swap_range(void *arr, size_t a_start, size_t b_start,
+        size_t count, bool descending) {
+    /* Compute which ranges are local-local, local-remote, and remote-remote. */
+    size_t local_start = get_local_start(world_rank);
+    size_t local_end = get_local_start(world_rank + 1);
+    size_t a_local_start_index = MAX(a_start, local_start) - a_start;
+    size_t a_local_end_index =
+        MAX(MIN(a_start + count, local_end), a_start) - a_start;
+    size_t b_local_start_index = MAX(b_start, local_start) - b_start;
+    size_t b_local_end_index =
+        MAX(MIN(b_start + count, local_end), b_start) - b_start;
+
+    size_t local_local_start_index =
+        MAX(a_local_start_index, b_local_start_index);
+    size_t local_local_end_index = MIN(a_local_end_index, b_local_end_index);
+
+    swap_local_range(arr, a_start + local_local_start_index,
+            b_start + local_local_start_index,
+            local_local_end_index - local_local_start_index, descending);
 }
 
 /* Bitonic sort. */
@@ -326,9 +354,7 @@ static void merge_threaded(void *arr, size_t start, size_t length,
             size_t left_length = length / 2;
             size_t right_length = length - left_length;
             size_t right_start = start + left_length;
-            for (size_t i = 0; i + left_length < length; i++) {
-                swap(arr, start + i, start + i + left_length, descending);
-            }
+            swap_range(arr, start, right_start, left_length, descending);
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only merge the left. The right is completely remote. */
                 merge_threaded(arr, start, left_length, descending,
@@ -376,9 +402,7 @@ static void merge_single(void *arr, size_t start, size_t length,
             size_t left_length = length / 2;
             size_t right_length = length - left_length;
             size_t right_start = start + left_length;
-            for (size_t i = 0; i + left_length < length; i++) {
-                swap(arr, start + i, start + i + left_length, descending);
-            }
+            swap_range(arr, start, right_start, left_length, descending);
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only merge the left. The right is completely remote. */
                 merge_single(arr, start, left_length, descending);
