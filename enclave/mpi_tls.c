@@ -375,8 +375,8 @@ void mpi_tls_free(void) {
     mbedtls_pk_free(&privkey);
 }
 
-int mpi_tls_send_bytes(const unsigned char *buf, size_t count, int dest,
-        int tag) {
+int mpi_tls_send_bytes(const void *buf_, size_t count, int dest, int tag) {
+    const unsigned char *buf = buf_;
     int ret = -1;
 
     size_t bytes_to_write = count;
@@ -400,7 +400,8 @@ exit:
     return ret;
 }
 
-int mpi_tls_recv_bytes(unsigned char *buf, size_t count, int src, int tag) {
+int mpi_tls_recv_bytes(void *buf_, size_t count, int src, int tag) {
+    unsigned char *buf = buf_;
     int ret = -1;
 
     size_t bytes_to_read = count;
