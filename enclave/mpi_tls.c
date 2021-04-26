@@ -48,16 +48,23 @@ static int verify_callback(void *data UNUSED, mbedtls_x509_crt *crt UNUSED,
 static int send_callback(void *session_, const unsigned char *buf, size_t len) {
     struct mpi_tls_session *session = session_;
     oe_result_t result;
+    size_t bytes_remaining = len;
     int ret = -1;
 
-    result = ocall_mpi_send_bytes(&ret, buf, len, session->rank, session->tag);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ocall_mpi_send_bytes");
-        goto exit;
-    }
-    if (ret) {
-        handle_error_string("Failed to send TLS encrypted bytes");
-        goto exit;
+    while (bytes_remaining) {
+        size_t bytes_to_send = MIN(bytes_remaining, BUFFER_SIZE);
+        result = ocall_mpi_send_bytes(&ret, buf, bytes_to_send, session->rank,
+                session->tag);
+        if (result != OE_OK) {
+            handle_oe_error(result, "ocall_mpi_send_bytes");
+            goto exit;
+        }
+        if (ret) {
+            handle_error_string("Failed to send TLS encrypted bytes");
+            goto exit;
+        }
+        buf += bytes_to_send;
+        bytes_remaining -= bytes_to_send;
     }
 
     ret = len;
@@ -382,6 +389,7 @@ int mpi_tls_send_bytes(const unsigned char *buf, size_t count, int dest,
             spinlock_unlock(&sessions[dest].lock);
             goto exit;
         }
+        buf += ret;
         bytes_to_write -= ret;
     }
 
@@ -404,6 +412,7 @@ int mpi_tls_recv_bytes(unsigned char *buf, size_t count, int src, int tag) {
             handle_mbedtls_error(ret, "mbedtls_ssl_read");
             goto exit;
         }
+        buf += ret;
         bytes_to_read -= ret;
     }
 
