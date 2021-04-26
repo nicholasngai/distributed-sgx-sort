@@ -219,7 +219,7 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
     result = oe_get_public_key_by_policy(OE_SEAL_POLICY_UNIQUE, &key_params,
             &pubkey_buf, &pubkey_buf_size, NULL, 0);
     if (result != OE_OK) {
-        handle_oe_error(result, "oe_get_public_key_by_policy")
+        handle_oe_error(result, "oe_get_public_key_by_policy");
         goto exit;
     }
     result = oe_get_private_key_by_policy(OE_SEAL_POLICY_UNIQUE, &key_params,
