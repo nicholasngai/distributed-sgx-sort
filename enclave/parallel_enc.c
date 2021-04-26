@@ -9,12 +9,17 @@
 #include "enclave/parallel_t.h"
 #include "enclave/synch.h"
 
+#define SWAP_CHUNK_SIZE 1024
+
 static int world_rank;
 static int world_size;
 static size_t total_num_threads;
 static size_t total_length;
 
 static unsigned char key[16];
+
+static _Thread_local node_t *local_buffer;
+static _Thread_local node_t *remote_buffer;
 
 /* Thread synchronization. */
 
@@ -147,53 +152,76 @@ static void swap_local_range(void *arr, size_t a, size_t b, size_t count,
     }
 }
 
-static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
-        bool descending) {
+static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
+        size_t count, bool descending) {
     size_t local_start = get_local_start(world_rank);
-    void *local_addr =
-        (unsigned char *) arr +
-            (local_idx - local_start) * SIZEOF_ENCRYPTED_NODE;
     int remote_rank = get_index_address(remote_idx);
     int ret;
 
-    /* Decrypt both the local node. */
-    node_t local_node;
-    ret = node_decrypt(key, &local_node, local_addr, local_idx);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        return;
-    }
+    /* Swap nodes in maximum chunk sizes of SWAP_CHUNK_SIZE and iterate until no
+     * count is remaining. */
+    while (count) {
+        size_t nodes_to_swap = MIN(count, SWAP_CHUNK_SIZE);
 
-    /* Send our current node. */
-    ret = mpi_tls_send_bytes(&local_node, sizeof(local_node),
-            remote_rank, remote_idx);
-    if (ret) {
-        handle_error_string("Error sending node bytes");
-        return;
-    }
+        /* Decrypt local nodes. */
+        for (size_t i = 0; i < nodes_to_swap; i++) {
+            unsigned char *local_addr =
+                (unsigned char *) arr +
+                    (local_idx - local_start + i) * SIZEOF_ENCRYPTED_NODE;
+            ret = node_decrypt(key, &local_buffer[i], local_addr, local_idx + i);
+            if (ret) {
+                handle_error_string("Error decrypting node");
+                return;
+            }
+        }
 
-    /* Receive their node. */
-    node_t remote_node;
-    ret = mpi_tls_recv_bytes(&remote_node, sizeof(remote_node), remote_rank,
-            local_idx);
-    if (ret) {
-        handle_error_string("Error receiving node bytes");
-        return;
-    }
+        /* Send local nodes to the remote. */
+        ret = mpi_tls_send_bytes(local_buffer,
+                nodes_to_swap * sizeof(*local_buffer), remote_rank, remote_idx);
+        if (ret) {
+            handle_error_string("Error sending node bytes");
+            return;
+        }
 
-    /* Replace the local element with the received remote element if necessary.
-     * Assume we are sorting ascending. If the local index is lower, then we
-     * swap if the local element is lower. Likewise, if the local index is
-     * higher, than we swap if the local element is higher. If descending,
-     * everything is reversed. */
-    bool cond = (local_idx < remote_idx) == (local_node.key > remote_node.key);
-    cond = cond != descending;
-    o_memcpy(&local_node, &remote_node, sizeof(local_node), cond);
+        /* Receive remote nodes to encrypted buffer. */
+        ret = mpi_tls_recv_bytes(remote_buffer,
+                nodes_to_swap * sizeof(*remote_buffer), remote_rank, local_idx);
+        if (ret) {
+            handle_error_string("Error receiving node bytes");
+            return;
+        }
 
-    /* Encrypt the local node (which is either old or new) back to memory. */
-    ret = node_encrypt(key, &local_node, local_addr, local_idx);
-    if (ret) {
-        handle_error_string("Error encrypting node");
+        /* Replace the local elements with the received remote elements if
+         * necessary. Assume we are sorting ascending. If the local index is lower,
+         * then we swap if the local element is lower. Likewise, if the local index
+         * is higher, than we swap if the local element is higher. If descending,
+         * everything is reversed. */
+        for (size_t i = 0; i < nodes_to_swap; i++) {
+            bool cond =
+                (local_idx < remote_idx)
+                    == (local_buffer[i].key > remote_buffer[i].key);
+            cond = cond != descending;
+            o_memcpy(&local_buffer[i], &remote_buffer[i], sizeof(*local_buffer),
+                    cond);
+        }
+
+        /* Encrypt the local nodes (some of which are the same as before) back to
+         * memory. */
+        for (size_t i = 0; i < nodes_to_swap; i++) {
+            void *local_addr =
+                (unsigned char *) arr +
+                    (local_idx - local_start + i) * SIZEOF_ENCRYPTED_NODE;
+            ret = node_encrypt(key, &local_buffer[i], local_addr, local_idx + i);
+            if (ret) {
+                handle_error_string("Error encrypting node");
+                return;
+            }
+        }
+
+        /* Bump pointers, decrement count, and continue. */
+        local_idx += nodes_to_swap;
+        remote_idx += nodes_to_swap;
+        count -= nodes_to_swap;
     }
 }
 
@@ -204,31 +232,38 @@ static void swap(void *arr, size_t a, size_t b, bool descending) {
     if (a_rank == world_rank && b_rank == world_rank) {
         swap_local_range(arr, a, b, 1, descending);
     } else if (a_rank == world_rank) {
-        swap_remote(arr, a, b, descending);
+        swap_remote_range(arr, a, b, 1, descending);
     } else if (b_rank == world_rank) {
-        swap_remote(arr, b, a, descending);
+        swap_remote_range(arr, b, a, 1, descending);
     }
 }
 
 static void swap_range(void *arr, size_t a_start, size_t b_start,
         size_t count, bool descending) {
-    /* Compute which ranges are local-local, local-remote, and remote-remote. */
+    // TODO Assumption: Only either a subset of range A is local, or a subset of
+    // range B is local. For local-remote swaps, the subset of the remote range
+    // correspondingw with the local range is entirely contained within a single
+    // node. This requires that both the number of elements and the number of
+    // nodes is a power of 2.
+
     size_t local_start = get_local_start(world_rank);
     size_t local_end = get_local_start(world_rank + 1);
-    size_t a_local_start_index = MAX(a_start, local_start) - a_start;
-    size_t a_local_end_index =
-        MAX(MIN(a_start + count, local_end), a_start) - a_start;
-    size_t b_local_start_index = MAX(b_start, local_start) - b_start;
-    size_t b_local_end_index =
-        MAX(MIN(b_start + count, local_end), b_start) - b_start;
+    bool a_is_local = a_start < local_end && a_start + count > local_start;
+    bool b_is_local = b_start < local_end && b_start + count > local_start;
 
-    size_t local_local_start_index =
-        MAX(a_local_start_index, b_local_start_index);
-    size_t local_local_end_index = MIN(a_local_end_index, b_local_end_index);
-
-    swap_local_range(arr, a_start + local_local_start_index,
-            b_start + local_local_start_index,
-            local_local_end_index - local_local_start_index, descending);
+    if (a_is_local && b_is_local) {
+        swap_local_range(arr, a_start, b_start, count, descending);
+    } else if (a_is_local) {
+        size_t a_local_start = MAX(a_start, local_start);
+        size_t a_local_end = MIN(a_start + count, local_end);
+        swap_remote_range(arr, a_local_start, b_start + a_local_start - a_start,
+                a_local_end - a_local_start, descending);
+    } else if (b_is_local) {
+        size_t b_local_start = MAX(b_start, local_start);
+        size_t b_local_end = MIN(b_start + count, local_end);
+        swap_remote_range(arr, b_local_start, a_start + b_local_start - b_start,
+                b_local_end - b_local_start, descending);
+    }
 }
 
 /* Bitonic sort. */
@@ -441,6 +476,16 @@ void ecall_set_params(int world_rank_, int world_size_, size_t num_threads) {
 }
 
 void ecall_start_work(void) {
+    /* Allocate buffers. */
+    local_buffer = malloc(SWAP_CHUNK_SIZE * sizeof(*local_buffer));
+    if (!local_buffer) {
+        perror("malloc local_buffer");
+    }
+    remote_buffer = malloc(SWAP_CHUNK_SIZE * sizeof(*remote_buffer));
+    if (!remote_buffer) {
+        perror("malloc remote_buffer");
+    }
+
     /* Wait for all threads to start work. */
     wait_for_all_threads();
 
@@ -461,6 +506,9 @@ void ecall_start_work(void) {
     /* Wait for all threads to exit work loop. */
     wait_for_all_threads();
 
+    /* Free resources. */
+    free(local_buffer);
+    free(remote_buffer);
     rand_free();
 }
 
