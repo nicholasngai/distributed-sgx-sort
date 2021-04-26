@@ -108,10 +108,10 @@ static void swap_local_range(void *arr, size_t a, size_t b, size_t count,
     for (size_t i = 0; i < count; i++) {
         size_t a_index = a + i;
         size_t b_index = b + i;
-        unsigned char *a_addr =
+        void *a_addr =
             (unsigned char *) arr
                 + (a_index - local_start) * SIZEOF_ENCRYPTED_NODE;
-        unsigned char *b_addr =
+        void *b_addr =
             (unsigned char *) arr
                 + (b_index - local_start) * SIZEOF_ENCRYPTED_NODE;
 
@@ -150,7 +150,7 @@ static void swap_local_range(void *arr, size_t a, size_t b, size_t count,
 static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
         bool descending) {
     size_t local_start = get_local_start(world_rank);
-    unsigned char *local_addr =
+    void *local_addr =
         (unsigned char *) arr +
             (local_idx - local_start) * SIZEOF_ENCRYPTED_NODE;
     int remote_rank = get_index_address(remote_idx);
@@ -165,7 +165,7 @@ static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
     }
 
     /* Send our current node. */
-    ret = mpi_tls_send_bytes((unsigned char *) &local_node, sizeof(local_node),
+    ret = mpi_tls_send_bytes(&local_node, sizeof(local_node),
             remote_rank, remote_idx);
     if (ret) {
         handle_error_string("Error sending node bytes");
@@ -174,8 +174,8 @@ static void swap_remote(void *arr, size_t local_idx, size_t remote_idx,
 
     /* Receive their node. */
     node_t remote_node;
-    ret = mpi_tls_recv_bytes((unsigned char *) &remote_node,
-            sizeof(remote_node), remote_rank, local_idx);
+    ret = mpi_tls_recv_bytes(&remote_node, sizeof(remote_node), remote_rank,
+            local_idx);
     if (ret) {
         handle_error_string("Error receiving node bytes");
         return;
