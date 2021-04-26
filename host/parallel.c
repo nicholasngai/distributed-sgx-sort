@@ -274,21 +274,27 @@ int main(int argc, char **argv) {
 
     uint64_t first_key = 0;
     uint64_t prev_key = 0;
-    for (size_t i = local_start; i < local_start + local_length; i++) {
-        /* Decrypt node. */
-        node_t node;
-        unsigned char *start = arr + (i - local_start) * SIZEOF_ENCRYPTED_NODE;
-        ret = node_decrypt(key, &node, start, i);
-        if (ret < 0) {
-            handle_error_string("Error decrypting node in host");
+    for (int rank = 0; rank < world_size; rank++) {
+        if (rank == world_rank) {
+            for (size_t i = local_start; i < local_start + local_length; i++) {
+                /* Decrypt node. */
+                node_t node;
+                unsigned char *start = arr + (i - local_start) * SIZEOF_ENCRYPTED_NODE;
+                ret = node_decrypt(key, &node, start, i);
+                if (ret < 0) {
+                    handle_error_string("Error decrypting node in host");
+                }
+                //printf("%d: %lu\n", world_rank, node.key);
+                if (i == local_start) {
+                   first_key = node.key;
+                } else if (prev_key > node.key) {
+                    printf("Not sorted correctly!\n");
+                    break;
+                }
+                prev_key = node.key;
+            }
         }
-        if (i == local_start) {
-           first_key = node.key;
-        } else if (prev_key > node.key) {
-            printf("Not sorted correctly!\n");
-            break;
-        }
-        prev_key = node.key;
+        MPI_Barrier(MPI_COMM_WORLD);
     }
 
     if (world_rank < world_size - 1) {
@@ -303,7 +309,7 @@ int main(int argc, char **argv) {
         MPI_Recv(&prev_key, 1, MPI_UNSIGNED_LONG_LONG, world_rank - 1, 0,
                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         if (prev_key > first_key) {
-            printf("Not sorted correctly!\n");
+            printf("Not sorted correctly at enclave boundaries!\n");
         }
     }
 
