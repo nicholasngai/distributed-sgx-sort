@@ -1,8 +1,10 @@
 #include "crypto.h"
-#include <mbedtls/gcm.h>
+#include <stdbool.h>
+#include <string.h>
+#include <mbedtls/aes.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
-#include <stdbool.h>
+#include "common/defs.h"
 #include "common/error.h"
 //#include <string.h>
 
@@ -51,18 +53,18 @@ exit:
 }
 
 int aad_encrypt(const void *key, const void *plaintext, size_t plaintext_len,
-        const void *aad, size_t aad_len, const void *iv, void *ciphertext,
-        void *tag) {
+        const void *aad UNUSED, size_t aad_len UNUSED, const void *iv,
+        void *ciphertext, void *tag UNUSED) {
     int ret = -1;
 
     /* Initialize encryption context. */
-    mbedtls_gcm_context ctx;
-    mbedtls_gcm_init(&ctx);
+    mbedtls_aes_context ctx;
+    mbedtls_aes_init(&ctx);
 
     /* Initialize key. */
-    ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+    ret = mbedtls_aes_setkey_enc(&ctx, key, 128);
     if (ret) {
-        handle_mbedtls_error(ret, "mbedtls_gcm_setkey");
+        handle_mbedtls_error(ret, "mbedtls_aes_setkey");
         goto exit_free_ctx;
     }
 
@@ -71,33 +73,35 @@ int aad_encrypt(const void *key, const void *plaintext, size_t plaintext_len,
     //goto exit_free_ctx;
 
     /* Encrypt. */
-    ret = mbedtls_gcm_crypt_and_tag(&ctx, MBEDTLS_GCM_ENCRYPT, plaintext_len,
-            iv, IV_LEN, aad, aad_len, plaintext, ciphertext, TAG_LEN, tag);
+    unsigned char iv_param[IV_LEN];
+    memcpy(iv_param, iv, sizeof(iv_param));
+    ret = mbedtls_aes_crypt_cbc(&ctx, MBEDTLS_AES_ENCRYPT, plaintext_len,
+            iv_param, plaintext, ciphertext);
     if (ret) {
-        handle_mbedtls_error(ret, "mbedtls_gcm_crypt_and_tag");
+        handle_mbedtls_error(ret, "mbedtls_aes_crypt_and_tag");
         goto exit_free_ctx;
     }
 
     ret = 0;
 
 exit_free_ctx:
-    mbedtls_gcm_free(&ctx);
+    mbedtls_aes_free(&ctx);
     return ret;
 }
 
 int aad_decrypt(const void *key, const void *ciphertext, size_t ciphertext_len,
-        const void *aad, size_t aad_len, const void *iv, const void *tag,
-        void *plaintext) {
+        const void *aad UNUSED, size_t aad_len UNUSED, const void *iv,
+        const void *tag UNUSED, void *plaintext) {
     int ret = -1;
 
     /* Initialize encryption context. */
-    mbedtls_gcm_context ctx;
-    mbedtls_gcm_init(&ctx);
+    mbedtls_aes_context ctx;
+    mbedtls_aes_init(&ctx);
 
     /* Initialize key. */
-    ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+    ret = mbedtls_aes_setkey_dec(&ctx, key, 128);
     if (ret) {
-        handle_mbedtls_error(ret, "mbedtls_gcm_setkey");
+        handle_mbedtls_error(ret, "mbedtls_aes_setkey");
         goto exit_free_ctx;
     }
 
@@ -106,16 +110,18 @@ int aad_decrypt(const void *key, const void *ciphertext, size_t ciphertext_len,
     //goto exit_free_ctx;
 
     /* Decrypt. */
-    ret = mbedtls_gcm_auth_decrypt(&ctx, ciphertext_len, iv, IV_LEN, aad,
-            aad_len, tag, TAG_LEN, ciphertext, plaintext);
+    unsigned char iv_param[IV_LEN];
+    memcpy(iv_param, iv, sizeof(iv_param));
+    ret = mbedtls_aes_crypt_cbc(&ctx, MBEDTLS_AES_DECRYPT, ciphertext_len,
+            iv_param, ciphertext, plaintext);
     if (ret) {
-        handle_mbedtls_error(ret, "mbedtls_gcm_auth_decrypt");
+        handle_mbedtls_error(ret, "mbedtls_aes_auth_decrypt");
         goto exit_free_ctx;
     }
 
     ret = 0;
 
 exit_free_ctx:
-    mbedtls_gcm_free(&ctx);
+    mbedtls_aes_free(&ctx);
     return ret;
 }

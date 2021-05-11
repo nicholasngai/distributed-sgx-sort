@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <mbedtls/entropy.h>
 
-#define IV_LEN 12
-#define TAG_LEN 16
+#define IV_LEN 16
+#define TAG_LEN 0
 
 extern mbedtls_entropy_context entropy_ctx;
 
