@@ -50,8 +50,9 @@ exit:
     return ret;
 }
 
-int aad_encrypt(void *key, void *plaintext, size_t plaintext_len, void *aad,
-        size_t aad_len, void *iv, void *ciphertext, void *tag) {
+int aad_encrypt(const void *key, const void *plaintext, size_t plaintext_len,
+        const void *aad, size_t aad_len, const void *iv, void *ciphertext,
+        void *tag) {
     int ret = -1;
 
     /* Initialize encryption context. */
@@ -84,8 +85,9 @@ exit_free_ctx:
     return ret;
 }
 
-int aad_decrypt(void *key, void *ciphertext, size_t ciphertext_len, void *aad,
-        size_t aad_len, void *iv, void *tag, void *plaintext) {
+int aad_decrypt(const void *key, const void *ciphertext, size_t ciphertext_len,
+        const void *aad, size_t aad_len, const void *iv, const void *tag,
+        void *plaintext) {
     int ret = -1;
 
     /* Initialize encryption context. */
