@@ -259,9 +259,9 @@ int main(int argc, char **argv) {
     /* Time sort and join. */
 
     struct timespec start;
-    ret = clock_gettime(CLOCK_REALTIME, &start);
-    if (ret) {
-        perror("starting clock_gettime");
+    ret = timespec_get(&start, TIME_UTC);
+    if (!ret) {
+        perror("starting timespec_get");
         goto exit_free_arr;
     }
 
@@ -289,9 +289,9 @@ int main(int argc, char **argv) {
     MPI_Barrier(MPI_COMM_WORLD);
 
     struct timespec end;
-    ret = clock_gettime(CLOCK_REALTIME, &end);
-    if (ret) {
-        perror("ending clock_gettime");
+    ret = timespec_get(&end, TIME_UTC);
+    if (!ret) {
+        perror("ending timespec_get");
         goto exit_free_arr;
     }
 
