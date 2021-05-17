@@ -94,6 +94,102 @@ static void wait_for_all_threads(void) {
     spinlock_unlock(&all_threads_lock);
 }
 
+/* Decrypted sorting. */
+
+static void decrypted_swap(node_t *a, node_t *b, bool descending) {
+    bool cond = (a->key > b->key) != descending;
+    o_memswap(a, b, sizeof(*a), cond);
+}
+
+static void decrypted_sort(node_t *arr, size_t length, bool descending);
+static void decrypted_merge(node_t *arr, size_t length, bool descending);
+
+static void decrypted_sort(node_t *arr, size_t length, bool descending) {
+    switch (length) {
+        case 0:
+        case 1:
+            /* Do nothing. */
+            break;
+        case 2: {
+            decrypted_swap(arr, arr + 1, descending);
+            break;
+        }
+        default: {
+            /* Sort left half forwards and right half in reverse to create a
+             * bitonic sequence. */
+            size_t left_length = length / 2;
+            size_t right_length = length - left_length;
+            decrypted_sort(arr, left_length, descending);
+            decrypted_sort(arr + left_length, right_length, !descending);
+
+            /* Bitonic merge. */
+            decrypted_merge(arr, length, descending);
+            break;
+        }
+    }
+}
+
+static void decrypted_merge(node_t *arr, size_t length, bool descending) {
+    switch (length) {
+        case 0:
+        case 1:
+            /* Do nothing. */
+            break;
+        case 2: {
+            decrypted_swap(arr, arr + 1, descending);
+            break;
+        }
+        default: {
+            /* If the length is odd, bubble sort an element to the end of the
+             * array and leave it there. */
+            size_t left_length = length / 2;
+            size_t right_length = length - left_length;
+            for (size_t i = 0; i < left_length; i++) {
+                decrypted_swap(arr + i, arr + left_length + i, descending);
+            }
+            decrypted_merge(arr, left_length, descending);
+            decrypted_merge(arr + left_length, right_length, descending);
+            break;
+         }
+    }
+}
+
+/* Decrypts an entire range of nodes starting at ARR and ending at ARR + LENGTH
+ * according to DESCENDING at once and swaps them obliviously entirely within
+ * enclave memory. LENGTH must be less than or equal to SWAP_CHUNK_SIZE, since
+ * the local_buffer is used to hold decrypted nodes. START is used only for
+ * authenticated decryption of nodes; the caller is expected to have bumped the
+ * ARR pointer before calling the function. */
+static void decrypt_and_sort(void *arr, size_t start, size_t length,
+        bool descending) {
+    int ret;
+
+    /* Decrypt nodes to enclave buffer. */
+    for (size_t i = 0; i < length; i++) {
+        unsigned char *node_addr =
+            (unsigned char *) arr + i * SIZEOF_ENCRYPTED_NODE;
+        ret = node_decrypt(key, &local_buffer[i], node_addr, start + i);
+        if (ret) {
+            handle_error_string("Error decrypting node");
+            return;
+        }
+    }
+
+    /* Decrypted swap. */
+    decrypted_sort(local_buffer, length, descending);
+
+    /* Encrypt nodes to host memory. */
+    for (size_t i = 0; i < length; i++) {
+        unsigned char *node_addr =
+            (unsigned char *) arr + i * SIZEOF_ENCRYPTED_NODE;
+        ret = node_encrypt(key, &local_buffer[i], node_addr, start + i);
+        if (ret) {
+            handle_error_string("Error encrypting node");
+            return;
+        }
+    }
+}
+
 /* Swapping. */
 
 static int get_index_address(size_t index) {
@@ -342,6 +438,15 @@ static void sort_single(void *arr, size_t start, size_t length,
             break;
         }
         default: {
+            /* If the length is small enough, decrypt all nodes at once and sort
+             * them obliviously. */
+            if (length <= SWAP_CHUNK_SIZE) {
+                unsigned char *decrypt_start =
+                    (unsigned char *) arr + start * SIZEOF_ENCRYPTED_NODE;
+                decrypt_and_sort(decrypt_start, start, length, descending);
+                return;
+            }
+
             /* Sort left half forwards and right half in reverse to create a
              * bitonic sequence. */
             size_t left_length = length / 2;
