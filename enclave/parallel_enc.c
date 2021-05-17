@@ -8,7 +8,7 @@
 #include "enclave/mpi_tls.h"
 #include "enclave/synch.h"
 
-#define SWAP_CHUNK_SIZE 1024
+#define SWAP_CHUNK_SIZE 4096
 
 static int world_rank;
 static int world_size;
