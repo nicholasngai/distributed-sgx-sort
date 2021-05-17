@@ -9,5 +9,6 @@ enclave/parallel_t.c
 enclave/parallel_args.h
 enclave/parallel.pem
 enclave/parallel.pub
+hostonly
 *.d
 *.o

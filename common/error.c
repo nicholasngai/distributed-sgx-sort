@@ -2,7 +2,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <mbedtls/error.h>
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include <openenclave/bits/result.h>
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 
 void _handle_mbedtls_error(int errno, const char *msg, const char *file,
         int line) {
@@ -11,10 +13,12 @@ void _handle_mbedtls_error(int errno, const char *msg, const char *file,
     fprintf(stderr, "%s:%d: %s: %s\n", file, line, msg, error);
 }
 
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 void _handle_oe_error(oe_result_t result, const char *msg, const char *file,
         int line) {
     fprintf(stderr, "%s:%d: %s: %s\n", file, line, msg, oe_result_str(result));
 }
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 
 void _handle_error_string(const char *file, int line, const char *format, ...) {
     va_list args;

@@ -6,7 +6,6 @@
 #include "common/error.h"
 #include "common/node_t.h"
 #include "enclave/mpi_tls.h"
-#include "enclave/parallel_t.h"
 #include "enclave/synch.h"
 
 #define SWAP_CHUNK_SIZE 1024

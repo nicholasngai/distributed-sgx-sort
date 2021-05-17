@@ -1,17 +1,21 @@
 #ifndef __DISTRIBUTED_SGX_SORT_COMMON_ERROR_H
 #define __DISTRIBUTED_SGX_SORT_COMMON_ERROR_H
 
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include <openenclave/bits/result.h>
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 
 #define handle_mbedtls_error(errno, msg) \
     _handle_mbedtls_error(errno, msg, __FILE__, __LINE__)
 void _handle_mbedtls_error(int errno, const char *msg, const char *file,
         int line);
 
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #define handle_oe_error(errno, msg) \
     _handle_oe_error(errno, msg, __FILE__, __LINE__)
 void _handle_oe_error(oe_result_t result, const char *msg, const char *file,
         int line);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 
 #define handle_error_string(...) \
     _handle_error_string(__FILE__, __LINE__, __VA_ARGS__)

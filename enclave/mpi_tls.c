@@ -5,18 +5,23 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ssl.h>
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include <openenclave/enclave.h>
 #include <openenclave/attestation/attester.h>
 #include <openenclave/attestation/sgx/evidence.h>
+#endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 #include "common/defs.h"
 #include "common/error.h"
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include "enclave/parallel_t.h"
+#endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 #include "enclave/synch.h"
 
-/* Include simulation cert and key data if compiling in simulation mode. */
-#ifdef OE_SIMULATION
+/* Include simulation cert and key data if compiling in simulation mode or
+ * hostonly mode. */
+#if defined(OE_SIMULATION) || defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
 #include "enclave/sim_cert.h"
-#endif
+#endif /* OE_SIMULATION || DISTRIBUTED_SGX_SORT_HOSTONLY */
 
 #define BUFFER_SIZE 8192
 
@@ -48,18 +53,22 @@ static int verify_callback(void *data UNUSED, mbedtls_x509_crt *crt UNUSED,
 
 static int send_callback(void *session_, const unsigned char *buf, size_t len) {
     struct mpi_tls_session *session = session_;
-    oe_result_t result;
     size_t bytes_remaining = len;
     int ret = -1;
 
     while (bytes_remaining) {
         size_t bytes_to_send = MIN(bytes_remaining, BUFFER_SIZE);
-        result = ocall_mpi_send_bytes(&ret, buf, bytes_to_send, session->rank,
-                session->tag);
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+        oe_result_t result = ocall_mpi_send_bytes(&ret, buf, bytes_to_send,
+                session->rank, session->tag);
         if (result != OE_OK) {
             handle_oe_error(result, "ocall_mpi_send_bytes");
             goto exit;
         }
+#else /* DISTRUBTED_SGX_SORT_HOSTONLY */
+        ret = ocall_mpi_send_bytes(buf, bytes_to_send, session->rank,
+                session->tag);
+#endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
         if (ret) {
             handle_error_string("Failed to send TLS encrypted bytes");
             goto exit;
@@ -77,7 +86,6 @@ exit:
 static int recv_callback(void *session_, unsigned char *buf, size_t len,
         uint32_t timeout UNUSED) {
     struct mpi_tls_session *session = session_;
-    oe_result_t result;
     size_t bytes_remaining = len;
     int ret = -1;
 
@@ -93,12 +101,17 @@ static int recv_callback(void *session_, unsigned char *buf, size_t len,
 
     /* If there are bytes remaining afterwards, receive bytes from MPI. */
     while (bytes_remaining) {
-        result = ocall_mpi_try_recv_bytes(&ret, session->buffer, BUFFER_SIZE,
-                session->rank, session->tag);
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+        oe_result_t result = ocall_mpi_try_recv_bytes(&ret, session->buffer,
+                BUFFER_SIZE, session->rank, session->tag);
         if (result != OE_OK) {
             handle_oe_error(result, "ocall_mpi_try_recv_bytes");
             goto exit;
         }
+#else /* DISTRUBTED_SGX_SORT_HOSTONLY */
+        ret = ocall_mpi_try_recv_bytes(session->buffer, BUFFER_SIZE,
+                session->rank, session->tag);
+#endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
         if (ret < 0) {
             handle_error_string("Failed to receive TLS encrypted bytes");
             goto exit;
@@ -206,7 +219,7 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
     size_t privkey_buf_size;
     int ret = -1;
 
-#ifndef OE_SIMULATION
+#if !defined(OE_SIMULATION) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
     unsigned char *pubkey_buf;
     size_t pubkey_buf_size;
     oe_result_t result;
@@ -243,12 +256,12 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
         handle_oe_error(result, "oe_get_attestation_cert_buf_with_evidence_v2");
         goto exit_free_privkey_buf;
     }
-#else /* OE_SIMULATION */
+#else /* OE_SIMULATION || DISTRIBUTED_SGX_SORT_HOSTONLY */
     cert_buf = SIM_CERT;
     cert_buf_size = sizeof(SIM_CERT);
     privkey_buf = SIM_PRIVKEY;
     privkey_buf_size = sizeof(SIM_PRIVKEY);
-#endif
+#endif /* !OE_SIMULATION && !DISTRIBUTED_SGX_SORT_HOSTONLY */
     ret = mbedtls_x509_crt_parse_der(cert, cert_buf, cert_buf_size);
     if (ret) {
         handle_mbedtls_error(ret, "mbedtls_x509_crt_parse_der");
@@ -263,14 +276,14 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
     ret = 0;
 
 exit_free_cert_buf:
-#ifndef OE_SIMULATION
+#if !defined(OE_SIMULATION) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
     oe_free_attestation_certificate(cert_buf);
 exit_free_privkey_buf:
     oe_free_key(privkey_buf, privkey_buf_size, NULL, 0);
 exit_free_pubkey_buf:
     oe_free_key(pubkey_buf, pubkey_buf_size, NULL, 0);
 exit:
-#endif /* OE_SIMULATION */
+#endif /* !OE_SIMULATION && !DISTRIBUTED_SGX_SORT_HOSTONLY */
     return ret;
 }
 
