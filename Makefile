@@ -28,16 +28,13 @@ LDLIBS =
 
 # SGX edge.
 
-HOST_EDGE_HEADERS = $(HOST_DIR)/$(APP_NAME)_u.h \
-					$(HOST_DIR)/$(APP_NAME)_args.h
+HOST_EDGE_HEADERS = $(HOST_DIR)/$(APP_NAME)_u.h $(HOST_DIR)/$(APP_NAME)_args.h
 HOST_EDGE_SRC = $(HOST_DIR)/$(APP_NAME)_u.c
-ENCLAVE_EDGE_HEADERS = $(ENCLAVE_DIR)/$(APP_NAME)_t.h \
-					   $(ENCLAVE_DIR)/$(APP_NAME)_args.h
+HOST_EDGE_OBJS = $(HOST_EDGE_SRC:.c=.o)
+ENCLAVE_EDGE_HEADERS = $(ENCLAVE_DIR)/$(APP_NAME)_t.h $(ENCLAVE_DIR)/$(APP_NAME)_args.h
 ENCLAVE_EDGE_SRC = $(ENCLAVE_DIR)/$(APP_NAME)_t.c
+ENCLAVE_EDGE_OBJS = $(ENCLAVE_EDGE_SRC:.c=.o)
 SGX_EDGE = $(HOST_EDGE_HEADERS) $(HOST_EDGE_SRC) $(ENCLAVE_EDGE_HEADERS) $(ENCLAVE_EDGE_SRC)
-
-HOST_OBJS += $(HOST_EDGE_SRC:.c=.o)
-ENCLAVE_OBJS += $(ENCLAVE_EDGE_SRC:.c=.o)
 
 INCDIR = $(shell pkg-config oehost-$(C_COMPILER) --variable=includedir)
 
@@ -65,15 +62,16 @@ HOST_LDFLAGS =
 HOST_LDLIBS = -lmbedcrypto \
 	$(shell pkg-config mpi --libs)
 
-HOST_CFLAGS += $(shell pkg-config oehost-$(C_COMPILER) --cflags)
-HOST_LDLIBS += $(shell pkg-config oehost-$(C_COMPILER) --libs)
+HOST_OE_CFLAGS = $(shell pkg-config oehost-$(C_COMPILER) --cflags)
+HOST_OE_LDLIBS = $(shell pkg-config oehost-$(C_COMPILER) --libs)
 
 $(HOST_DIR)/%.o: CPPFLAGS += $(HOST_CPPFLAGS)
 $(HOST_DIR)/%.o: CFLAGS += $(HOST_CFLAGS)
 
+$(HOST_TARGET): CFLAGS += $(HOST_OE_CFLAGS)
 $(HOST_TARGET): LDFLAGS += $(HOST_LDFLAGS)
-$(HOST_TARGET): LDLIBS += $(HOST_LDLIBS)
-$(HOST_TARGET): $(HOST_OBJS) $(COMMON_OBJS)
+$(HOST_TARGET): LDLIBS += $(HOST_LDLIBS) $(HOST_OE_LDLIBS)
+$(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS)
 
 # Enclave.
 
@@ -82,9 +80,10 @@ ENCLAVE_CFLAGS =
 ENCLAVE_LDFLAGS =
 ENCLAVE_LDLIBS = -L$(ENCLAVE_DIR)/third_party/liboblivious -l:liboblivious.a
 
-ENCLAVE_CFLAGS += $(shell pkg-config oehost-$(C_COMPILER) --cflags)
-ENCLAVE_LDLIBS += $(shell pkg-config oeenclave-$(C_COMPILER) --libs)
-ENCLAVE_LDLIBS += $(shell pkg-config oeenclave-$(C_COMPILER) --variable=mbedtlslibs)
+ENCLAVE_OE_CFLAGS = $(shell pkg-config oehost-$(C_COMPILER) --cflags)
+ENCLAVE_OE_LDLIBS = \
+	$(shell pkg-config oeenclave-$(C_COMPILER) --libs) \
+	$(shell pkg-config oeenclave-$(C_COMPILER) --variable=mbedtlslibs)
 
 $(ENCLAVE_DIR)/%.o: CPPFLAGS += $(ENCLAVE_CPPFLAGS)
 $(ENCLAVE_DIR)/%.o: CFLAGS += $(ENCLAVE_CFLAGS)
@@ -92,9 +91,10 @@ $(ENCLAVE_DIR)/%.o: CFLAGS += $(ENCLAVE_CFLAGS)
 $(ENCLAVE_DIR)/third_party/liboblivious/liboblivious.a:
 	$(MAKE) -C $(ENCLAVE_DIR)/third_party/liboblivious
 
+$(ENCLAVE_TARGET): CFLAGS += $(ENCLAVE_OE_CFLAGS)
 $(ENCLAVE_TARGET): LDFLAGS += $(ENCLAVE_LDFLAGS)
-$(ENCLAVE_TARGET): LDLIBS += $(ENCLAVE_LDLIBS)
-$(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(COMMON_OBJS) $(ENCLAVE_DIR)/third_party/liboblivious/liboblivious.a
+$(ENCLAVE_TARGET): LDLIBS += $(ENCLAVE_LDLIBS) $(ENCLAVE_OE_LDLIBS)
+$(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) $(ENCLAVE_DIR)/third_party/liboblivious/liboblivious.a
 
 $(ENCLAVE_TARGET).signed: $(ENCLAVE_TARGET) $(ENCLAVE_KEY) $(ENCLAVE_PUBKEY) $(ENCLAVE_CONF)
 	$(SGX_SIGN) sign -e $< -k $(ENCLAVE_KEY) -c $(ENCLAVE_CONF)
