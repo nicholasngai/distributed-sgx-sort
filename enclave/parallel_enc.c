@@ -94,6 +94,16 @@ static void wait_for_all_threads(void) {
     spinlock_unlock(&all_threads_lock);
 }
 
+/* Array index and world rank relationship helpers. */
+
+static int get_index_address(size_t index) {
+    return index * world_size / total_length;
+}
+
+static size_t get_local_start(int rank) {
+    return (rank * total_length + world_size - 1) / world_size;
+}
+
 /* Decrypted sorting. */
 
 static void decrypted_swap(node_t *a, node_t *b, bool descending) {
@@ -154,20 +164,21 @@ static void decrypted_merge(node_t *arr, size_t length, bool descending) {
     }
 }
 
-/* Decrypts an entire range of nodes starting at ARR and ending at ARR + LENGTH
- * according to DESCENDING at once and swaps them obliviously entirely within
- * enclave memory. LENGTH must be less than or equal to SWAP_CHUNK_SIZE, since
- * the local_buffer is used to hold decrypted nodes. START is used only for
- * authenticated decryption of nodes; the caller is expected to have bumped the
- * ARR pointer before calling the function. */
+/* Decrypts an entire range of nodes for the array ARR starting at START and
+ * ending at START + LENGTH and sorts them obliviously according to DESCENDING
+ * at once, entirely within enclave memory. LENGTH must be less than or equal to
+ * SWAP_CHUNK_SIZE, since the local_buffer is used to hold decrypted nodes. The
+ * entire chunk must reside in local memory. */
 static void decrypt_and_sort(void *arr, size_t start, size_t length,
         bool descending) {
+    size_t local_start = get_local_start(world_rank);
     int ret;
 
     /* Decrypt nodes to enclave buffer. */
     for (size_t i = 0; i < length; i++) {
         unsigned char *node_addr =
-            (unsigned char *) arr + i * SIZEOF_ENCRYPTED_NODE;
+            (unsigned char *) arr
+                + (start - local_start + i) * SIZEOF_ENCRYPTED_NODE;
         ret = node_decrypt(key, &local_buffer[i], node_addr, start + i);
         if (ret) {
             handle_error_string("Error decrypting node");
@@ -181,7 +192,8 @@ static void decrypt_and_sort(void *arr, size_t start, size_t length,
     /* Encrypt nodes to host memory. */
     for (size_t i = 0; i < length; i++) {
         unsigned char *node_addr =
-            (unsigned char *) arr + i * SIZEOF_ENCRYPTED_NODE;
+            (unsigned char *) arr
+                + (start - local_start + i) * SIZEOF_ENCRYPTED_NODE;
         ret = node_encrypt(key, &local_buffer[i], node_addr, start + i);
         if (ret) {
             handle_error_string("Error encrypting node");
@@ -191,14 +203,6 @@ static void decrypt_and_sort(void *arr, size_t start, size_t length,
 }
 
 /* Swapping. */
-
-static int get_index_address(size_t index) {
-    return index * world_size / total_length;
-}
-
-static size_t get_local_start(int rank) {
-    return (rank * total_length + world_size - 1) / world_size;
-}
 
 static void swap_local_range(void *arr, size_t a, size_t b, size_t count,
         bool descending) {
@@ -438,15 +442,6 @@ static void sort_single(void *arr, size_t start, size_t length,
             break;
         }
         default: {
-            /* If the length is small enough, decrypt all nodes at once and sort
-             * them obliviously. */
-            if (length <= SWAP_CHUNK_SIZE) {
-                unsigned char *decrypt_start =
-                    (unsigned char *) arr + start * SIZEOF_ENCRYPTED_NODE;
-                decrypt_and_sort(decrypt_start, start, length, descending);
-                return;
-            }
-
             /* Sort left half forwards and right half in reverse to create a
              * bitonic sequence. */
             size_t left_length = length / 2;
@@ -460,6 +455,20 @@ static void sort_single(void *arr, size_t start, size_t length,
                 sort_single(arr, right_start, right_length, !descending);
             } else {
                 /* Sort both. */
+
+                /* If the length is small enough, decrypt all nodes at once and
+                 * sort them obliviously. */
+                // The following commented code replacing the if condition
+                // generalizes to sizes not a power of 2 but is much slower.
+                //size_t local_start = get_local_start(world_rank);
+                //size_t local_end = get_local_start(world_rank + 1);
+                //if (start >= local_start && start + length < local_end
+                //        && length <= SWAP_CHUNK_SIZE) {
+                if (length <= SWAP_CHUNK_SIZE) {
+                    decrypt_and_sort(arr, start, length, descending);
+                    return;
+                }
+
                 sort_single(arr, start, left_length, descending);
                 sort_single(arr, right_start, right_length, !descending);
             }
