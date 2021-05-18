@@ -133,14 +133,23 @@ int main(int argc, char **argv) {
 
     /* Read arguments. */
 
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     if (argc < 3) {
         printf("usage: %s enclave_image array_size [num_threads]\n", argv[0]);
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    if (argc < 2) {
+        printf("usage: %s array_size [num_threads]\n", argv[0]);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         return 0;
     }
 
     size_t length;
     {
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
         ssize_t l = atoll(argv[2]);
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+        ssize_t l = atoll(argv[1]);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         if (l < 0) {
             printf("Invalid array size\n");
             return ret;
@@ -148,8 +157,13 @@ int main(int argc, char **argv) {
         length = l;
     }
 
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     if (argc >= 4) {
         ssize_t n = atoll(argv[3]);
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    if (argc >= 3) {
+        ssize_t n = atoll(argv[2]);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         if (n < 0) {
             printf("Invalid number of threads\n");
             return ret;
