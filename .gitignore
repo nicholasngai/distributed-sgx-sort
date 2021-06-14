@@ -12,3 +12,4 @@ enclave/parallel.pub
 hostonly
 *.d
 *.o
+benchmarks
