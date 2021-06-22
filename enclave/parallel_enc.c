@@ -7,92 +7,18 @@
 #include "common/node_t.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/synch.h"
+#include "enclave/threading.h"
 
 #define SWAP_CHUNK_SIZE 4096
 
 static int world_rank;
 static int world_size;
-static size_t total_num_threads;
 static size_t total_length;
 
 static unsigned char key[16];
 
 static _Thread_local node_t *local_buffer;
 static _Thread_local node_t *remote_buffer;
-
-/* Thread synchronization. */
-
-struct thread_work {
-    void (*func)(void *arr, size_t start, size_t length, bool descending,
-            size_t num_threads);
-    void *arr;
-    size_t start;
-    size_t length;
-    bool descending;
-    size_t num_threads;
-
-    sema_t done;
-
-    struct thread_work *next;
-};
-
-static spinlock_t thread_work_lock;
-static struct thread_work *volatile work_head;
-static struct thread_work *volatile work_tail;
-static volatile bool work_done;
-
-static void push_thread_work(struct thread_work *work) {
-    spinlock_lock(&thread_work_lock);
-    work->next = NULL;
-    if (!work_tail) {
-        /* Empty list. Set head and tail. */
-        work_head = work;
-        work_tail = work;
-    } else {
-        /* List has values. */
-        work_tail->next = work;
-        work_tail = work;
-    }
-    spinlock_unlock(&thread_work_lock);
-}
-
-static struct thread_work *pop_thread_work(void) {
-    struct thread_work *work = NULL;
-    while (!work) {
-        while (!work_head) {
-            if (work_done) {
-                goto exit;
-            }
-        }
-        spinlock_lock(&thread_work_lock);
-        if (work_head) {
-            work = work_head;
-            if (!work_head->next) {
-                work_tail = NULL;
-            }
-            work_head = work_head->next;
-        }
-        spinlock_unlock(&thread_work_lock);
-    }
-exit:
-    return work;
-}
-
-static void wait_for_all_threads(void) {
-    static size_t num_threads_waiting;
-    static condvar_t all_threads_finished;
-    static spinlock_t all_threads_lock;
-
-    spinlock_lock(&all_threads_lock);
-    num_threads_waiting++;
-    if (num_threads_waiting >= total_num_threads) {
-        condvar_broadcast(&all_threads_finished, &all_threads_lock);
-        num_threads_waiting = 0;
-    } else {
-        condvar_wait(&all_threads_finished, &all_threads_lock);
-    }
-    spinlock_unlock(&all_threads_lock);
-}
 
 /* Array index and world rank relationship helpers. */
 
@@ -417,7 +343,7 @@ static void sort_threaded(void *arr, size_t start, size_t length,
                     .num_threads = right_threads,
                 };
                 sema_init(&right_work.done, 0);
-                push_thread_work(&right_work);
+                thread_work_push(&right_work);
                 sort_threaded(arr, start, left_length, descending,
                         num_threads - right_threads);
                 sema_down(&right_work.done);
@@ -523,7 +449,7 @@ static void merge_threaded(void *arr, size_t start, size_t length,
                     .num_threads = right_threads,
                 };
                 sema_init(&right_work.done, 0);
-                push_thread_work(&right_work);
+                thread_work_push(&right_work);
                 merge_threaded(arr, start, left_length, descending,
                         num_threads - right_threads);
                 sema_down(&right_work.done);
@@ -600,7 +526,7 @@ void ecall_start_work(void) {
     }
 
     /* Wait for all threads to start work. */
-    wait_for_all_threads();
+    thread_wait_for_all();
 
     /* Initialize random. It is not safe to do this until passing the barrier,
      * since the master thread initializes the entropy source. */
@@ -608,16 +534,16 @@ void ecall_start_work(void) {
         handle_error_string("Error initializing enclave random number generator");
     }
 
-    struct thread_work *work = pop_thread_work();
+    struct thread_work *work = thread_work_pop();
     while (work) {
         work->func(work->arr, work->start, work->length, work->descending,
                 work->num_threads);
         sema_up(&work->done);
-        work = pop_thread_work();
+        work = thread_work_pop();
     }
 
     /* Wait for all threads to exit work loop. */
-    wait_for_all_threads();
+    thread_wait_for_all();
 
     /* Free resources. */
     free(local_buffer);
@@ -629,7 +555,7 @@ static void root_work_function(void *arr, size_t start, size_t length,
         bool descending, size_t num_threads) {
     sort_threaded(arr, start, length, descending, num_threads);
     /* Release threads. */
-    work_done = true;
+    thread_release_all();
 }
 
 int ecall_sort(unsigned char *arr, size_t total_length_,
@@ -664,12 +590,12 @@ int ecall_sort(unsigned char *arr, size_t total_length_,
         .descending = false,
         .num_threads = total_num_threads,
     };
-    push_thread_work(&root_work);
+    thread_work_push(&root_work);
     ecall_start_work();
 
     /* The thread does not return until work_done = true, so set it back to
      * false. */
-    work_done = false;
+    thread_unrelease_all();
 
     ret = 0;
 
