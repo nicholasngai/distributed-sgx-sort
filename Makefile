@@ -22,6 +22,7 @@ ENCLAVE_DIR = enclave
 ENCLAVE_TARGET = $(ENCLAVE_DIR)/parallel_enc
 ENCLAVE_OBJS = \
 	$(ENCLAVE_DIR)/parallel_enc.o \
+	$(ENCLAVE_DIR)/bitonic.o \
 	$(ENCLAVE_DIR)/synch.o \
 	$(ENCLAVE_DIR)/mpi_tls.o \
 	$(ENCLAVE_DIR)/threading.o
