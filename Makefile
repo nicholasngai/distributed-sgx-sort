@@ -5,17 +5,25 @@ include config.mk
 APP_NAME = parallel
 
 COMMON_DIR = common
-COMMON_OBJS = $(COMMON_DIR)/crypto.o $(COMMON_DIR)/error.o $(COMMON_DIR)/node_t.o
+COMMON_OBJS = \
+	$(COMMON_DIR)/crypto.o \
+	$(COMMON_DIR)/error.o \
+	$(COMMON_DIR)/node_t.o
 COMMON_DEPS = $(COMMON_OBJS:.o=.d)
 
 HOST_DIR = host
 HOST_TARGET = $(HOST_DIR)/parallel
-HOST_OBJS = $(HOST_DIR)/parallel.o $(HOST_DIR)/error.o
+HOST_OBJS = \
+	$(HOST_DIR)/parallel.o \
+	$(HOST_DIR)/error.o
 HOST_DEPS = $(HOST_OBJS:.o=.d)
 
 ENCLAVE_DIR = enclave
 ENCLAVE_TARGET = $(ENCLAVE_DIR)/parallel_enc
-ENCLAVE_OBJS = $(ENCLAVE_DIR)/parallel_enc.o $(ENCLAVE_DIR)/synch.o $(ENCLAVE_DIR)/mpi_tls.o
+ENCLAVE_OBJS = \
+	$(ENCLAVE_DIR)/parallel_enc.o \
+	$(ENCLAVE_DIR)/synch.o \
+	$(ENCLAVE_DIR)/mpi_tls.o
 ENCLAVE_DEPS = $(ENCLAVE_OBJS:.o=.d)
 ENCLAVE_KEY = $(ENCLAVE_DIR)/$(APP_NAME).pem
 ENCLAVE_PUBKEY = $(ENCLAVE_KEY:.pem=.pub)
