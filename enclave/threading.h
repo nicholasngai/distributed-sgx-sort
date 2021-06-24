@@ -23,6 +23,7 @@ extern size_t total_num_threads;
 
 void thread_work_push(struct thread_work *work);
 struct thread_work *thread_work_pop(void);
+void thread_start_work(void);
 void thread_wait_for_all(void);
 void thread_release_all(void);
 void thread_unrelease_all(void);

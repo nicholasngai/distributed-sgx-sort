@@ -5,9 +5,10 @@
 #include <liboblivious/primitives.h>
 #include "common/error.h"
 #include "common/node_t.h"
-#include "enclave/parallel_enc.h"
-#include "enclave/threading.h"
 #include "enclave/mpi_tls.h"
+#include "enclave/parallel_enc.h"
+#include "enclave/synch.h"
+#include "enclave/threading.h"
 
 #define SWAP_CHUNK_SIZE 4096
 
@@ -17,6 +18,10 @@ static _Thread_local node_t *remote_buffer;
 static unsigned char key[16];
 
 int bitonic_init(void) {
+    /* Wait for all threads to init. We need to wait for all threads because the
+     * master thread initialized the entropy source. */
+    thread_wait_for_all();
+
     /* Allocate buffers. */
     local_buffer = malloc(SWAP_CHUNK_SIZE * sizeof(*local_buffer));
     if (!local_buffer) {
@@ -325,15 +330,19 @@ static void swap_range(void *arr, size_t a_start, size_t b_start,
 
 /* Bitonic sort. */
 
+static void sort_threaded(void *arr, size_t start, size_t length,
+        bool descending, size_t num_threads);
+static void sort_single(void *arr, size_t start, size_t length,
+        bool descending);
 static void merge_threaded(void *arr, size_t start, size_t length,
         bool descending, size_t num_threads);
 static void merge_single(void *arr, size_t start, size_t length,
         bool descending);
 
-void bitonic_sort_threaded(void *arr, size_t start, size_t length,
+void sort_threaded(void *arr, size_t start, size_t length,
         bool descending UNUSED, size_t num_threads) {
     if (num_threads == 1) {
-        bitonic_sort_single(arr, start, length, descending);
+        sort_single(arr, start, length, descending);
         return;
     }
 
@@ -354,16 +363,16 @@ void bitonic_sort_threaded(void *arr, size_t start, size_t length,
             size_t right_start = start + left_length;
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only sort the left. The right is completely remote. */
-                bitonic_sort_threaded(arr, start, left_length, descending, num_threads);
+                sort_threaded(arr, start, left_length, descending, num_threads);
             } else if (right_start <= get_local_start(world_rank)) {
                 /* Only sort the right. The left is completely remote. */
-                bitonic_sort_threaded(arr, right_start, right_length, !descending,
+                sort_threaded(arr, right_start, right_length, !descending,
                         num_threads);
             } else {
                 /* Sort both. */
                 size_t right_threads = num_threads * right_length / length;
                 struct thread_work right_work = {
-                    .func = bitonic_sort_threaded,
+                    .func = sort_threaded,
                     .arr = arr,
                     .start = right_start,
                     .length = right_length,
@@ -372,7 +381,7 @@ void bitonic_sort_threaded(void *arr, size_t start, size_t length,
                 };
                 sema_init(&right_work.done, 0);
                 thread_work_push(&right_work);
-                bitonic_sort_threaded(arr, start, left_length, descending,
+                sort_threaded(arr, start, left_length, descending,
                         num_threads - right_threads);
                 sema_down(&right_work.done);
             }
@@ -384,7 +393,7 @@ void bitonic_sort_threaded(void *arr, size_t start, size_t length,
     }
 }
 
-void bitonic_sort_single(void *arr, size_t start, size_t length,
+void sort_single(void *arr, size_t start, size_t length,
         bool descending) {
     switch (length) {
         case 0:
@@ -403,10 +412,10 @@ void bitonic_sort_single(void *arr, size_t start, size_t length,
             size_t right_start = start + left_length;
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only sort the left. The right is completely remote. */
-                bitonic_sort_single(arr, start, left_length, descending);
+                sort_single(arr, start, left_length, descending);
             } else if (right_start <= get_local_start(world_rank)) {
                 /* Only sort the right. The left is completely remote. */
-                bitonic_sort_single(arr, right_start, right_length, !descending);
+                sort_single(arr, right_start, right_length, !descending);
             } else {
                 /* Sort both. */
 
@@ -423,8 +432,8 @@ void bitonic_sort_single(void *arr, size_t start, size_t length,
                     return;
                 }
 
-                bitonic_sort_single(arr, start, left_length, descending);
-                bitonic_sort_single(arr, right_start, right_length, !descending);
+                sort_single(arr, start, left_length, descending);
+                sort_single(arr, right_start, right_length, !descending);
             }
 
             /* Bitonic merge. */
@@ -519,4 +528,34 @@ static void merge_single(void *arr, size_t start, size_t length,
             break;
          }
     }
+}
+
+/* Entry. */
+
+static void root_work_function(void *arr, size_t start UNUSED, size_t length,
+        bool descending UNUSED, size_t num_threads) {
+    sort_threaded(arr, 0, length, false, num_threads);
+
+    /* Release threads. */
+    thread_release_all();
+}
+
+void bitonic_sort_threaded(void *arr, size_t length, size_t num_threads) {
+    /* Start work for this thread. */
+    struct thread_work root_work = {
+        .func = root_work_function,
+        .arr = arr,
+        .length = length,
+        .num_threads = num_threads,
+    };
+    thread_work_push(&root_work);
+    thread_start_work();
+
+    /* The thread does not return until work_done = true, so set it back to
+     * false. */
+    thread_unrelease_all();
+}
+
+void bitonic_sort_single(void *arr, size_t length) {
+    sort_single(arr, 0, length, false);
 }

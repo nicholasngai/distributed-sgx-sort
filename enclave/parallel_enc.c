@@ -7,7 +7,6 @@
 #include "common/node_t.h"
 #include "enclave/bitonic.h"
 #include "enclave/mpi_tls.h"
-#include "enclave/synch.h"
 #include "enclave/threading.h"
 
 int world_rank;
@@ -36,35 +35,17 @@ void ecall_set_params(int world_rank_, int world_size_, size_t num_threads) {
 }
 
 void ecall_start_work(void) {
-    /* Wait for all threads to start work. */
-    thread_wait_for_all();
-
-    /* Initialize sort. It is not safe to do this until passing the barrier,
-     * since the master thread initializes the entropy source. */
+    /* Initialize sort. */
     if (bitonic_init()) {
         handle_error_string("Error initializing sort");
         return;
     }
 
-    struct thread_work *work = thread_work_pop();
-    while (work) {
-        work->func(work->arr, work->start, work->length, work->descending,
-                work->num_threads);
-        sema_up(&work->done);
-        work = thread_work_pop();
-    }
+    /* Start work. */
+    thread_start_work();
 
-    /* Wait for all threads to exit work loop. */
-    thread_wait_for_all();
-
-}
-
-static void root_work_function(void *arr, size_t start, size_t length,
-        bool descending, size_t num_threads) {
-    bitonic_sort_threaded(arr, start, length, descending, num_threads);
-
-    /* Release threads. */
-    thread_release_all();
+    /* Free sort. */
+    bitonic_free();
 }
 
 int ecall_sort(unsigned char *arr, size_t total_length_,
@@ -90,25 +71,22 @@ int ecall_sort(unsigned char *arr, size_t total_length_,
         goto exit_free_entropy;
     }
 
-    /* Start work for this thread. */
-    struct thread_work root_work = {
-        .func = root_work_function,
-        .arr = arr,
-        .start = 0,
-        .length = total_length,
-        .descending = false,
-        .num_threads = total_num_threads,
-    };
-    thread_work_push(&root_work);
-    ecall_start_work();
+    /* Initialize sort. */
+    if (bitonic_init()) {
+        handle_error_string("Error initializing sort");
+        goto exit_free_mpi_tls;
+    }
 
-    /* The thread does not return until work_done = true, so set it back to
-     * false. */
-    thread_unrelease_all();
+    /* Sort. */
+    bitonic_sort_threaded(arr, total_length, total_num_threads);
+
+    /* Free sort. */
+    bitonic_free();
 
     ret = 0;
 
     /* Free TLS over MPI. */
+exit_free_mpi_tls:
     mpi_tls_free();
 exit_free_entropy:
     entropy_free();

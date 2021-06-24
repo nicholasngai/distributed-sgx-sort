@@ -7,9 +7,7 @@
 
 int bitonic_init(void);
 void bitonic_free(void);
-void bitonic_sort_threaded(void *arr, size_t start, size_t length,
-        bool descending, size_t num_threads);
-void bitonic_sort_single(void *arr, size_t start, size_t length,
-        bool descending);
+void bitonic_sort_threaded(void *arr, size_t length, size_t num_threads);
+void bitonic_sort_single(void *arr, size_t start);
 
 #endif /* distributed-sgx-sort/enclave/bitonic.h */

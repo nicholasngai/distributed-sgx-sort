@@ -47,6 +47,22 @@ exit:
     return work;
 }
 
+void thread_start_work(void) {
+    /* Wait for all threads to start work. */
+    thread_wait_for_all();
+
+    struct thread_work *work = thread_work_pop();
+    while (work) {
+        work->func(work->arr, work->start, work->length, work->descending,
+                work->num_threads);
+        sema_up(&work->done);
+        work = thread_work_pop();
+    }
+
+    /* Wait for all threads to exit work loop. */
+    thread_wait_for_all();
+}
+
 void thread_wait_for_all(void) {
     static size_t num_threads_waiting;
     static condvar_t all_threads_finished;
