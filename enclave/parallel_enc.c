@@ -9,9 +9,16 @@
 #include "enclave/mpi_tls.h"
 #include "enclave/threading.h"
 
+enum sort_t {
+    SORT_UNSET = 0,
+    SORT_BITONIC,
+};
+
 int world_rank;
 int world_size;
 size_t total_length;
+
+volatile enum sort_t sort_type;
 
 /* Helpers. */
 
@@ -35,20 +42,25 @@ void ecall_set_params(int world_rank_, int world_size_, size_t num_threads) {
 }
 
 void ecall_start_work(void) {
-    /* Initialize sort. */
-    if (bitonic_init()) {
-        handle_error_string("Error initializing sort");
-        return;
+    /* Wait for master thread to choose sort. */
+    while (!sort_type) {}
+
+    if (sort_type == SORT_BITONIC) {
+        /* Initialize sort. */
+        if (bitonic_init()) {
+            handle_error_string("Error initializing sort");
+            return;
+        }
+
+        /* Start work. */
+        thread_start_work();
+
+        /* Free sort. */
+        bitonic_free();
     }
-
-    /* Start work. */
-    thread_start_work();
-
-    /* Free sort. */
-    bitonic_free();
 }
 
-int ecall_sort(unsigned char *arr, size_t total_length_,
+int ecall_bitonic_sort(unsigned char *arr, size_t total_length_,
         size_t local_length UNUSED) {
     int ret = -1;
 
@@ -58,6 +70,7 @@ int ecall_sort(unsigned char *arr, size_t total_length_,
     }
 
     total_length = total_length_;
+    sort_type = SORT_BITONIC;
 
     /* Initialize entropy. */
     if (entropy_init()) {

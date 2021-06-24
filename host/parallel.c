@@ -280,12 +280,12 @@ int main(int argc, char **argv) {
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    result = ecall_sort(enclave, &ret, arr, length, local_length);
+    result = ecall_bitonic_sort(enclave, &ret, arr, length, local_length);
     if (result != OE_OK) {
         goto exit_free_arr;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ret = ecall_sort(arr, length, local_length);
+    ret = ecall_bitonic_sort(arr, length, local_length);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         goto exit_free_arr;
