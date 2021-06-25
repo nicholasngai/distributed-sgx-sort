@@ -2,6 +2,7 @@
 #define __COMMON_NODE_T_H
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include "crypto.h"
 
@@ -9,7 +10,9 @@
 
 typedef struct node {
     uint64_t key;
-    unsigned char unused[120];
+    uint64_t orp_id;
+    bool is_dummy;
+    unsigned char unused[108];
 } node_t;
 
 int node_encrypt(void *key, node_t *node, void *dst_, size_t idx);

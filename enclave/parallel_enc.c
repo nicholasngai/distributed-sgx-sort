@@ -6,6 +6,7 @@
 #include "common/error.h"
 #include "common/node_t.h"
 #include "enclave/bitonic.h"
+#include "enclave/bucket.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/threading.h"
 
@@ -101,6 +102,38 @@ int ecall_bitonic_sort(unsigned char *arr, size_t total_length_,
     /* Free TLS over MPI. */
 exit_free_mpi_tls:
     mpi_tls_free();
+exit_free_entropy:
+    entropy_free();
+exit:
+    return ret;
+}
+
+int ecall_bucket_sort(unsigned char *arr, size_t total_length UNUSED,
+        size_t local_length) {
+    int ret;
+
+    /* Initialize entropy. */
+    ret = entropy_init();
+    if (ret) {
+        handle_error_string("Error initializing entropy");
+        goto exit;
+    }
+
+    /* Initialize sort. */
+    ret = bucket_init();
+    if (ret) {
+        handle_error_string("Error initializing sort");
+        goto exit_free_entropy;
+    }
+
+    ret = bucket_sort(arr, local_length);
+    if (ret) {
+        handle_error_string("Error in bucket sort");
+        goto exit_free_sort;
+    }
+
+exit_free_sort:
+    bucket_free();
 exit_free_entropy:
     entropy_free();
 exit:

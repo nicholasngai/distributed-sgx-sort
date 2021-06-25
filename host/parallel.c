@@ -239,7 +239,7 @@ int main(int argc, char **argv) {
         ((world_rank + 1) * length + world_size - 1) / world_size
             - (world_rank * length + world_size - 1) / world_size;
     size_t local_start = (world_rank * length + world_size - 1) / world_size;
-    unsigned char *arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE);
+    unsigned char *arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE * 2);
     if (!arr) {
         perror("malloc arr");
         goto exit_terminate_enclave;
@@ -280,12 +280,12 @@ int main(int argc, char **argv) {
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    result = ecall_bitonic_sort(enclave, &ret, arr, length, local_length);
+    result = ecall_bucket_sort(enclave, &ret, arr, length, local_length);
     if (result != OE_OK) {
         goto exit_free_arr;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ret = ecall_bitonic_sort(arr, length, local_length);
+    ret = ecall_bucket_sort(arr, length, local_length);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         goto exit_free_arr;
