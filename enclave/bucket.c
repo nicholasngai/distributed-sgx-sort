@@ -311,15 +311,42 @@ int bucket_sort(void *arr, size_t length) {
         goto exit;
     }
 
+    /* Get next power of 2 greater than or equal to the length. */
+    size_t rounded_length = 1;
+    while (rounded_length < length) {
+        rounded_length <<= 1;
+    }
+
+    /* Compute the number of buckets needed. Multiply by 2 since we will have
+     * dummy elements. */
+    size_t num_buckets = 2 * rounded_length / BUCKET_SIZE;
+
     ret = assign_random_ids_and_spread(arr, length);
     if (ret) {
         handle_error_string("Error assigning random IDs to nodes");
         goto exit;
     }
 
-    ret = merge_split(arr, 0, 1, 0);
-    if (ret) {
-        handle_error_string("Error in merge split with index %lu\n", 0lu);
+    /* Run merge-split as part of a butterfly network. This is modified from
+     * the paper, since all merge-split operations will be constrained to the
+     * same buckets of memory. */
+    size_t bit_idx = 0;
+    for (size_t bucket_stride = 2; bucket_stride <= num_buckets;
+            bucket_stride <<= 1) {
+        for (size_t bucket_start = 0; bucket_start < num_buckets;
+                bucket_start += bucket_stride) {
+            for (size_t bucket = bucket_start;
+                    bucket < bucket_start + bucket_stride / 2; bucket++) {
+                size_t other_bucket = bucket + bucket_stride / 2;
+                ret = merge_split(arr, bucket, other_bucket, bit_idx);
+                if (ret) {
+                    handle_error_string(
+                            "Error in merge split with indices %lu and %lu\n",
+                            bucket, other_bucket);
+                }
+            }
+        }
+        bit_idx++;
     }
 
 exit:
