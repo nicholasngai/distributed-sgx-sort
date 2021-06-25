@@ -257,8 +257,59 @@ exit:
     return ret;
 }
 
+/* Performs a swap of nodes A and B in ARR, used when the input array is too
+ * small to reasonably perform bucket oblivious sort. */
+static void sort_swap(size_t a, size_t b, void *arr_) {
+    unsigned char *arr = arr_;
+    int ret;
+
+    node_t node_a;
+    node_t node_b;
+
+    /* Decrypt nodes. */
+    ret = node_decrypt(key, &node_a, arr + a * SIZEOF_ENCRYPTED_NODE, a);
+    if (ret) {
+        handle_error_string("Error decrypting node");
+        goto exit;
+    }
+    ret = node_decrypt(key, &node_b, arr + b * SIZEOF_ENCRYPTED_NODE, b);
+    if (ret) {
+        handle_error_string("Error decrypting node");
+        goto exit;
+    }
+
+    /* Compare and obliviously swap if the BIT_IDX bit of ORP ID of node A is
+     * 1 and that of node B is 0. */
+    bool cond = node_a.key > node_b.key;
+    o_memswap(&node_a, &node_b, sizeof(node_a), cond);
+
+    /* Encrypt nodes. */
+    ret = node_encrypt(key, &node_a, arr + a * SIZEOF_ENCRYPTED_NODE, a);
+    if (ret) {
+        handle_error_string("Error encrypting node");
+        goto exit;
+    }
+    ret = node_encrypt(key, &node_b, arr + b * SIZEOF_ENCRYPTED_NODE, b);
+    if (ret) {
+        handle_error_string("Error encrypting node");
+        goto exit;
+    }
+
+exit:
+    ;
+}
+
 int bucket_sort(void *arr, size_t length) {
     int ret;
+
+    /* If the length is <= BUCKET_SIZE * 2, then we just bitonic sort normally,
+     * since we will invoke bitonic sorts of size BUCKET_SIZE * 2 normally
+     * anyway as part of bucket sort. */
+    if (length <= BUCKET_SIZE * 2) {
+        o_sort_generate_swaps(length, sort_swap, arr);
+        ret = 0;
+        goto exit;
+    }
 
     ret = assign_random_ids_and_spread(arr, length);
     if (ret) {
