@@ -119,9 +119,10 @@ static void merge_split_swap(size_t a, size_t b, void *aux_) {
     /* Compare and obliviously swap if the BIT_IDX bit of ORP ID of node A is
      * 1 and that of node B is 0 or if the ORP IDs are the same, but node A is a
      * dummy and node B is real. */
-    bool cond = ((node_a.orp_id >> aux->bit_idx) & 1)
-        > ((node_b.orp_id >> aux->bit_idx) & 1);
-    cond |= node_a.is_dummy & !node_b.is_dummy;
+    bool bit_a = (node_a.orp_id >> aux->bit_idx) & 1;
+    bool bit_b = (node_b.orp_id >> aux->bit_idx) & 1;
+    bool cond = (bit_a & !bit_b)
+        | ((bit_a == bit_b) & (node_a.is_dummy & !node_b.is_dummy));
     o_memswap(&node_a, &node_b, sizeof(node_a), cond);
 
     /* Encrypt nodes. */
@@ -188,9 +189,10 @@ static int merge_split(void *arr_, size_t bucket1, size_t bucket2,
         count1 += ((node.orp_id >> bit_idx) & 1) & !node.is_dummy;
     }
 
-    /* There are count1 elements with bit 1, so we need to assign count1 dummy
-     * elements to have bit 0, with the remaining dummy elements assigned with
-     * bit 1. */
+    /* There are count1 elements with bit 1, so we need to assign BUCKET_SIZE -
+     * count1 dummy elements to have bit 1, with the remaining dummy elements
+     * assigned with bit 0. */
+    count1 = BUCKET_SIZE - count1;
 
     /* Assign dummy elements in BUCKET1. */
     for (size_t i = bucket1 * BUCKET_SIZE; i < (bucket1 + 1) * BUCKET_SIZE;
@@ -204,10 +206,10 @@ static int merge_split(void *arr_, size_t bucket1, size_t bucket2,
             goto exit;
         }
 
-        /* Set the BIT_IDX bit of the node and decrement count1 if count1 > 0
-         * and the node is a dummy node. */
-        node.orp_id |= node.is_dummy << bit_idx;
-        node.orp_id &= ~(((bool) count1 & node.is_dummy) << bit_idx);
+        /* If count1 > 0 and the node is a dummy element, set BIT_IDX bit of ORP
+         * ID and decrement count1. Else, clear BIT_IDX bit of ORP ID. */
+        node.orp_id &= ~(node.is_dummy << bit_idx);
+        node.orp_id |= ((bool) count1 & node.is_dummy) << bit_idx;
         count1 -= (bool) count1 & node.is_dummy;
 
         /* Encrypt index i. */
@@ -230,10 +232,10 @@ static int merge_split(void *arr_, size_t bucket1, size_t bucket2,
             goto exit;
         }
 
-        /* Set the BIT_IDX bit of the node and decrement count1 if count1 > 0
-         * and the node is a dummy node. */
-        node.orp_id |= node.is_dummy << bit_idx;
-        node.orp_id &= ~(((bool) count1 & node.is_dummy) << bit_idx);
+        /* If count1 > 0 and the node is a dummy element, set BIT_IDX bit of ORP
+         * ID and decrement count1. Else, clear BIT_IDX bit of ORP ID. */
+        node.orp_id &= ~(node.is_dummy << bit_idx);
+        node.orp_id |= ((bool) count1 & node.is_dummy) << bit_idx;
         count1 -= (bool) count1 & node.is_dummy;
 
         /* Encrypt index i. */
