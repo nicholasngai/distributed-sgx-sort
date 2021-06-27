@@ -259,6 +259,97 @@ exit:
     return ret;
 }
 
+struct permute_swap_aux {
+    void *arr;
+    size_t bucket;
+};
+
+/* Performs a swap of nodes A and B in ARR according to the ORP IDs. */
+static void permute_swap(size_t a, size_t b, void *aux_) {
+    struct permute_swap_aux *aux = aux_;
+    size_t a_idx = aux->bucket * BUCKET_SIZE + a % BUCKET_SIZE;
+    size_t b_idx = aux->bucket * BUCKET_SIZE + b % BUCKET_SIZE;
+    unsigned char *arr = aux->arr;
+    int ret;
+
+    node_t node_a;
+    node_t node_b;
+
+    /* Decrypt nodes. */
+    ret = node_decrypt(key, &node_a, arr + a_idx * SIZEOF_ENCRYPTED_NODE,
+            a_idx);
+    if (ret) {
+        handle_error_string("Error decrypting node");
+        goto exit;
+    }
+    ret = node_decrypt(key, &node_b, arr + b_idx * SIZEOF_ENCRYPTED_NODE,
+            b_idx);
+    if (ret) {
+        handle_error_string("Error decrypting node");
+        goto exit;
+    }
+
+    /* Compare and obliviously swap if the ORP ID of node A is greater than that
+     * of node B. */
+    bool cond = node_a.orp_id > node_b.orp_id;
+    o_memswap(&node_a, &node_b, sizeof(node_a), cond);
+
+    /* Encrypt nodes. */
+    ret = node_encrypt(key, &node_a, arr + a_idx * SIZEOF_ENCRYPTED_NODE,
+            a_idx);
+    if (ret) {
+        handle_error_string("Error encrypting node");
+        goto exit;
+    }
+    ret = node_encrypt(key, &node_b, arr + b_idx * SIZEOF_ENCRYPTED_NODE,
+            b_idx);
+    if (ret) {
+        handle_error_string("Error encrypting node");
+        goto exit;
+    }
+
+exit:
+    ;
+}
+
+/* Permutes the real elements in the bucket (which are guaranteed to be at the
+ * beginning of the bucket) by sorting according to all bits of the ORP ID and
+ * setting *REAL_LEN to the number of real elements. This is valid because the
+ * bin assignment used the lower bits of the ORP ID, leaving the upper bits free
+ * for comparison and permutation within the bin. */
+static int permute_and_scan(void *arr_, size_t bucket, size_t *real_len) {
+    int ret;
+    unsigned char *arr = arr_;
+
+    *real_len = BUCKET_SIZE;
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        size_t i_idx = bucket * BUCKET_SIZE + i;
+        node_t node;
+
+        /* Decrypt node. */
+        ret = node_decrypt(key, &node, arr + i_idx * SIZEOF_ENCRYPTED_NODE,
+                i_idx);
+        if (ret) {
+            handle_error_string("Error decrypting node");
+            goto exit;
+        }
+
+        if (node.is_dummy) {
+            *real_len = i;
+            break;
+        }
+    }
+
+    struct permute_swap_aux swap_aux = {
+        .arr = arr,
+        .bucket = bucket,
+    };
+    o_sort_generate_swaps(*real_len, permute_swap, &swap_aux);
+
+exit:
+    return ret;
+}
+
 /* Performs a swap of nodes A and B in ARR, used when the input array is too
  * small to reasonably perform bucket oblivious sort. */
 static void sort_swap(size_t a, size_t b, void *arr_) {
@@ -313,15 +404,16 @@ int bucket_sort(void *arr, size_t length) {
         goto exit;
     }
 
-    /* Get next power of 2 greater than or equal to the length. */
+    /* Get double the next power of 2 greater than or equal to the length. */
     size_t rounded_length = 1;
     while (rounded_length < length) {
         rounded_length <<= 1;
     }
+    rounded_length <<= 1;
 
     /* Compute the number of buckets needed. Multiply by 2 since we will have
      * dummy elements. */
-    size_t num_buckets = 2 * rounded_length / BUCKET_SIZE;
+    size_t num_buckets = rounded_length / BUCKET_SIZE;
 
     ret = assign_random_ids_and_spread(arr, length);
     if (ret) {
@@ -349,6 +441,42 @@ int bucket_sort(void *arr, size_t length) {
             }
         }
         bit_idx++;
+    }
+
+    /* Permute each bucket and concatenate them back together by compressing all
+     * real nodes together. */
+    size_t compress_idx = 0;
+    for (size_t bucket = 0; bucket < num_buckets; bucket++) {
+        /* Permute and get end of real elements in bucket. */
+        size_t real_len;
+        ret = permute_and_scan(arr, bucket, &real_len);
+        if (ret) {
+            handle_error_string("Error permuting bucket");
+            goto exit;
+        }
+
+        /* Compress away dummy elements. */
+        for (size_t i = 0; i < real_len; i++) {
+            size_t i_idx = bucket * BUCKET_SIZE + i;
+
+            /* Decrypt node from bucket. */
+            node_t node;
+            ret = node_decrypt(key, &node, arr + i_idx * SIZEOF_ENCRYPTED_NODE,
+                    i_idx);
+            if (ret) {
+                handle_error_string("Error decrypting node");
+                goto exit;
+            }
+
+            /* Encrypt node to compressed array. */
+            ret = node_encrypt(key, &node,
+                    arr + compress_idx * SIZEOF_ENCRYPTED_NODE, compress_idx);
+            if (ret) {
+                handle_error_string("Error encrypting node");
+                goto exit;
+            }
+            compress_idx++;
+        }
     }
 
 exit:
