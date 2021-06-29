@@ -1,9 +1,11 @@
 #include "enclave/bucket.h"
+#include <errno.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
+#include "common/defs.h"
 #include "common/error.h"
 #include "common/node_t.h"
 
@@ -274,30 +276,162 @@ exit:
     return ret;
 }
 
-/* Decrypts elements and compares them by their key. */
-static int decrypt_comparator(const void *a, const void *b) {
+/* Compares elements by the tuple (key, ORP ID). The check for the ORP ID must
+ * always be run (it must be oblivious whether the comparison result is based on
+ * the key or on the ORP ID), since we leak info on duplicate keys otherwise. */
+static int mergesort_comparator(const void *a_, const void *b_) {
+    const node_t *a = a_;
+    const node_t *b = b_;
+    int comp_key = (a->key > b->key) - (a->key < b->key);
+    int comp_orp_id = (a->orp_id > b->orp_id) - (a->orp_id < b->orp_id);
+    return (comp_key << 1) + comp_orp_id;
+}
+
+/* Non-oblivious sort. Based on an external mergesort algorithm since decrypting
+ * nodes from host memory is expensive. We will reuse the buffer from the ORP,
+ * so BUF_SIZE = BUCKET_SIZE * 2. WORK is a buffer that will be used to store
+ * intermediate data. */
+#define BUF_SIZE (BUCKET_SIZE * 2)
+static int mergesort(void *arr_, void *work_, size_t length) {
+    unsigned char *arr = arr_;
+    unsigned char *work = work_;
     int ret;
 
-    /* Decrypt nodes. */
-    node_t node_a;
-    node_t node_b;
-    ret = node_decrypt(key, &node_a, a, 0);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        goto exit;
-    }
-    ret = node_decrypt(key, &node_b, b, 0);
-    if (ret) {
-        handle_error_string("Error decrypting node");
+    /* Allocate buffer used for BUF_SIZE-way merge. */
+    size_t *merge_indices = malloc(BUF_SIZE * sizeof(*merge_indices));
+    if (!merge_indices) {
+        perror("Error allocating merge index buffer");
+        ret = errno;
         goto exit;
     }
 
-    /* Compare nodes by the tuple (key, ORP ID). Note that we must always
-     * perform the comparison for the ORP ID since we leak information about
-     * duplicate keys otherwise. */
-    ret = (((node_a.key > node_b.key) - (node_a.key < node_b.key)) << 1)
-        + (((node_a.orp_id > node_b.orp_id) - (node_a.orp_id < node_b.orp_id)));
+    /* Start by sorting runs of BUF_SIZE. */
+    for (size_t i = 0; i < length; i += BUF_SIZE) {
+        size_t run_length = MIN(length - i, BUF_SIZE);
 
+        /* Decrypt nodes. */
+        for (size_t j = 0; j < run_length; j++) {
+            ret = node_decrypt(key, &buffer[j],
+                    arr + (i + j) * SIZEOF_ENCRYPTED_NODE, i + j);
+            if (ret) {
+                handle_error_string("Error decrypting node");
+                goto exit_free_merge_indices;
+            }
+        }
+
+        /* Sort using libc quicksort. */
+        qsort(buffer, run_length, sizeof(*buffer), mergesort_comparator);
+
+        /* Encrypt nodes. */
+        for (size_t j = 0; j < run_length; j++) {
+            ret = node_encrypt(key, &buffer[j],
+                    arr + (i + j) * SIZEOF_ENCRYPTED_NODE, i + j);
+            if (ret) {
+                handle_error_string("Error encrypting node");
+                goto exit_free_merge_indices;
+            }
+        }
+    }
+
+    /* Merge runs of increasing length in a BUF_SIZE-way merge by reading the
+     * next smallest element of run i into buffer[i], then merging and
+     * encrypting to the output buffer. */
+    unsigned char *input = arr;
+    unsigned char *output = work;
+    for (size_t run_length = BUF_SIZE; run_length < length;
+            run_length *= BUF_SIZE) {
+        for (size_t i = 0; i < length; i += run_length * BUF_SIZE) {
+            size_t num_runs =
+                CEIL_DIV(MIN(length - i, run_length * BUF_SIZE), run_length);
+
+            /* Zero out index buffer. */
+            memset(merge_indices, '\0', num_runs * sizeof(*merge_indices));
+
+            /* Read in the first (smallest) element from run j into
+             * buffer[j]. The runs start at element i. */
+            for (size_t j = 0; j < num_runs; j++) {
+                ret = node_decrypt(key, &buffer[j],
+                        input + (i + j * run_length) * SIZEOF_ENCRYPTED_NODE,
+                        i + j * run_length);
+                if (ret) {
+                    handle_error_string("Error decrypting node");
+                    goto exit_free_merge_indices;
+                }
+            }
+
+            /* Merge the runs in the buffer and encrypt to the output array.
+             * Nodes for which we have reach the end of the array are marked as
+             * a dummy element, so we continue until all nodes in buffer are
+             * dummy nodes. */
+            size_t output_idx = 0;
+            bool all_dummy;
+            do {
+                /* Scan for lowest node. */
+                size_t lowest_run;
+                all_dummy = true;
+                for (size_t j = 0; j < num_runs; j++) {
+                    if (buffer[j].is_dummy) {
+                        continue;
+                    }
+                    if (all_dummy
+                            || mergesort_comparator(&buffer[j],
+                                &buffer[lowest_run]) < 0) {
+                        lowest_run = j;
+                    }
+                    all_dummy = false;
+                }
+
+                /* Break out of loop if all nodes were dummy. */
+                if (all_dummy) {
+                    continue;
+                }
+
+                /* Encrypt lowest node to output. */
+                ret = node_encrypt(key, &buffer[lowest_run],
+                        output + (i + output_idx) * SIZEOF_ENCRYPTED_NODE,
+                        i + output_idx);
+                merge_indices[lowest_run]++;
+                output_idx++;
+
+                /* Check if we have reached the end of the run. */
+                if (merge_indices[lowest_run] >= run_length
+                        || i + lowest_run * run_length
+                            + merge_indices[lowest_run] >= length) {
+                    /* Reached the end, so mark the node as dummy so that we
+                     * ignore it. */
+                    buffer[lowest_run].is_dummy = true;
+                } else {
+                    /* Not yet reached the end, so read the next node in the
+                     * input run. */
+                    ret = node_decrypt(key, &buffer[lowest_run],
+                            input
+                                + (i + lowest_run * run_length +
+                                    merge_indices[lowest_run])
+                                * SIZEOF_ENCRYPTED_NODE,
+                            i + lowest_run * run_length
+                                + merge_indices[lowest_run]);
+                    if (ret) {
+                        handle_error_string("Error decrypting node");
+                        goto exit_free_merge_indices;
+                    }
+                }
+            } while (!all_dummy);
+        }
+
+        /* Swap the input and output arrays. */
+        unsigned char *temp = input;
+        input = output;
+        output = temp;
+    }
+
+    /* If the final merging output (now the input since it would have been
+     * swapped) wasn't the original array, copy back to the right place. */
+    if (input != arr) {
+        memcpy(arr, input, length * SIZEOF_ENCRYPTED_NODE);
+    }
+
+exit_free_merge_indices:
+    free(merge_indices);
 exit:
     return ret;
 }
@@ -387,10 +521,9 @@ int bucket_sort(void *arr, size_t length) {
                 goto exit;
             }
 
-            /* Encrypt. We must use a constant 0 index as AAD since quicksort
-             * will swap ciphertexts directly. */
+            /* Encrypt. */
             ret = node_encrypt(key, buffer + i,
-                    arr + compress_idx * SIZEOF_ENCRYPTED_NODE, 0);
+                    arr + compress_idx * SIZEOF_ENCRYPTED_NODE, compress_idx);
             if (ret) {
                 handle_error_string("Error encrypting node");
                 goto exit;
@@ -400,25 +533,10 @@ int bucket_sort(void *arr, size_t length) {
     }
 
     /* Non-oblivious, comparison-based sort. */
-    qsort(arr, length, SIZEOF_ENCRYPTED_NODE, decrypt_comparator);
-
-    /* Re-encrypt all nodes with the correct AAD. */
-    for (size_t i = 0; i < length; i++) {
-
-        /* Decrypt. */
-        node_t node;
-        ret = node_decrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE, 0);
-        if (ret) {
-            handle_error_string("Error decrypting node");
-            goto exit;
-        }
-
-        /* Encrypt. */
-        ret = node_encrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE, i);
-        if (ret) {
-            handle_error_string("Error encrypting node");
-            goto exit;
-        }
+    ret = mergesort(arr, arr + length * SIZEOF_ENCRYPTED_NODE, length);
+    if (ret) {
+        handle_error_string("Error in non-oblivious sort");
+        goto exit;
     }
 
 exit:
