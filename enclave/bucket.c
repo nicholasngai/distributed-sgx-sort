@@ -97,9 +97,10 @@ exit:
 
 /* Compare elements by the BIT_IDX bit of the ORP ID, then by dummy element
  * (real elements first). */
-static int merge_split_comparator(void *a_, void *b_, void *bit_idx_) {
-    node_t *a = a_;
-    node_t *b = b_;
+static int merge_split_comparator(const void *a_, const void *b_,
+        void *bit_idx_) {
+    const node_t *a = a_;
+    const node_t *b = b_;
     size_t bit_idx = (size_t) bit_idx_;
 
     /* Compare and obliviously swap if the BIT_IDX bit of ORP ID of node A is
@@ -206,9 +207,10 @@ struct permute_swap_aux {
 };
 
 /* Compares elements by their ORP ID. */
-static int permute_comparator(void *a_, void *b_, void *aux UNUSED) {
-    node_t *a = a_;
-    node_t *b = b_;
+static int permute_comparator(const void *a_, const void *b_,
+        void *aux UNUSED) {
+    const node_t *a = a_;
+    const node_t *b = b_;
     return (a > b) - (a < b);
 }
 
@@ -231,7 +233,9 @@ static void permute_and_scan(node_t *bucket, size_t *real_len) {
 }
 
 /* Compares elements by their key. */
-static int direct_comparator(void *a_, void *b_, void *aux UNUSED) {
+static int direct_comparator(const void *a_, const void *b_, void *aux UNUSED) {
+    const node_t *a = a_;
+    const node_t *b = b_;
     return (a->key > b->key) - (a->key < b->key);
 }
 
