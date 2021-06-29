@@ -4,7 +4,7 @@
 
 /* Node encryption and decryption. */
 
-int node_encrypt(void *key, node_t *node, void *dst_, size_t idx) {
+int node_encrypt(const void *key, const node_t *node, void *dst_, size_t idx) {
     int ret;
     unsigned char *dst = dst_;
 
@@ -28,9 +28,9 @@ exit:
     return ret;
 }
 
-int node_decrypt(void *key, node_t *node, void *src_, size_t idx) {
+int node_decrypt(const void *key, node_t *node, const void *src_, size_t idx) {
     int ret;
-    unsigned char *src = src_;
+    const unsigned char *src = src_;
 
     /* The IV is the first 12 bytes. The tag is the next 16 bytes. The
      * ciphertext is the remaining 128 bytes. */

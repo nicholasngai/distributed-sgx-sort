@@ -15,7 +15,7 @@ typedef struct node {
     unsigned char unused[108];
 } node_t;
 
-int node_encrypt(void *key, node_t *node, void *dst_, size_t idx);
-int node_decrypt(void *key, node_t *node, void *src_, size_t idx);
+int node_encrypt(const void *key, const node_t *node, void *dst_, size_t idx);
+int node_decrypt(const void *key, node_t *node, const void *src_, size_t idx);
 
 #endif /* common/node_t.h */
