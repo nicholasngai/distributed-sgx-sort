@@ -209,10 +209,7 @@ struct permute_swap_aux {
 static int permute_comparator(void *a_, void *b_, void *aux UNUSED) {
     node_t *a = a_;
     node_t *b = b_;
-
-    bool greater_than = a > b;
-    bool less_than = a < b;
-    return greater_than - less_than;
+    return (a > b) - (a < b);
 }
 
 /* Permutes the real elements in the bucket (which are guaranteed to be at the
@@ -235,11 +232,7 @@ static void permute_and_scan(node_t *bucket, size_t *real_len) {
 
 /* Compares elements by their key. */
 static int direct_comparator(void *a_, void *b_, void *aux UNUSED) {
-    node_t *a = a_;
-    node_t *b = b_;
-    bool greater_than = a->key > b->key;
-    bool less_than = a->key < b->key;
-    return greater_than - less_than;
+    return (a->key > b->key) - (a->key < b->key);
 }
 
 /* Performs an oblivious sort, used when the input array is too small to
