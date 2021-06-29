@@ -1,6 +1,7 @@
 #include "enclave/bucket.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
 #include "common/error.h"
@@ -273,6 +274,34 @@ exit:
     return ret;
 }
 
+/* Decrypts elements and compares them by their key. */
+static int decrypt_comparator(const void *a, const void *b) {
+    int ret;
+
+    /* Decrypt nodes. */
+    node_t node_a;
+    node_t node_b;
+    ret = node_decrypt(key, &node_a, a, 0);
+    if (ret) {
+        handle_error_string("Error decrypting node");
+        goto exit;
+    }
+    ret = node_decrypt(key, &node_b, b, 0);
+    if (ret) {
+        handle_error_string("Error decrypting node");
+        goto exit;
+    }
+
+    /* Compare nodes by the tuple (key, ORP ID). Note that we must always
+     * perform the comparison for the ORP ID since we leak information about
+     * duplicate keys otherwise. */
+    ret = (((node_a.key > node_b.key) - (node_a.key < node_b.key)) << 1)
+        + (((node_a.orp_id > node_b.orp_id) - (node_a.orp_id < node_b.orp_id)));
+
+exit:
+    return ret;
+}
+
 int bucket_sort(void *arr, size_t length) {
     int ret;
 
@@ -328,7 +357,8 @@ int bucket_sort(void *arr, size_t length) {
     }
 
     /* Permute each bucket and concatenate them back together by compressing all
-     * real nodes together. */
+     * real nodes together. We also assign new ORP IDs so that all elements have
+     * a unique tuple of (key, ORP ID), even if they have duplicate keys. */
     size_t compress_idx = 0;
     for (size_t bucket = 0; bucket < num_buckets; bucket++) {
         /* Decrypt nodes from bucket to buffer. */
@@ -347,15 +377,47 @@ int bucket_sort(void *arr, size_t length) {
         size_t real_len;
         permute_and_scan(buffer, &real_len);
 
-        /* Encrypt nodes from buffer to compressed array. */
+        /* Assign random ORP IDs and encrypt nodes from buffer to compressed
+         * array. */
         for (size_t i = 0; i < real_len; i++) {
+            /* Assign random ORP ID. */
+            ret = rand_read(&buffer[i].orp_id, sizeof(buffer[i].orp_id));
+            if (ret) {
+                handle_error_string("Error assigning random ID");
+                goto exit;
+            }
+
+            /* Encrypt. We must use a constant 0 index as AAD since quicksort
+             * will swap ciphertexts directly. */
             ret = node_encrypt(key, buffer + i,
-                    arr + compress_idx * SIZEOF_ENCRYPTED_NODE, compress_idx);
+                    arr + compress_idx * SIZEOF_ENCRYPTED_NODE, 0);
             if (ret) {
                 handle_error_string("Error encrypting node");
                 goto exit;
             }
             compress_idx++;
+        }
+    }
+
+    /* Non-oblivious, comparison-based sort. */
+    qsort(arr, length, SIZEOF_ENCRYPTED_NODE, decrypt_comparator);
+
+    /* Re-encrypt all nodes with the correct AAD. */
+    for (size_t i = 0; i < length; i++) {
+
+        /* Decrypt. */
+        node_t node;
+        ret = node_decrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE, 0);
+        if (ret) {
+            handle_error_string("Error decrypting node");
+            goto exit;
+        }
+
+        /* Encrypt. */
+        ret = node_encrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE, i);
+        if (ret) {
+            handle_error_string("Error encrypting node");
+            goto exit;
         }
     }
 
