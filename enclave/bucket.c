@@ -1,5 +1,6 @@
 #include "enclave/bucket.h"
 #include <string.h>
+#include <stdio.h>
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
 #include "common/error.h"
@@ -9,6 +10,10 @@
 
 static unsigned char key[16];
 
+/* Buffer used to store 2 * BUCKET_SIZE nodes at once for the merge-split
+ * operation. */
+static _Thread_local node_t *buffer;
+
 int bucket_init(void) {
     /* Initialize random. */
     if (rand_init()) {
@@ -16,14 +21,24 @@ int bucket_init(void) {
         goto exit;
     }
 
+    /* Allocate buffer. */
+    buffer = malloc(BUCKET_SIZE * 2 * sizeof(*buffer));
+    if (!buffer) {
+        perror("Error allocating buffer");
+        goto exit_free_rand;
+    }
+
     return 0;
 
+exit_free_rand:
+    rand_free();
 exit:
     return -1;
 }
 
 void bucket_free(void) {
     /* Free resources. */
+    free(buffer);
     rand_free();
 }
 
@@ -80,67 +95,19 @@ exit:
     return ret;
 }
 
-struct merge_split_swap_aux {
-    void *arr;
-    size_t bit_idx;
-    size_t bucket1;
-    size_t bucket2;
-};
-
-/* Obliviously swap elements as part of an oblivious sort, where the first
- * BUCKET_SIZE elements are in BUCKET1, and the second BUCKET_SIZE elements are
- * in BUCKET2. */
-static void merge_split_swap(size_t a, size_t b, void *aux_) {
-    struct merge_split_swap_aux *aux = aux_;
-    size_t a_idx = (a < BUCKET_SIZE ? aux->bucket1 : aux->bucket2) * BUCKET_SIZE
-        + a % BUCKET_SIZE;
-    size_t b_idx = (b < BUCKET_SIZE ? aux->bucket1 : aux->bucket2) * BUCKET_SIZE
-        + b % BUCKET_SIZE;
-    unsigned char *arr = aux->arr;
-    int ret;
-
-    node_t node_a;
-    node_t node_b;
-
-    /* Decrypt nodes. */
-    ret = node_decrypt(key, &node_a, arr + a_idx * SIZEOF_ENCRYPTED_NODE,
-            a_idx);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        goto exit;
-    }
-    ret = node_decrypt(key, &node_b, arr + b_idx * SIZEOF_ENCRYPTED_NODE,
-            b_idx);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        goto exit;
-    }
+/* Compare elements by the BIT_IDX bit of the ORP ID, then by dummy element
+ * (real elements first). */
+static int merge_split_comparator(void *a_, void *b_, void *bit_idx_) {
+    node_t *a = a_;
+    node_t *b = b_;
+    size_t bit_idx = (size_t) bit_idx_;
 
     /* Compare and obliviously swap if the BIT_IDX bit of ORP ID of node A is
      * 1 and that of node B is 0 or if the ORP IDs are the same, but node A is a
      * dummy and node B is real. */
-    bool bit_a = (node_a.orp_id >> aux->bit_idx) & 1;
-    bool bit_b = (node_b.orp_id >> aux->bit_idx) & 1;
-    bool cond = (bit_a & !bit_b)
-        | ((bit_a == bit_b) & (node_a.is_dummy & !node_b.is_dummy));
-    o_memswap(&node_a, &node_b, sizeof(node_a), cond);
-
-    /* Encrypt nodes. */
-    ret = node_encrypt(key, &node_a, arr + a_idx * SIZEOF_ENCRYPTED_NODE,
-            a_idx);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        goto exit;
-    }
-    ret = node_encrypt(key, &node_b, arr + b_idx * SIZEOF_ENCRYPTED_NODE,
-            b_idx);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        goto exit;
-    }
-
-exit:
-    ;
+    char bit_a = (a->orp_id >> bit_idx) & 1;
+    char bit_b = (b->orp_id >> bit_idx) & 1;
+    return (bit_a << 1) - (bit_b << 1) + a->is_dummy - b->is_dummy;
 }
 
 /* Merge BUCKET1 and BUCKET2 and split such that BUCKET1 contains all elements
@@ -154,39 +121,37 @@ static int merge_split(void *arr_, size_t bucket1, size_t bucket2,
     int ret;
     unsigned char *arr = arr_;
 
+    /* Decrypt BUCKET1 nodes to buffer. */
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        size_t i_idx = bucket1 * BUCKET_SIZE + i;
+
+        ret = node_decrypt(key, buffer + i, arr + i_idx * SIZEOF_ENCRYPTED_NODE,
+                i_idx);
+        if (ret) {
+            handle_error_string("Error decrypting node");
+            goto exit;
+        }
+    }
+
+    /* Decrypt BUCKET2 nodes to buffer. */
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        size_t i_idx = bucket2 * BUCKET_SIZE + i;
+
+        ret = node_decrypt(key, buffer + BUCKET_SIZE + i,
+                arr + i_idx * SIZEOF_ENCRYPTED_NODE, i_idx);
+        if (ret) {
+            handle_error_string("Error decrypting node");
+            goto exit;
+        }
+    }
+
     /* The number of elements with corresponding bit 1. */
     size_t count1 = 0;
 
-    /* Count number of elements with corresponding bit 1 in BUCKET1. */
-    for (size_t i = bucket1 * BUCKET_SIZE; i < (bucket1 + 1) * BUCKET_SIZE;
-            i++) {
-        node_t node;
-
-        /* Decrypt index i. */
-        ret = node_decrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE, i);
-        if (ret) {
-            handle_error_string("Error decrypting node");
-            goto exit;
-        }
-
+    /* Count number of elements with corresponding bit 1. */
+    for (size_t i = 0; i < BUCKET_SIZE * 2; i++) {
         /* Obliviously increment count. */
-        count1 += ((node.orp_id >> bit_idx) & 1) & !node.is_dummy;
-    }
-
-    /* Count number of elements with corresponding bit 1 in BUCKET2. */
-    for (size_t i = bucket2 * BUCKET_SIZE; i < (bucket2 + 1) * BUCKET_SIZE;
-            i++) {
-        node_t node;
-
-        /* Decrypt index i. */
-        ret = node_decrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE, i);
-        if (ret) {
-            handle_error_string("Error decrypting node");
-            goto exit;
-        }
-
-        /* Obliviously increment count. */
-        count1 += ((node.orp_id >> bit_idx) & 1) & !node.is_dummy;
+        count1 += ((buffer[i].orp_id >> bit_idx) & 1) & !buffer[i].is_dummy;
     }
 
     /* There are count1 elements with bit 1, so we need to assign BUCKET_SIZE -
@@ -194,66 +159,42 @@ static int merge_split(void *arr_, size_t bucket1, size_t bucket2,
      * assigned with bit 0. */
     count1 = BUCKET_SIZE - count1;
 
-    /* Assign dummy elements in BUCKET1. */
-    for (size_t i = bucket1 * BUCKET_SIZE; i < (bucket1 + 1) * BUCKET_SIZE;
-            i++) {
-        node_t node;
-
-        /* Decrypt index i. */
-        ret = node_decrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE, i);
-        if (ret) {
-            handle_error_string("Error decrypting node");
-            goto exit;
-        }
-
+    /* Assign dummy elements. */
+    for (size_t i = 0; i < BUCKET_SIZE * 2; i++) {
         /* If count1 > 0 and the node is a dummy element, set BIT_IDX bit of ORP
          * ID and decrement count1. Else, clear BIT_IDX bit of ORP ID. */
-        node.orp_id &= ~(node.is_dummy << bit_idx);
-        node.orp_id |= ((bool) count1 & node.is_dummy) << bit_idx;
-        count1 -= (bool) count1 & node.is_dummy;
-
-        /* Encrypt index i. */
-        ret = node_encrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE, i);
-        if (ret) {
-            handle_error_string("Error encrypting node");
-            goto exit;
-        }
-    }
-
-    /* Assign dummy elements in BUCKET2. */
-    for (size_t i = bucket2 * BUCKET_SIZE; i < (bucket2 + 1) * BUCKET_SIZE;
-            i++) {
-        node_t node;
-
-        /* Decrypt index i. */
-        ret = node_decrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE, i);
-        if (ret) {
-            handle_error_string("Error decrypting node");
-            goto exit;
-        }
-
-        /* If count1 > 0 and the node is a dummy element, set BIT_IDX bit of ORP
-         * ID and decrement count1. Else, clear BIT_IDX bit of ORP ID. */
-        node.orp_id &= ~(node.is_dummy << bit_idx);
-        node.orp_id |= ((bool) count1 & node.is_dummy) << bit_idx;
-        count1 -= (bool) count1 & node.is_dummy;
-
-        /* Encrypt index i. */
-        ret = node_encrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE, i);
-        if (ret) {
-            handle_error_string("Error encrypting node");
-            goto exit;
-        }
+        buffer[i].orp_id &= ~(buffer[i].is_dummy << bit_idx);
+        buffer[i].orp_id |= ((bool) count1 & buffer[i].is_dummy) << bit_idx;
+        count1 -= (bool) count1 & buffer[i].is_dummy;
     }
 
     /* Oblivious bitonic sort elements according to BIT_IDX bit of ORP id. */
-    struct merge_split_swap_aux swap_aux = {
-        .arr = arr,
-        .bit_idx = bit_idx,
-        .bucket1 = bucket1,
-        .bucket2 = bucket2,
-    };
-    o_sort_generate_swaps(2 * BUCKET_SIZE, merge_split_swap, &swap_aux);
+    o_sort(buffer, BUCKET_SIZE * 2, sizeof(*buffer), merge_split_comparator,
+            (void *) bit_idx);
+
+    /* Encrypt BUCKET1 nodes from buffer. */
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        size_t i_idx = bucket1 * BUCKET_SIZE + i;
+
+        ret = node_encrypt(key, buffer + i, arr + i_idx * SIZEOF_ENCRYPTED_NODE,
+                i_idx);
+        if (ret) {
+            handle_error_string("Error encrypting node");
+            goto exit;
+        }
+    }
+
+    /* Encrypt BUCKET2 nodes from buffer. */
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        size_t i_idx = bucket2 * BUCKET_SIZE + i;
+
+        ret = node_encrypt(key, buffer + BUCKET_SIZE + i,
+                arr + i_idx * SIZEOF_ENCRYPTED_NODE, i_idx);
+        if (ret) {
+            handle_error_string("Error encrypting node");
+            goto exit;
+        }
+    }
 
 exit:
     return ret;
@@ -264,52 +205,14 @@ struct permute_swap_aux {
     size_t bucket;
 };
 
-/* Performs a swap of nodes A and B in ARR according to the ORP IDs. */
-static void permute_swap(size_t a, size_t b, void *aux_) {
-    struct permute_swap_aux *aux = aux_;
-    size_t a_idx = aux->bucket * BUCKET_SIZE + a % BUCKET_SIZE;
-    size_t b_idx = aux->bucket * BUCKET_SIZE + b % BUCKET_SIZE;
-    unsigned char *arr = aux->arr;
-    int ret;
+/* Compares elements by their ORP ID. */
+static int permute_comparator(void *a_, void *b_, void *aux UNUSED) {
+    node_t *a = a_;
+    node_t *b = b_;
 
-    node_t node_a;
-    node_t node_b;
-
-    /* Decrypt nodes. */
-    ret = node_decrypt(key, &node_a, arr + a_idx * SIZEOF_ENCRYPTED_NODE,
-            a_idx);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        goto exit;
-    }
-    ret = node_decrypt(key, &node_b, arr + b_idx * SIZEOF_ENCRYPTED_NODE,
-            b_idx);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        goto exit;
-    }
-
-    /* Compare and obliviously swap if the ORP ID of node A is greater than that
-     * of node B. */
-    bool cond = node_a.orp_id > node_b.orp_id;
-    o_memswap(&node_a, &node_b, sizeof(node_a), cond);
-
-    /* Encrypt nodes. */
-    ret = node_encrypt(key, &node_a, arr + a_idx * SIZEOF_ENCRYPTED_NODE,
-            a_idx);
-    if (ret) {
-        handle_error_string("Error encrypting node");
-        goto exit;
-    }
-    ret = node_encrypt(key, &node_b, arr + b_idx * SIZEOF_ENCRYPTED_NODE,
-            b_idx);
-    if (ret) {
-        handle_error_string("Error encrypting node");
-        goto exit;
-    }
-
-exit:
-    ;
+    bool greater_than = a > b;
+    bool less_than = a < b;
+    return greater_than - less_than;
 }
 
 /* Permutes the real elements in the bucket (which are guaranteed to be at the
@@ -317,79 +220,60 @@ exit:
  * setting *REAL_LEN to the number of real elements. This is valid because the
  * bin assignment used the lower bits of the ORP ID, leaving the upper bits free
  * for comparison and permutation within the bin. */
-static int permute_and_scan(void *arr_, size_t bucket, size_t *real_len) {
-    int ret;
-    unsigned char *arr = arr_;
-
+static void permute_and_scan(node_t *bucket, size_t *real_len) {
+    /* Scan for first dummy node. */
     *real_len = BUCKET_SIZE;
     for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        size_t i_idx = bucket * BUCKET_SIZE + i;
-        node_t node;
-
-        /* Decrypt node. */
-        ret = node_decrypt(key, &node, arr + i_idx * SIZEOF_ENCRYPTED_NODE,
-                i_idx);
-        if (ret) {
-            handle_error_string("Error decrypting node");
-            goto exit;
-        }
-
-        if (node.is_dummy) {
+        if (bucket[i].is_dummy) {
             *real_len = i;
             break;
         }
     }
 
-    struct permute_swap_aux swap_aux = {
-        .arr = arr,
-        .bucket = bucket,
-    };
-    o_sort_generate_swaps(*real_len, permute_swap, &swap_aux);
-
-exit:
-    return ret;
+    o_sort(bucket, *real_len, sizeof(*bucket), permute_comparator, NULL);
 }
 
-/* Performs a swap of nodes A and B in ARR, used when the input array is too
- * small to reasonably perform bucket oblivious sort. */
-static void sort_swap(size_t a, size_t b, void *arr_) {
+/* Compares elements by their key. */
+static int direct_comparator(void *a_, void *b_, void *aux UNUSED) {
+    node_t *a = a_;
+    node_t *b = b_;
+    bool greater_than = a->key > b->key;
+    bool less_than = a->key < b->key;
+    return greater_than - less_than;
+}
+
+/* Performs an oblivious sort, used when the input array is too small to
+ * reasonably perform bucket oblivious sort. LENGTH must be less than
+ * BUCKET_SIZE * 2! */
+static int direct_sort(void *arr_, size_t length) {
     unsigned char *arr = arr_;
     int ret;
 
-    node_t node_a;
-    node_t node_b;
-
     /* Decrypt nodes. */
-    ret = node_decrypt(key, &node_a, arr + a * SIZEOF_ENCRYPTED_NODE, a);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        goto exit;
-    }
-    ret = node_decrypt(key, &node_b, arr + b * SIZEOF_ENCRYPTED_NODE, b);
-    if (ret) {
-        handle_error_string("Error decrypting node");
-        goto exit;
+    for (size_t i = 0; i < length; i++) {
+        ret = node_decrypt(key, buffer + i, arr + i * SIZEOF_ENCRYPTED_NODE, i);
+        if (ret) {
+            handle_error_string("Error decrypting node");
+            goto exit;
+        }
     }
 
-    /* Compare and obliviously swap if the BIT_IDX bit of ORP ID of node A is
-     * 1 and that of node B is 0. */
-    bool cond = node_a.key > node_b.key;
-    o_memswap(&node_a, &node_b, sizeof(node_a), cond);
+    /* Sort. */
+    o_sort(buffer, length, sizeof(*buffer), direct_comparator, NULL);
 
     /* Encrypt nodes. */
-    ret = node_encrypt(key, &node_a, arr + a * SIZEOF_ENCRYPTED_NODE, a);
-    if (ret) {
-        handle_error_string("Error encrypting node");
-        goto exit;
-    }
-    ret = node_encrypt(key, &node_b, arr + b * SIZEOF_ENCRYPTED_NODE, b);
-    if (ret) {
-        handle_error_string("Error encrypting node");
-        goto exit;
+    for (size_t i = 0; i < length; i++) {
+        ret = node_encrypt(key, buffer + i, arr + i * SIZEOF_ENCRYPTED_NODE, i);
+        if (ret) {
+            handle_error_string("Error encrypting node");
+            goto exit;
+        }
     }
 
+    ret = 0;
+
 exit:
-    ;
+    return ret;
 }
 
 int bucket_sort(void *arr, size_t length) {
@@ -399,8 +283,11 @@ int bucket_sort(void *arr, size_t length) {
      * since we will invoke bitonic sorts of size BUCKET_SIZE * 2 normally
      * anyway as part of bucket sort. */
     if (length <= BUCKET_SIZE * 2) {
-        o_sort_generate_swaps(length, sort_swap, arr);
-        ret = 0;
+        ret = direct_sort(arr, length);
+        if (ret) {
+            handle_error_string("Error in direct sort for small arrays");
+            goto exit;
+        }
         goto exit;
     }
 
@@ -447,29 +334,25 @@ int bucket_sort(void *arr, size_t length) {
      * real nodes together. */
     size_t compress_idx = 0;
     for (size_t bucket = 0; bucket < num_buckets; bucket++) {
-        /* Permute and get end of real elements in bucket. */
-        size_t real_len;
-        ret = permute_and_scan(arr, bucket, &real_len);
-        if (ret) {
-            handle_error_string("Error permuting bucket");
-            goto exit;
-        }
-
-        /* Compress away dummy elements. */
-        for (size_t i = 0; i < real_len; i++) {
+        /* Decrypt nodes from bucket to buffer. */
+        for (size_t i = 0; i < BUCKET_SIZE; i++) {
             size_t i_idx = bucket * BUCKET_SIZE + i;
 
-            /* Decrypt node from bucket. */
-            node_t node;
-            ret = node_decrypt(key, &node, arr + i_idx * SIZEOF_ENCRYPTED_NODE,
-                    i_idx);
+            ret = node_decrypt(key, buffer + i,
+                    arr + i_idx * SIZEOF_ENCRYPTED_NODE, i_idx);
             if (ret) {
                 handle_error_string("Error decrypting node");
                 goto exit;
             }
+        }
 
-            /* Encrypt node to compressed array. */
-            ret = node_encrypt(key, &node,
+        /* Permute and get end of real elements in bucket. */
+        size_t real_len;
+        permute_and_scan(buffer, &real_len);
+
+        /* Encrypt nodes from buffer to compressed array. */
+        for (size_t i = 0; i < real_len; i++) {
+            ret = node_encrypt(key, buffer + i,
                     arr + compress_idx * SIZEOF_ENCRYPTED_NODE, compress_idx);
             if (ret) {
                 handle_error_string("Error encrypting node");
