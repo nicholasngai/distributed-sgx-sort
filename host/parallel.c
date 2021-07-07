@@ -15,6 +15,11 @@
 #include "host/parallel_u.h"
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 
+enum sort_type {
+    SORT_BITONIC,
+    SORT_BUCKET,
+};
+
 static int world_rank;
 static int world_size;
 
@@ -134,21 +139,37 @@ int main(int argc, char **argv) {
     /* Read arguments. */
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    if (argc < 3) {
-        printf("usage: %s enclave_image array_size [num_threads]\n", argv[0]);
+    if (argc < 4) {
+        printf("usage: %s enclave_image {bitonic|bucket} array_size [num_threads]\n", argv[0]);
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    if (argc < 2) {
-        printf("usage: %s array_size [num_threads]\n", argv[0]);
+    if (argc < 3) {
+        printf("usage: %s {bitonic|bucket} array_size [num_threads]\n", argv[0]);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         return 0;
     }
 
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+#define SORT_TYPE_STR (argv[2])
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+#define SORT_TYPE_STR (argv[1])
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    enum sort_type sort_type;
+    if (strcmp(SORT_TYPE_STR, "bitonic") == 0) {
+        sort_type = SORT_BITONIC;
+    } else if (strcmp(SORT_TYPE_STR, "bucket") == 0) {
+        sort_type = SORT_BUCKET;
+    } else {
+        printf("Invalid sort type\n");
+        return ret;
+    }
+#undef SORT_TYPE_STR
+
     size_t length;
     {
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-        ssize_t l = atoll(argv[2]);
+        ssize_t l = atoll(argv[3]);
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-        ssize_t l = atoll(argv[1]);
+        ssize_t l = atoll(argv[2]);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         if (l < 0) {
             printf("Invalid array size\n");
@@ -158,11 +179,11 @@ int main(int argc, char **argv) {
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    if (argc >= 5) {
+        ssize_t n = atoll(argv[4]);
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (argc >= 4) {
         ssize_t n = atoll(argv[3]);
-#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    if (argc >= 3) {
-        ssize_t n = atoll(argv[2]);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         if (n < 0) {
             printf("Invalid number of threads\n");
@@ -280,12 +301,26 @@ int main(int argc, char **argv) {
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    result = ecall_bucket_sort(enclave, &ret, arr, length, local_length);
+    switch (sort_type) {
+        case SORT_BITONIC:
+            result = ecall_bitonic_sort(enclave, &ret, arr, length, local_length);
+            break;
+        case SORT_BUCKET:
+            result = ecall_bucket_sort(enclave, &ret, arr, length, local_length);
+            break;
+    }
     if (result != OE_OK) {
         goto exit_free_arr;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ret = ecall_bucket_sort(arr, length, local_length);
+    switch (sort_type) {
+        case SORT_BITONIC:
+            ret = ecall_bitonic_sort(arr, length, local_length);
+            break;
+        case SORT_BUCKET:
+            ret = ecall_bucket_sort(arr, length, local_length);
+            break;
+    }
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         goto exit_free_arr;
