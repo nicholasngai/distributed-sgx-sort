@@ -17,6 +17,26 @@ static unsigned char key[16];
  * operation. */
 static _Thread_local node_t *buffer;
 
+/* Helpers. */
+
+static long next_pow2l(long x) {
+#ifdef __GNUC__
+    long next = 1 << (sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1);
+    if (next < x) {
+        next <<= 1;
+    }
+    return next;
+#else
+    long next = 1;
+    while (next < x) {
+        next <<= 1;
+    }
+    return next << 1;
+#endif
+}
+
+/* Initialization and deinitialization. */
+
 int bucket_init(void) {
     /* Initialize random. */
     if (rand_init()) {
@@ -452,11 +472,7 @@ int bucket_sort(void *arr, size_t length) {
     }
 
     /* Get double the next power of 2 greater than or equal to the length. */
-    size_t rounded_length = 1;
-    while (rounded_length < length) {
-        rounded_length <<= 1;
-    }
-    rounded_length <<= 1;
+    size_t rounded_length = next_pow2l(length) * 2;
 
     /* Compute the number of buckets needed. Multiply by 2 since we will have
      * dummy elements. */
