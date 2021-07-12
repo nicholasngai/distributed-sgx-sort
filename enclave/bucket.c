@@ -238,21 +238,61 @@ static int permute_comparator(const void *a_, const void *b_,
 }
 
 /* Permutes the real elements in the bucket (which are guaranteed to be at the
- * beginning of the bucket) by sorting according to all bits of the ORP ID and
- * setting *REAL_LEN to the number of real elements. This is valid because the
- * bin assignment used the lower bits of the ORP ID, leaving the upper bits free
- * for comparison and permutation within the bin. */
-static void permute_and_scan(node_t *bucket, size_t *real_len) {
-    /* Scan for first dummy node. */
-    *real_len = BUCKET_SIZE;
+ * beginning of the bucket) by sorting according to all bits of the ORP ID. This
+ * is valid because the bin assignment used the lower bits of the ORP ID,
+ * leaving the upper bits free for comparison and permutation within the bin.
+ * The nodes are then written sequentially to ARR[*COMPRESS_IDX], and
+ * *COMPRESS_IDX is incremented. The nodes receive new random ORP IDs. */
+static int permute_and_compress(void *arr_, size_t bucket,
+        size_t *compress_idx) {
+    int ret;
+    unsigned char *arr = arr_;
+
+    /* Decrypt nodes from bucket to buffer. */
     for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        if (bucket[i].is_dummy) {
-            *real_len = i;
+        size_t i_idx = bucket * BUCKET_SIZE + i;
+
+        ret = node_decrypt(key, buffer + i,
+                arr + i_idx * SIZEOF_ENCRYPTED_NODE, i_idx);
+        if (ret) {
+            handle_error_string("Error decrypting node");
+            goto exit;
+        }
+    }
+
+    /* Scan for first dummy node. */
+    size_t real_len = BUCKET_SIZE;
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        if (buffer[i].is_dummy) {
+            real_len = i;
             break;
         }
     }
 
-    o_sort(bucket, *real_len, sizeof(*bucket), permute_comparator, NULL);
+    o_sort(buffer, real_len, sizeof(*buffer), permute_comparator, NULL);
+
+    /* Assign random ORP IDs and encrypt nodes from buffer to compressed
+     * array. */
+    for (size_t i = 0; i < real_len; i++) {
+        /* Assign random ORP ID. */
+        ret = rand_read(&buffer[i].orp_id, sizeof(buffer[i].orp_id));
+        if (ret) {
+            handle_error_string("Error assigning random ID");
+            goto exit;
+        }
+
+        /* Encrypt. */
+        ret = node_encrypt(key, buffer + i,
+                arr + *compress_idx * SIZEOF_ENCRYPTED_NODE, *compress_idx);
+        if (ret) {
+            handle_error_string("Error encrypting node");
+            goto exit;
+        }
+        (*compress_idx)++;
+    }
+
+exit:
+    return ret;
 }
 
 /* Compares elements by their key. */
@@ -511,41 +551,7 @@ int bucket_sort(void *arr, size_t length) {
      * a unique tuple of (key, ORP ID), even if they have duplicate keys. */
     size_t compress_idx = 0;
     for (size_t bucket = 0; bucket < num_buckets; bucket++) {
-        /* Decrypt nodes from bucket to buffer. */
-        for (size_t i = 0; i < BUCKET_SIZE; i++) {
-            size_t i_idx = bucket * BUCKET_SIZE + i;
-
-            ret = node_decrypt(key, buffer + i,
-                    arr + i_idx * SIZEOF_ENCRYPTED_NODE, i_idx);
-            if (ret) {
-                handle_error_string("Error decrypting node");
-                goto exit;
-            }
-        }
-
-        /* Permute and get end of real elements in bucket. */
-        size_t real_len;
-        permute_and_scan(buffer, &real_len);
-
-        /* Assign random ORP IDs and encrypt nodes from buffer to compressed
-         * array. */
-        for (size_t i = 0; i < real_len; i++) {
-            /* Assign random ORP ID. */
-            ret = rand_read(&buffer[i].orp_id, sizeof(buffer[i].orp_id));
-            if (ret) {
-                handle_error_string("Error assigning random ID");
-                goto exit;
-            }
-
-            /* Encrypt. */
-            ret = node_encrypt(key, buffer + i,
-                    arr + compress_idx * SIZEOF_ENCRYPTED_NODE, compress_idx);
-            if (ret) {
-                handle_error_string("Error encrypting node");
-                goto exit;
-            }
-            compress_idx++;
-        }
+        permute_and_compress(arr, bucket, &compress_idx);
     }
 
     /* Non-oblivious, comparison-based sort. */
