@@ -13,6 +13,7 @@
 enum sort_t {
     SORT_UNSET = 0,
     SORT_BITONIC,
+    SORT_BUCKET,
 };
 
 int world_rank;
@@ -108,9 +109,12 @@ exit:
     return ret;
 }
 
-int ecall_bucket_sort(unsigned char *arr, size_t total_length UNUSED,
-        size_t local_length) {
+int ecall_bucket_sort(unsigned char *arr, size_t total_length_,
+        size_t local_length UNUSED) {
     int ret;
+
+    total_length = total_length_;
+    sort_type = SORT_BUCKET;
 
     /* Initialize entropy. */
     ret = entropy_init();
@@ -119,14 +123,21 @@ int ecall_bucket_sort(unsigned char *arr, size_t total_length UNUSED,
         goto exit;
     }
 
+    /* Initialize TLS over MPI. */
+    if (mpi_tls_init((size_t) world_rank, (size_t) world_size, &entropy_ctx)) {
+        handle_error_string("Error initializing TLS over MPI");
+        goto exit_free_entropy;
+    }
+
     /* Initialize sort. */
     ret = bucket_init();
     if (ret) {
         handle_error_string("Error initializing sort");
-        goto exit_free_entropy;
+        goto exit_free_mpi_tls;
     }
 
-    ret = bucket_sort(arr, local_length);
+    /* Sort. */
+    ret = bucket_sort(arr, total_length);
     if (ret) {
         handle_error_string("Error in bucket sort");
         goto exit_free_sort;
@@ -134,6 +145,8 @@ int ecall_bucket_sort(unsigned char *arr, size_t total_length UNUSED,
 
 exit_free_sort:
     bucket_free();
+exit_free_mpi_tls:
+    mpi_tls_free();
 exit_free_entropy:
     entropy_free();
 exit:

@@ -260,7 +260,7 @@ int main(int argc, char **argv) {
         ((world_rank + 1) * length + world_size - 1) / world_size
             - (world_rank * length + world_size - 1) / world_size;
     size_t local_start = (world_rank * length + world_size - 1) / world_size;
-    unsigned char *arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE * 2);
+    unsigned char *arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE * 4);
     if (!arr) {
         perror("malloc arr");
         goto exit_terminate_enclave;
