@@ -18,7 +18,6 @@ enum sort_t {
 
 int world_rank;
 int world_size;
-size_t total_length;
 
 volatile enum sort_t sort_type;
 
@@ -62,16 +61,15 @@ void ecall_start_work(void) {
     }
 }
 
-int ecall_bitonic_sort(unsigned char *arr, size_t total_length_,
+int ecall_bitonic_sort(unsigned char *arr, size_t total_length,
         size_t local_length UNUSED) {
     int ret = -1;
 
-    if (popcount(total_length_) != 1) {
+    if (popcount(total_length) != 1) {
         printf("Length must be a multiple of 2\n");
         goto exit;
     }
 
-    total_length = total_length_;
     sort_type = SORT_BITONIC;
 
     /* Initialize entropy. */
@@ -109,11 +107,10 @@ exit:
     return ret;
 }
 
-int ecall_bucket_sort(unsigned char *arr, size_t total_length_,
+int ecall_bucket_sort(unsigned char *arr, size_t total_length,
         size_t local_length UNUSED) {
     int ret;
 
-    total_length = total_length_;
     sort_type = SORT_BUCKET;
 
     /* Initialize entropy. */

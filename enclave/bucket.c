@@ -13,6 +13,8 @@
 
 #define BUCKET_SIZE 512
 
+static size_t total_length;
+
 static unsigned char key[16];
 
 /* Buffer used to store 2 * BUCKET_SIZE nodes at once for the merge-split
@@ -801,6 +803,8 @@ exit:
 
 int bucket_sort(void *arr, size_t length) {
     int ret;
+
+    total_length = length;
 
     /* If the length is <= BUCKET_SIZE * 2, then we just bitonic sort normally,
      * since we will invoke bitonic sorts of size BUCKET_SIZE * 2 normally

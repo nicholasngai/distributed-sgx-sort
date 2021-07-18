@@ -12,6 +12,8 @@
 
 #define SWAP_CHUNK_SIZE 4096
 
+static size_t total_length;
+
 static _Thread_local node_t *local_buffer;
 static _Thread_local node_t *remote_buffer;
 
@@ -541,11 +543,13 @@ static void root_work_function(void *arr, size_t start UNUSED, size_t length,
 }
 
 void bitonic_sort_threaded(void *arr, size_t length, size_t num_threads) {
+    total_length = length;
+
     /* Start work for this thread. */
     struct thread_work root_work = {
         .func = root_work_function,
         .arr = arr,
-        .length = length,
+        .length = total_length,
         .num_threads = num_threads,
     };
     thread_work_push(&root_work);
