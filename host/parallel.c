@@ -8,8 +8,9 @@
 #include <openenclave/host.h>
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 #include "common/crypto.h"
-#include "common/node_t.h"
+#include "common/defs.h"
 #include "common/error.h"
+#include "common/node_t.h"
 #include "host/error.h"
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include "host/parallel_u.h"
@@ -260,7 +261,7 @@ int main(int argc, char **argv) {
         ((world_rank + 1) * length + world_size - 1) / world_size
             - (world_rank * length + world_size - 1) / world_size;
     size_t local_start = (world_rank * length + world_size - 1) / world_size;
-    unsigned char *arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE * 4);
+    unsigned char *arr = malloc(MAX(local_length, 512) * SIZEOF_ENCRYPTED_NODE * 4);
     if (!arr) {
         perror("malloc arr");
         goto exit_terminate_enclave;

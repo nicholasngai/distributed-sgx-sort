@@ -40,12 +40,14 @@ static long next_pow2l(long x) {
 }
 
 static int get_bucket_rank(size_t bucket) {
-    size_t num_buckets = next_pow2l(total_length) * 2 / BUCKET_SIZE;
+    size_t num_buckets =
+        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size);
     return bucket * world_size / num_buckets;
 }
 
 static size_t get_local_bucket_start(int rank) {
-    size_t num_buckets = next_pow2l(total_length) * 2 / BUCKET_SIZE;
+    size_t num_buckets =
+        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size);
     return (rank * num_buckets + world_size - 1) / world_size;
 }
 
@@ -80,14 +82,15 @@ void bucket_free(void) {
 }
 
 /* Assigns random ORP IDs to the encrypted nodes, whose first element is
- * encrypted with index START_IDX, in ARR and distributes them evenly over the 2
- * * LENGTH elements in ARR. Thus, ARR is assumed to be at least 2 * LENGTH *
- * SIZEOF_ENCRYPTED_NODE bytes. The result is an array with real elements
- * interspersed with dummy elements. */
+ * encrypted with index SRC_START_IDX, in ARR and distributes them evenly over
+ * the 2 * LENGTH elements in ARR, re-encrypting them according to
+ * RESULT_START_IDX. Thus, ARR is assumed to be at least
+ * 2 * MAX(LENGTH, BUCKET_SIZE) * SIZEOF_ENCRYPTED_NODE bytes. The result is an
+ * array with real elements interspersed with dummy elements. */
 // TODO Parallelize?
 // TODO Can we do the first bucket assignment scan while generating these?
 static int assign_random_ids_and_spread(void *arr_, size_t length,
-        size_t start_idx) {
+        size_t src_start_idx, size_t result_start_idx) {
     int ret;
     unsigned char *arr = arr_;
 
@@ -100,7 +103,7 @@ static int assign_random_ids_and_spread(void *arr_, size_t length,
 
         /* Decrypt index i. */
         ret = node_decrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE,
-                i + start_idx);
+                i + src_start_idx);
         if (ret) {
             handle_error_string("Error decrypting node");
             goto exit;
@@ -116,7 +119,7 @@ static int assign_random_ids_and_spread(void *arr_, size_t length,
 
         /* Encrypt to index 2 * i. */
         ret = node_encrypt(key, &node, arr + 2 * i * SIZEOF_ENCRYPTED_NODE,
-                2 * (i + start_idx));
+                2 * i + result_start_idx);
         if (ret) {
             handle_error_string("Error encrypting node");
             goto exit;
@@ -125,7 +128,17 @@ static int assign_random_ids_and_spread(void *arr_, size_t length,
         /* Encrypt dummy node to index 2 * i + 1. */
         ret = node_encrypt(key, &dummy_node,
                 arr + (2 * i + 1) * SIZEOF_ENCRYPTED_NODE,
-                2 * (i + start_idx) + 1);
+                2 * i + 1 + result_start_idx);
+        if (ret) {
+            handle_error_string("Error encrypting dummy node");
+            goto exit;
+        }
+    }
+
+    /* Pad up to bucket size. */
+    for (size_t i = 2 * length; i < BUCKET_SIZE; i++) {
+        ret = node_encrypt(key, &dummy_node, arr + i * SIZEOF_ENCRYPTED_NODE,
+                i + result_start_idx);
         if (ret) {
             handle_error_string("Error encrypting dummy node");
             goto exit;
@@ -394,47 +407,6 @@ exit:
     return ret;
 }
 
-/* Compares elements by their key. */
-static int direct_comparator(const void *a_, const void *b_, void *aux UNUSED) {
-    const node_t *a = a_;
-    const node_t *b = b_;
-    return (a->key > b->key) - (a->key < b->key);
-}
-
-/* Performs an oblivious sort, used when the input array is too small to
- * reasonably perform bucket oblivious sort. LENGTH must be less than
- * BUCKET_SIZE * 2! */
-static int direct_sort(void *arr_, size_t length) {
-    unsigned char *arr = arr_;
-    int ret;
-
-    /* Decrypt nodes. */
-    for (size_t i = 0; i < length; i++) {
-        ret = node_decrypt(key, buffer + i, arr + i * SIZEOF_ENCRYPTED_NODE, i);
-        if (ret) {
-            handle_error_string("Error decrypting node");
-            goto exit;
-        }
-    }
-
-    /* Sort. */
-    o_sort(buffer, length, sizeof(*buffer), direct_comparator, NULL);
-
-    /* Encrypt nodes. */
-    for (size_t i = 0; i < length; i++) {
-        ret = node_encrypt(key, buffer + i, arr + i * SIZEOF_ENCRYPTED_NODE, i);
-        if (ret) {
-            handle_error_string("Error encrypting node");
-            goto exit;
-        }
-    }
-
-    ret = 0;
-
-exit:
-    return ret;
-}
-
 /* Compares elements by the tuple (key, ORP ID). The check for the ORP ID must
  * always be run (it must be oblivious whether the comparison result is based on
  * the key or on the ORP ID), since we leak info on duplicate keys otherwise. */
@@ -589,6 +561,8 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
     if (input != out) {
         memcpy(out, input, length * SIZEOF_ENCRYPTED_NODE);
     }
+
+    ret = 0;
 
 exit_free_merge_indices:
     free(merge_indices);
@@ -806,19 +780,10 @@ int bucket_sort(void *arr, size_t length) {
 
     total_length = length;
 
-    /* If the length is <= BUCKET_SIZE * 2, then we just bitonic sort normally,
-     * since we will invoke bitonic sorts of size BUCKET_SIZE * 2 normally
-     * anyway as part of bucket sort. */
-    if (length <= BUCKET_SIZE * 2 && world_rank == 0) {
-        ret = direct_sort(arr, length);
-        if (ret) {
-            handle_error_string("Error in direct sort for small arrays");
-            goto exit;
-        }
-        goto exit;
-    }
-
-    size_t num_buckets = next_pow2l(length) * 2 / BUCKET_SIZE;
+    size_t src_local_start = total_length * world_rank / world_size;
+    size_t src_local_length =
+        total_length * (world_rank + 1) / world_size - src_local_start;
+    size_t num_buckets = get_local_bucket_start(world_size);
     size_t num_local_buckets =
         (get_local_bucket_start(world_rank + 1)
             - get_local_bucket_start(world_rank));
@@ -826,7 +791,8 @@ int bucket_sort(void *arr, size_t length) {
     size_t local_length = num_local_buckets * BUCKET_SIZE;
 
     /* Spread the elements located in the first half of our input array. */
-    ret = assign_random_ids_and_spread(arr, local_length / 2, local_start / 2);
+    ret = assign_random_ids_and_spread(arr, src_local_length, src_local_start,
+            local_start);
     if (ret) {
         handle_error_string("Error assigning random IDs to nodes");
         goto exit;
@@ -886,7 +852,7 @@ int bucket_sort(void *arr, size_t length) {
         size_t run_idx = 0;
         for (int rank = 0; rank < world_size; rank++) {
             if (rank == world_rank) {
-                enclave_merge_recv(arr, local_length / 2, local_start / 2,
+                enclave_merge_recv(arr, src_local_length, src_local_start,
                         sorted_out, &run_idx, compress_len, local_start);
             } else {
                 enclave_merge_send(rank,
