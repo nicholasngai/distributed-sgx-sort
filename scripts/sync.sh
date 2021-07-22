@@ -8,7 +8,7 @@ ROOTPATH="$( dirname "${SCRIPTPATH}" )"
 
 mkdir -p ${ROOTPATH}
 
-for i in {1..31}; do
+for i in {0..31}; do
     (
         ssh enclave${i} mkdir -p ${ROOTPATH}
         rsync -aiv --progress --delete "${ROOTPATH}/" enclave${i}:"${ROOTPATH}/" || true

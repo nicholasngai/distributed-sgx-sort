@@ -18,26 +18,20 @@ for b in 1 2 4 8 16 32 64 128 256 1024 2048 4096 8192 16384 32768; do
     ./scripts/sync.sh
 
     for e in 1 2 4 8 16 32; do
-        if [ $e -eq 1 ]; then
-            cmd_template="./host/parallel ./enclave/parallel_enc.signed"
+        # Build command template.
+        hosts=''
+        i=0
+        while [ "$i" -lt "$e" ]; do
+            hosts="${hosts}enclave$i,"
+            i=$(( i + 1 ))
+        done
+        hosts="${hosts%,}"
+        cmd_template="mpirun -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed $a"
+        if [ "$a" = "bitonic" ]; then
+            b=4096
+        else
+            b=512
         fi
-        if [ $e -eq 2 ]; then
-            cmd_template="mpirun -hosts enclave0,enclave1 ./host/parallel ./enclave/parallel_enc.signed"
-        fi
-        if [ $e -eq 4 ]; then
-            cmd_template="mpirun -hosts enclave0,enclave1,enclave2,enclave3 ./host/parallel ./enclave/parallel_enc.signed"
-        fi
-        if [ $e -eq 8 ]; then
-            cmd_template="mpirun -hosts enclave0,enclave1,enclave2,enclave3,enclave4,enclave5,enclave6,enclave7 ./host/parallel ./enclave/parallel_enc.signed"
-        fi
-        if [ $e -eq 16 ]; then
-            cmd_template="mpirun -hosts enclave0,enclave1,enclave2,enclave3,enclave4,enclave5,enclave6,enclave7,enclave8,enclave9,enclave10,enclave11,enclave12,enclave13,enclave14,enclave15 ./host/parallel ./enclave/parallel_enc.signed"
-        fi
-        if [ $e -eq 32 ]; then
-            cmd_template="mpirun -hosts enclave0,enclave1,enclave2,enclave3,enclave4,enclave5,enclave6,enclave7,enclave8,enclave9,enclave10,enclave11,enclave12,enclave13,enclave14,enclave15,enclave16,enclave17,enclave18,enclave19,enclave20,enclave21,enclave22,enclave23,enclave24,enclave25,enclave26,enclave27,enclave28,enclave29,enclave30,enclave31 ./host/parallel ./enclave/parallel_enc.signed"
-        fi
-
-        cmd_template="$cmd_template bucket"
 
         warm_up="$cmd_template 256"
         echo "Warming up: $warm_up"
