@@ -261,7 +261,15 @@ int main(int argc, char **argv) {
         ((world_rank + 1) * length + world_size - 1) / world_size
             - (world_rank * length + world_size - 1) / world_size;
     size_t local_start = (world_rank * length + world_size - 1) / world_size;
-    unsigned char *arr = malloc(MAX(local_length, 512) * SIZEOF_ENCRYPTED_NODE * 4);
+    unsigned char *arr;
+    switch (sort_type) {
+        case SORT_BITONIC:
+            arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE);
+            break;
+        case SORT_BUCKET:
+            arr = malloc(MAX(local_length, 512) * SIZEOF_ENCRYPTED_NODE * 4);
+            break;
+    }
     if (!arr) {
         perror("malloc arr");
         goto exit_terminate_enclave;
