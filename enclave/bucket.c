@@ -42,13 +42,13 @@ static long next_pow2l(long x) {
 
 static int get_bucket_rank(size_t bucket) {
     size_t num_buckets =
-        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size);
+        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size * 2);
     return bucket * world_size / num_buckets;
 }
 
 static size_t get_local_bucket_start(int rank) {
     size_t num_buckets =
-        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size);
+        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size * 2);
     return (rank * num_buckets + world_size - 1) / world_size;
 }
 
@@ -136,8 +136,8 @@ static int assign_random_ids_and_spread(void *arr_, size_t length,
         }
     }
 
-    /* Pad up to bucket size. */
-    for (size_t i = 2 * length; i < BUCKET_SIZE; i++) {
+    /* Pad up to 2 * bucket size. */
+    for (size_t i = 2 * length; i < 2 * BUCKET_SIZE; i++) {
         ret = node_encrypt(key, &dummy_node, arr + i * SIZEOF_ENCRYPTED_NODE,
                 i + result_start_idx);
         if (ret) {
