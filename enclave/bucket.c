@@ -3,6 +3,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+#include <time.h>
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
 #include "common/defs.h"
@@ -51,6 +54,15 @@ static size_t get_local_bucket_start(int rank) {
         MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size * 2);
     return (rank * num_buckets + world_size - 1) / world_size;
 }
+
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+static double get_time_difference(struct timespec *start,
+        struct timespec *end) {
+    return (double) (end->tv_sec * 1000000000 + end->tv_nsec
+            - (start->tv_sec * 1000000000 + start->tv_nsec))
+        / 1000000000;
+}
+#endif
 
 /* Initialization and deinitialization. */
 
@@ -791,13 +803,32 @@ int bucket_sort(void *arr, size_t length) {
     size_t local_start = get_local_bucket_start(world_rank) * BUCKET_SIZE;
     size_t local_length = num_local_buckets * BUCKET_SIZE;
 
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    struct timespec time_start;
+    if (clock_gettime(CLOCK_REALTIME, &time_start)) {
+        handle_error_string("Error getting time");
+        ret = errno;
+        goto exit;
+    }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
     /* Spread the elements located in the first half of our input array. */
     ret = assign_random_ids_and_spread(arr, src_local_length, src_local_start,
             local_start);
     if (ret) {
         handle_error_string("Error assigning random IDs to nodes");
+        ret = errno;
         goto exit;
     }
+
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    struct timespec time_assign_ids;
+    if (clock_gettime(CLOCK_REALTIME, &time_assign_ids)) {
+        handle_error_string("Error getting time");
+        ret = errno;
+        goto exit;
+    }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Run merge-split as part of a butterfly network. This is modified from
      * the paper, since all merge-split operations will be constrained to the
@@ -822,6 +853,15 @@ int bucket_sort(void *arr, size_t length) {
         bit_idx++;
     }
 
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    struct timespec time_merge_split;
+    if (clock_gettime(CLOCK_REALTIME, &time_merge_split)) {
+        handle_error_string("Error getting time");
+        ret = errno;
+        goto exit;
+    }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
     /* Permute each bucket and concatenate them back together by compressing all
      * real nodes together. We also assign new ORP IDs so that all elements have
      * a unique tuple of (key, ORP ID), even if they have duplicate keys. */
@@ -834,6 +874,15 @@ int bucket_sort(void *arr, size_t length) {
         }
     }
 
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    struct timespec time_compress;
+    if (clock_gettime(CLOCK_REALTIME, &time_compress)) {
+        handle_error_string("Error getting time");
+        ret = errno;
+        goto exit;
+    }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
     /* Non-oblivious, comparison-based sort for the local portion. Use the
      * second half of the host array as the output. */
     unsigned char *sorted_out = arr + local_length * SIZEOF_ENCRYPTED_NODE;
@@ -842,6 +891,15 @@ int bucket_sort(void *arr, size_t length) {
         handle_error_string("Error in non-oblivious sort");
         goto exit;
     }
+
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    struct timespec time_local_sort;
+    if (clock_gettime(CLOCK_REALTIME, &time_local_sort)) {
+        handle_error_string("Error getting time");
+        ret = errno;
+        goto exit;
+    }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     if (world_size == 1) {
         /* Copy the single run in our mergesort output to the input. */
@@ -881,6 +939,30 @@ exit_merge:
             goto exit;
         }
     }
+
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    struct timespec time_finish;
+    if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
+        handle_error_string("Error getting time");
+        ret = errno;
+        goto exit;
+    }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    if (world_rank == 0) {
+        printf("assign_ids   : %f\n",
+                get_time_difference(&time_start, &time_assign_ids));
+        printf("merge_split  : %f\n",
+                get_time_difference(&time_assign_ids, &time_merge_split));
+        printf("compression  : %f\n",
+                get_time_difference(&time_merge_split, &time_compress));
+        printf("local_sort   : %f\n",
+                get_time_difference(&time_compress, &time_local_sort));
+        printf("enclave_merge: %f\n",
+                get_time_difference(&time_local_sort, &time_finish));
+    }
+#endif
 
 exit:
     return ret;
