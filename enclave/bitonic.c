@@ -332,64 +332,96 @@ static void swap_range(void *arr, size_t a_start, size_t b_start,
 
 /* Bitonic sort. */
 
-static void sort_threaded(void *arr, size_t start, size_t length,
-        bool descending, size_t num_threads);
+struct threaded_args {
+    void *arr;
+    size_t start;
+    size_t length;
+    bool descending;
+    size_t num_threads;
+};
+
+static void sort_threaded(void *args);
 static void sort_single(void *arr, size_t start, size_t length,
         bool descending);
-static void merge_threaded(void *arr, size_t start, size_t length,
-        bool descending, size_t num_threads);
+static void merge_threaded(void *args);
 static void merge_single(void *arr, size_t start, size_t length,
         bool descending);
 
-void sort_threaded(void *arr, size_t start, size_t length,
-        bool descending UNUSED, size_t num_threads) {
-    if (num_threads == 1) {
-        sort_single(arr, start, length, descending);
+void sort_threaded(void *args_) {
+    struct threaded_args *args = args_;
+
+    if (args->num_threads == 1) {
+        sort_single(args->arr, args->start, args->length, args->descending);
         return;
     }
 
-    switch (length) {
+    switch (args->length) {
         case 0:
         case 1:
             /* Do nothing. */
             break;
         case 2: {
-            swap(arr, start, start + 1, descending);
+            swap(args->arr, args->start, args->start + 1, args->descending);
             break;
         }
         default: {
             /* Sort left half forwards and right half in reverse to create a
              * bitonic sequence. */
-            size_t left_length = length / 2;
-            size_t right_length = length - left_length;
-            size_t right_start = start + left_length;
+            size_t left_length = args->length / 2;
+            size_t right_length = args->length - left_length;
+            size_t right_start = args->start + left_length;
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only sort the left. The right is completely remote. */
-                sort_threaded(arr, start, left_length, descending, num_threads);
+                struct threaded_args left_args = {
+                    .arr = args->arr,
+                    .start = args->start,
+                    .length = left_length,
+                    .descending = args->descending,
+                    .num_threads = args->num_threads,
+                };
+                sort_threaded(&left_args);
             } else if (right_start <= get_local_start(world_rank)) {
                 /* Only sort the right. The left is completely remote. */
-                sort_threaded(arr, right_start, right_length, !descending,
-                        num_threads);
-            } else {
-                /* Sort both. */
-                size_t right_threads = num_threads * right_length / length;
-                struct thread_work right_work = {
-                    .func = sort_threaded,
-                    .arr = arr,
+                struct threaded_args right_args = {
+                    .arr = args->arr,
                     .start = right_start,
                     .length = right_length,
-                    .descending = !descending,
+                    .descending = !args->descending,
+                    .num_threads = args->num_threads,
+                };
+                sort_threaded(&right_args);
+            } else {
+                /* Sort both. */
+                size_t right_threads =
+                    args->num_threads * right_length / args->length;
+                struct threaded_args right_args = {
+                    .arr = args->arr,
+                    .start = right_start,
+                    .length = right_length,
+                    .descending = !args->descending,
                     .num_threads = right_threads,
+                };
+                struct thread_work right_work = {
+                    .func = sort_threaded,
+                    .arg = &right_args,
                 };
                 sema_init(&right_work.done, 0);
                 thread_work_push(&right_work);
-                sort_threaded(arr, start, left_length, descending,
-                        num_threads - right_threads);
+
+                struct threaded_args left_args = {
+                    .arr = args->arr,
+                    .start = args->start,
+                    .length = left_length,
+                    .descending = args->descending,
+                    .num_threads = args->num_threads - right_threads,
+                };
+                sort_threaded(&left_args);
+
                 sema_down(&right_work.done);
             }
 
             /* Bitonic merge. */
-            merge_threaded(arr, start, length, descending, num_threads);
+            merge_threaded(args);
             break;
         }
     }
@@ -445,52 +477,77 @@ void sort_single(void *arr, size_t start, size_t length,
     }
 }
 
-static void merge_threaded(void *arr, size_t start, size_t length,
-        bool descending, size_t num_threads) {
-    if (num_threads == 1) {
-        merge_single(arr, start, length, descending);
+static void merge_threaded(void *args_) {
+    struct threaded_args *args = args_;
+
+    if (args->num_threads == 1) {
+        merge_single(args->arr, args->start, args->length, args->descending);
         return;
     }
 
-    switch (length) {
+    switch (args->length) {
         case 0:
         case 1:
             /* Do nothing. */
             break;
         case 2: {
-            swap(arr, start, start + 1, descending);
+            swap(args->arr, args->start, args->start + 1, args->descending);
             break;
         }
         default: {
             /* If the length is odd, bubble sort an element to the end of the
              * array and leave it there. */
-            size_t left_length = length / 2;
-            size_t right_length = length - left_length;
-            size_t right_start = start + left_length;
-            swap_range(arr, start, right_start, left_length, descending);
+            size_t left_length = args->length / 2;
+            size_t right_length = args->length - left_length;
+            size_t right_start = args->start + left_length;
+            swap_range(args->arr, args->start, right_start, left_length,
+                    args->descending);
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only merge the left. The right is completely remote. */
-                merge_threaded(arr, start, left_length, descending,
-                        num_threads);
+                struct threaded_args left_args = {
+                    .arr = args->arr,
+                    .start = args->start,
+                    .length = left_length,
+                    .descending = args->descending,
+                    .num_threads = args->num_threads,
+                };
+                merge_threaded(&left_args);
             } else if (right_start <= get_local_start(world_rank)) {
                 /* Only merge the right. The left is completely remote. */
-                merge_threaded(arr, right_start, right_length, descending,
-                        num_threads);
-            } else {
-                /* Merge both. */
-                size_t right_threads = num_threads / 2;
-                struct thread_work right_work = {
-                    .func = merge_threaded,
-                    .arr = arr,
+                struct threaded_args right_args = {
+                    .arr = args->arr,
                     .start = right_start,
                     .length = right_length,
-                    .descending = descending,
+                    .descending = args->descending,
+                    .num_threads = args->num_threads,
+                };
+                merge_threaded(&right_args);
+            } else {
+                /* Merge both. */
+                size_t right_threads = args->num_threads / 2;
+                struct threaded_args right_args = {
+                    .arr = args->arr,
+                    .start = right_start,
+                    .length = right_length,
+                    .descending = args->descending,
                     .num_threads = right_threads,
+                };
+                struct thread_work right_work = {
+                    .func = merge_threaded,
+                    .arg = &right_args,
                 };
                 sema_init(&right_work.done, 0);
                 thread_work_push(&right_work);
-                merge_threaded(arr, start, left_length, descending,
-                        num_threads - right_threads);
+
+                struct threaded_args left_args = {
+                    .arr = args->arr,
+                    .start = args->start,
+                    .length = left_length,
+                    .descending = args->descending,
+                    .num_threads = args->num_threads - right_threads,
+                };
+                merge_threaded(&left_args);
+
                 sema_down(&right_work.done);
             }
             break;
@@ -534,9 +591,11 @@ static void merge_single(void *arr, size_t start, size_t length,
 
 /* Entry. */
 
-static void root_work_function(void *arr, size_t start UNUSED, size_t length,
-        bool descending UNUSED, size_t num_threads) {
-    sort_threaded(arr, 0, length, false, num_threads);
+static void root_work_function(void *args_) {
+    struct threaded_args *args = args_;
+    args->start = 0;
+    args->descending = false;
+    sort_threaded(args);
 
     /* Release threads. */
     thread_release_all();
@@ -546,11 +605,14 @@ void bitonic_sort_threaded(void *arr, size_t length, size_t num_threads) {
     total_length = length;
 
     /* Start work for this thread. */
-    struct thread_work root_work = {
-        .func = root_work_function,
+    struct threaded_args root_args = {
         .arr = arr,
         .length = total_length,
         .num_threads = num_threads,
+    };
+    struct thread_work root_work = {
+        .func = root_work_function,
+        .arg = &root_args,
     };
     thread_work_push(&root_work);
     thread_start_work();

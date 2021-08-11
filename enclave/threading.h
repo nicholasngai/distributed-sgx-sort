@@ -6,13 +6,8 @@
 #include "enclave/synch.h"
 
 struct thread_work {
-    void (*func)(void *arr, size_t start, size_t length, bool descending,
-            size_t num_threads);
-    void *arr;
-    size_t start;
-    size_t length;
-    bool descending;
-    size_t num_threads;
+    void (*func)(void *arg);
+    void *arg;
 
     sema_t done;
 

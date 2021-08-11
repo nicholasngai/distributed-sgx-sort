@@ -53,8 +53,7 @@ void thread_start_work(void) {
 
     struct thread_work *work = thread_work_pop();
     while (work) {
-        work->func(work->arr, work->start, work->length, work->descending,
-                work->num_threads);
+        work->func(work->arg);
         sema_up(&work->done);
         work = thread_work_pop();
     }
