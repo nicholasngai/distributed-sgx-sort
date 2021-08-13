@@ -7,7 +7,6 @@
 #include "common/node_t.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
-#include "enclave/synch.h"
 #include "enclave/threading.h"
 
 #define SWAP_CHUNK_SIZE 4096
@@ -405,7 +404,6 @@ void sort_threaded(void *args_) {
                     .func = sort_threaded,
                     .arg = &right_args,
                 };
-                sema_init(&right_work.done, 0);
                 thread_work_push(&right_work);
 
                 struct threaded_args left_args = {
@@ -417,7 +415,7 @@ void sort_threaded(void *args_) {
                 };
                 sort_threaded(&left_args);
 
-                sema_down(&right_work.done);
+                thread_wait(&right_work);
             }
 
             /* Bitonic merge. */
@@ -536,7 +534,6 @@ static void merge_threaded(void *args_) {
                     .func = merge_threaded,
                     .arg = &right_args,
                 };
-                sema_init(&right_work.done, 0);
                 thread_work_push(&right_work);
 
                 struct threaded_args left_args = {
@@ -548,7 +545,7 @@ static void merge_threaded(void *args_) {
                 };
                 merge_threaded(&left_args);
 
-                sema_down(&right_work.done);
+                thread_wait(&right_work);
             }
             break;
          }

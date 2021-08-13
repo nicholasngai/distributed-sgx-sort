@@ -11,6 +11,8 @@ static struct thread_work *volatile work_tail;
 static volatile bool work_done;
 
 void thread_work_push(struct thread_work *work) {
+    sema_init(&work->done, 0);
+
     spinlock_lock(&thread_work_lock);
     work->next = NULL;
     if (!work_tail) {
@@ -45,6 +47,10 @@ struct thread_work *thread_work_pop(void) {
     }
 exit:
     return work;
+}
+
+void thread_wait(struct thread_work *work) {
+    sema_down(&work->done);
 }
 
 void thread_start_work(void) {
