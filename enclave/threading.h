@@ -15,6 +15,7 @@ struct thread_work {
 };
 
 extern size_t total_num_threads;
+extern size_t num_threads_working;
 
 void thread_work_push(struct thread_work *work);
 struct thread_work *thread_work_pop(void);

@@ -19,10 +19,6 @@ static _Thread_local node_t *remote_buffer;
 static unsigned char key[16];
 
 int bitonic_init(void) {
-    /* Wait for all threads to init. We need to wait for all threads because the
-     * master thread initialized the entropy source. */
-    thread_wait_for_all();
-
     /* Allocate buffers. */
     local_buffer = malloc(SWAP_CHUNK_SIZE * sizeof(*local_buffer));
     if (!local_buffer) {
@@ -614,8 +610,9 @@ void bitonic_sort_threaded(void *arr, size_t length, size_t num_threads) {
     thread_work_push(&root_work);
     thread_start_work();
 
-    /* The thread does not return until work_done = true, so set it back to
-     * false. */
+    /* Wait for all threads to exit the work function, then unrelease the
+     * threads. */
+    while (__atomic_load_n(&num_threads_working, __ATOMIC_ACQUIRE)) {}
     thread_unrelease_all();
 }
 

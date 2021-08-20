@@ -4,6 +4,7 @@
 #include "enclave/synch.h"
 
 size_t total_num_threads;
+size_t num_threads_working;
 
 static spinlock_t thread_work_lock;
 static struct thread_work *volatile work_head;
@@ -54,8 +55,7 @@ void thread_wait(struct thread_work *work) {
 }
 
 void thread_start_work(void) {
-    /* Wait for all threads to start work. */
-    thread_wait_for_all();
+    __atomic_add_fetch(&num_threads_working, 1, __ATOMIC_ACQUIRE);
 
     struct thread_work *work = thread_work_pop();
     while (work) {
@@ -64,8 +64,7 @@ void thread_start_work(void) {
         work = thread_work_pop();
     }
 
-    /* Wait for all threads to exit work loop. */
-    thread_wait_for_all();
+    __atomic_sub_fetch(&num_threads_working, 1, __ATOMIC_RELEASE);
 }
 
 void thread_wait_for_all(void) {
