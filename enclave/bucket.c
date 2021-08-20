@@ -13,6 +13,7 @@
 #include "common/node_t.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
+#include "enclave/threading.h"
 
 #define BUCKET_SIZE 512
 #define ENCLAVE_MERGE_BUF_SIZE 512
@@ -344,6 +345,51 @@ static int merge_split(void *arr_, size_t bucket1, size_t bucket2,
 
 exit:
     return ret;
+}
+
+struct merge_split_range_args {
+    void *arr;
+    size_t bit_idx;
+    size_t bucket_stride;
+    size_t start_bucket_idx;
+    size_t end_bucket_idx;
+
+    int ret;
+};
+
+/* Performs the merge_split operation over a series of several buckets.
+ * The bucket_idx parameters is just a way of dividing work between threads. It
+ * is equivalent to
+ *
+ * for (size_t bucket_start = 0; bucket_start < num_buckets;
+ *         bucket_start += bucket_stride) {
+ *     for (size_t bucket = bucket_start;
+ *             bucket < bucket_start + bucket_stride / 2; bucket++) {
+ *         ...
+ *     }
+ * }
+ *
+ * but with easier task generation.
+ */
+static void merge_split_range(void *restrict args_) {
+    struct merge_split_range_args *restrict args = args_;
+
+    for (size_t bucket_idx = args->start_bucket_idx;
+            bucket_idx < args->end_bucket_idx; bucket_idx++) {
+        size_t bucket = bucket_idx % (args->bucket_stride / 2)
+            + bucket_idx / (args->bucket_stride / 2) * args->bucket_stride;
+        size_t other_bucket = bucket + args->bucket_stride / 2;
+        args->ret = merge_split(args->arr, bucket, other_bucket, args->bit_idx);
+        if (args->ret) {
+            handle_error_string(
+                    "Error in merge split with indices %lu and %lu\n", bucket,
+                    other_bucket);
+            goto exit;
+        }
+    }
+
+exit:
+    ;
 }
 
 struct permute_swap_aux {
@@ -788,7 +834,7 @@ exit:
     return ret;
 }
 
-int bucket_sort(void *arr, size_t length) {
+int bucket_sort(void *arr, size_t length, size_t num_threads) {
     int ret;
 
     total_length = length;
@@ -836,20 +882,43 @@ int bucket_sort(void *arr, size_t length) {
     size_t bit_idx = 0;
     for (size_t bucket_stride = 2; bucket_stride <= num_buckets;
             bucket_stride <<= 1) {
-        for (size_t bucket_start = 0; bucket_start < num_buckets;
-                bucket_start += bucket_stride) {
-            for (size_t bucket = bucket_start;
-                    bucket < bucket_start + bucket_stride / 2; bucket++) {
-                size_t other_bucket = bucket + bucket_stride / 2;
-                ret = merge_split(arr, bucket, other_bucket, bit_idx);
-                if (ret) {
-                    handle_error_string(
-                            "Error in merge split with indices %lu and %lu\n",
-                            bucket, other_bucket);
-                    goto exit;
-                }
+        /* Create and push work for all threads but self. */
+        struct merge_split_range_args args[num_threads];
+        struct thread_work work[num_threads];
+        for (size_t i = 1; i < num_threads; i++) {
+            args[i].arr = arr;
+            args[i].bit_idx = bit_idx;
+            args[i].bucket_stride = bucket_stride;
+            args[i].start_bucket_idx = num_buckets / 2 * i / num_threads;
+            args[i].end_bucket_idx = num_buckets / 2 * (i + 1) / num_threads;
+            work[i].func = merge_split_range;
+            work[i].arg = &args[i];
+            thread_work_push(&work[i]);
+        }
+
+        /* Do own work, which is equivalent to i = 0. */
+        args[0].arr = arr;
+        args[0].bit_idx = bit_idx;
+        args[0].bucket_stride = bucket_stride;
+        args[0].start_bucket_idx = 0;
+        args[0].end_bucket_idx = num_buckets / 2 / num_threads;
+        merge_split_range(&args);
+        ret = args[0].ret;
+        if (ret) {
+            handle_error_string("Error in merge split range");
+            goto exit;
+        }
+
+        /* Get work from others. */
+        for (size_t i = 1; i < num_threads; i++) {
+            thread_wait(&work[i]);
+            ret = args[i].ret;
+            if (ret) {
+                handle_error_string("Error in merge split range");
+                goto exit;
             }
         }
+
         bit_idx++;
     }
 
@@ -940,6 +1009,9 @@ exit_merge:
         }
     }
 
+    /* Release threads. */
+    thread_release_all();
+
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_finish;
     if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
@@ -963,6 +1035,11 @@ exit_merge:
                 get_time_difference(&time_local_sort, &time_finish));
     }
 #endif
+
+    /* Wait for all threads to exit the work function, then unrelease the
+     * threads. */
+    while (__atomic_load_n(&num_threads_working, __ATOMIC_ACQUIRE)) {}
+    thread_unrelease_all();
 
 exit:
     return ret;

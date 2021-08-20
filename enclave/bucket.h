@@ -5,6 +5,6 @@
 
 int bucket_init(void);
 void bucket_free(void);
-int bucket_sort(void *arr, size_t length);
+int bucket_sort(void *arr, size_t length, size_t num_threads);
 
 #endif /* distributed-sgx-sort/enclave/bucket.h */

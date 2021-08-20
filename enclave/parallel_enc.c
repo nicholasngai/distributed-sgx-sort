@@ -47,21 +47,42 @@ void ecall_start_work(void) {
     /* Wait for master thread to choose sort. */
     while (!sort_type) {}
 
-    if (sort_type == SORT_BITONIC) {
-        /* Wait for master thread to initialize the entropy source. */
-        while (!__atomic_load_n(&entropy_initted, __ATOMIC_ACQUIRE)) {}
+    switch (sort_type) {
+        case SORT_BITONIC:
+            /* Wait for master thread to initialize the entropy source. */
+            while (!__atomic_load_n(&entropy_initted, __ATOMIC_ACQUIRE)) {}
 
-        /* Initialize sort. */
-        if (bitonic_init()) {
-            handle_error_string("Error initializing sort");
-            return;
-        }
+            /* Initialize sort. */
+            if (bitonic_init()) {
+                handle_error_string("Error initializing sort");
+                return;
+            }
 
-        /* Start work. */
-        thread_start_work();
+            /* Start work. */
+            thread_start_work();
 
-        /* Free sort. */
-        bitonic_free();
+            /* Free sort. */
+            bitonic_free();
+            break;
+        case SORT_BUCKET:
+            /* Wait for master thread to initialize the entropy source. */
+            while (!__atomic_load_n(&entropy_initted, __ATOMIC_ACQUIRE)) {}
+
+            /* Initialize sort. */
+            if (bucket_init()) {
+                handle_error_string("Error initializing sort");
+                return;
+            }
+
+            /* Start work. */
+            thread_start_work();
+
+            /* Free sort. */
+            bucket_free();
+            break;
+        default:
+            /* Never reached. */
+            break;
     }
 }
 
@@ -127,6 +148,8 @@ int ecall_bucket_sort(unsigned char *arr, size_t total_length,
         goto exit;
     }
 
+    __atomic_store_n(&entropy_initted, true, __ATOMIC_RELEASE);
+
     /* Initialize TLS over MPI. */
     if (mpi_tls_init((size_t) world_rank, (size_t) world_size, &entropy_ctx)) {
         handle_error_string("Error initializing TLS over MPI");
@@ -141,7 +164,7 @@ int ecall_bucket_sort(unsigned char *arr, size_t total_length,
     }
 
     /* Sort. */
-    ret = bucket_sort(arr, total_length);
+    ret = bucket_sort(arr, total_length, total_num_threads);
     if (ret) {
         handle_error_string("Error in bucket sort");
         goto exit_free_sort;
@@ -152,6 +175,7 @@ exit_free_sort:
 exit_free_mpi_tls:
     mpi_tls_free();
 exit_free_entropy:
+    entropy_initted = false;
     entropy_free();
 exit:
     return ret;
