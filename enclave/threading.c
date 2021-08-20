@@ -30,12 +30,7 @@ void thread_work_push(struct thread_work *work) {
 
 struct thread_work *thread_work_pop(void) {
     struct thread_work *work = NULL;
-    while (!work) {
-        while (!work_head) {
-            if (work_done) {
-                goto exit;
-            }
-        }
+    if (work_head) {
         spinlock_lock(&thread_work_lock);
         if (work_head) {
             work = work_head;
@@ -46,7 +41,6 @@ struct thread_work *thread_work_pop(void) {
         }
         spinlock_unlock(&thread_work_lock);
     }
-exit:
     return work;
 }
 
@@ -57,9 +51,23 @@ void thread_wait(struct thread_work *work) {
 void thread_start_work(void) {
     __atomic_add_fetch(&num_threads_working, 1, __ATOMIC_ACQUIRE);
 
+    while (!work_done) {
+        struct thread_work *work = thread_work_pop();
+        if (work) {
+            work->func(work->args);
+            sema_up(&work->done);
+        }
+    }
+
+    __atomic_sub_fetch(&num_threads_working, 1, __ATOMIC_RELEASE);
+}
+
+void thread_work_until_empty(void) {
+    __atomic_add_fetch(&num_threads_working, 1, __ATOMIC_ACQUIRE);
+
     struct thread_work *work = thread_work_pop();
     while (work) {
-        work->func(work->arg);
+        work->func(work->args);
         sema_up(&work->done);
         work = thread_work_pop();
     }

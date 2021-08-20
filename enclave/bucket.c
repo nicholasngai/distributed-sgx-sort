@@ -371,8 +371,8 @@ struct merge_split_range_args {
  *
  * but with easier task generation.
  */
-static void merge_split_range(void *restrict args_) {
-    struct merge_split_range_args *restrict args = args_;
+static void merge_split_range(void *args_) {
+    struct merge_split_range_args *args = args_;
 
     for (size_t bucket_idx = args->start_bucket_idx;
             bucket_idx < args->end_bucket_idx; bucket_idx++) {
@@ -477,6 +477,50 @@ static int mergesort_comparator(const void *a_, const void *b_) {
     return (comp_key << 1) + comp_orp_id;
 }
 
+struct mergesort_first_pass_args {
+    void *arr;
+    size_t start;
+    size_t len;
+    size_t start_idx;
+    int ret;
+};
+
+/* Decrypt and sort ARR[START] to ARR[START + LEN], where ARR[0] is encrypted
+ * with index START_IDX. The results will be stored in the same location as the
+ * inputs. */
+static void mergesort_first_pass(void *args_) {
+    struct mergesort_first_pass_args *args = args_;
+    unsigned char *arr = args->arr;
+
+    /* Decrypt nodes. */
+    for (size_t j = 0; j < args->len; j++) {
+        args->ret = node_decrypt(key, &buffer[j],
+                arr + (args->start + j) * SIZEOF_ENCRYPTED_NODE,
+                args->start + j + args->start_idx);
+        if (args->ret) {
+            handle_error_string("Error decrypting node");
+            goto exit;
+        }
+    }
+
+    /* Sort using libc quicksort. */
+    qsort(buffer, args->len, sizeof(*buffer), mergesort_comparator);
+
+    /* Encrypt nodes. */
+    for (size_t j = 0; j < args->len; j++) {
+        args->ret = node_encrypt(key, &buffer[j],
+                arr + (args->start + j) * SIZEOF_ENCRYPTED_NODE,
+                args->start + j + args->start_idx);
+        if (args->ret) {
+            handle_error_string("Error encrypting node");
+            goto exit;
+        }
+    }
+
+exit:
+    ;
+}
+
 /* Non-oblivious sort. Based on an external mergesort algorithm since decrypting
  * nodes from host memory is expensive. We will reuse the buffer from the ORP,
  * so BUF_SIZE = BUCKET_SIZE * 2. WORK is a buffer that will be used to store
@@ -485,6 +529,9 @@ static int mergesort_comparator(const void *a_, const void *b_) {
 static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
     unsigned char *arr = arr_;
     unsigned char *out = out_;
+    size_t num_start_runs = CEIL_DIV(length, BUF_SIZE);
+    struct mergesort_first_pass_args args[num_start_runs];
+    struct thread_work work[num_start_runs];
     int ret;
 
     /* Allocate buffer used for BUF_SIZE-way merge. */
@@ -496,30 +543,21 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
     }
 
     /* Start by sorting runs of BUF_SIZE. */
-    for (size_t i = 0; i < length; i += BUF_SIZE) {
-        size_t run_length = MIN(length - i, BUF_SIZE);
-
-        /* Decrypt nodes. */
-        for (size_t j = 0; j < run_length; j++) {
-            ret = node_decrypt(key, &buffer[j],
-                    arr + (i + j) * SIZEOF_ENCRYPTED_NODE, i + j + start_idx);
-            if (ret) {
-                handle_error_string("Error decrypting node");
-                goto exit_free_merge_indices;
-            }
-        }
-
-        /* Sort using libc quicksort. */
-        qsort(buffer, run_length, sizeof(*buffer), mergesort_comparator);
-
-        /* Encrypt nodes. */
-        for (size_t j = 0; j < run_length; j++) {
-            ret = node_encrypt(key, &buffer[j],
-                    arr + (i + j) * SIZEOF_ENCRYPTED_NODE, i + j + start_idx);
-            if (ret) {
-                handle_error_string("Error encrypting node");
-                goto exit_free_merge_indices;
-            }
+    for (size_t i = 0; i < num_start_runs; i++) {
+        args[i].arr = arr;
+        args[i].start = i * BUF_SIZE;
+        args[i].len = MIN(length - i * BUF_SIZE, BUF_SIZE);
+        args[i].start_idx = start_idx;
+        work[i].func = mergesort_first_pass;
+        work[i].arg = &args[i];
+        thread_work_push(&work[i]);
+    }
+    thread_work_until_empty();
+    for (size_t i = 0; i < num_start_runs; i++) {
+        ret = args[i].ret;
+        if (ret) {
+            handle_error_string("Error in first pass of mergesort");
+            goto exit;
         }
     }
 
