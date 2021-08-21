@@ -548,8 +548,9 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
         args[i].start = i * BUF_SIZE;
         args[i].len = MIN(length - i * BUF_SIZE, BUF_SIZE);
         args[i].start_idx = start_idx;
-        work[i].func = mergesort_first_pass;
-        work[i].arg = &args[i];
+        work[i].type = THREAD_WORK_SINGLE;
+        work[i].single.func = mergesort_first_pass;
+        work[i].single.arg = &args[i];
         thread_work_push(&work[i]);
     }
     thread_work_until_empty();
@@ -929,8 +930,9 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
             args[i].bucket_stride = bucket_stride;
             args[i].start_bucket_idx = num_buckets / 2 * i / num_threads;
             args[i].end_bucket_idx = num_buckets / 2 * (i + 1) / num_threads;
-            work[i].func = merge_split_range;
-            work[i].arg = &args[i];
+            work[i].type = THREAD_WORK_SINGLE;
+            work[i].single.func = merge_split_range;
+            work[i].single.arg = &args[i];
             thread_work_push(&work[i]);
         }
 

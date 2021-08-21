@@ -5,9 +5,18 @@
 #include <stddef.h>
 #include "enclave/synch.h"
 
+enum thread_work_type {
+    THREAD_WORK_SINGLE,
+};
+
 struct thread_work {
-    void (*func)(void *arg);
-    void *arg;
+    enum thread_work_type type;
+    union {
+        struct {
+            void (*func)(void *arg);
+            void *arg;
+        } single;
+    };
 
     sema_t done;
 
@@ -18,7 +27,6 @@ extern size_t total_num_threads;
 extern size_t num_threads_working;
 
 void thread_work_push(struct thread_work *work);
-struct thread_work *thread_work_pop(void);
 void thread_wait(struct thread_work *work);
 void thread_start_work(void);
 void thread_work_until_empty(void);

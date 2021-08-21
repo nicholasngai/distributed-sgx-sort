@@ -3,6 +3,16 @@
 #include <stddef.h>
 #include "enclave/synch.h"
 
+struct task {
+    struct thread_work *work;
+    union {
+        struct {} single;
+        struct {
+            size_t i;
+        } iter;
+    };
+};
+
 size_t total_num_threads;
 size_t num_threads_working;
 
@@ -13,6 +23,12 @@ static volatile bool work_done;
 
 void thread_work_push(struct thread_work *work) {
     sema_init(&work->done, 0);
+
+    switch (work->type) {
+        case THREAD_WORK_SINGLE:
+            // Do nothing.
+            break;
+    }
 
     spinlock_lock(&thread_work_lock);
     work->next = NULL;
@@ -28,34 +44,52 @@ void thread_work_push(struct thread_work *work) {
     spinlock_unlock(&thread_work_lock);
 }
 
-struct thread_work *thread_work_pop(void) {
-    struct thread_work *work = NULL;
+void thread_wait(struct thread_work *work) {
+    sema_down(&work->done);
+}
+
+static bool get_task(struct task *task) {
+    task->work = NULL;
     if (work_head) {
         spinlock_lock(&thread_work_lock);
         if (work_head) {
-            work = work_head;
-            if (!work_head->next) {
-                work_tail = NULL;
+            task->work = work_head;
+
+            bool pop_work = false;
+            switch (task->work->type) {
+                case THREAD_WORK_SINGLE:
+                    pop_work = true;
+                    break;
             }
-            work_head = work_head->next;
+
+            if (pop_work) {
+                if (!work_head->next) {
+                    work_tail = NULL;
+                }
+                work_head = work_head->next;
+            }
         }
         spinlock_unlock(&thread_work_lock);
     }
-    return work;
+    return task->work;
 }
 
-void thread_wait(struct thread_work *work) {
-    sema_down(&work->done);
+static void do_task(struct task *task) {
+    switch (task->work->type) {
+        case THREAD_WORK_SINGLE:
+            task->work->single.func(task->work->single.arg);
+            sema_up(&task->work->done);
+            break;
+    }
 }
 
 void thread_start_work(void) {
     __atomic_add_fetch(&num_threads_working, 1, __ATOMIC_ACQUIRE);
 
     while (!work_done) {
-        struct thread_work *work = thread_work_pop();
-        if (work) {
-            work->func(work->args);
-            sema_up(&work->done);
+        struct task task;
+        if (get_task(&task)) {
+            do_task(&task);
         }
     }
 
@@ -65,11 +99,9 @@ void thread_start_work(void) {
 void thread_work_until_empty(void) {
     __atomic_add_fetch(&num_threads_working, 1, __ATOMIC_ACQUIRE);
 
-    struct thread_work *work = thread_work_pop();
-    while (work) {
-        work->func(work->args);
-        sema_up(&work->done);
-        work = thread_work_pop();
+    struct task task;
+    while (get_task(&task)) {
+        do_task(&task);
     }
 
     __atomic_sub_fetch(&num_threads_working, 1, __ATOMIC_RELEASE);

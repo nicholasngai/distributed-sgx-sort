@@ -397,8 +397,11 @@ void sort_threaded(void *args_) {
                     .num_threads = right_threads,
                 };
                 struct thread_work right_work = {
-                    .func = sort_threaded,
-                    .arg = &right_args,
+                    .type = THREAD_WORK_SINGLE,
+                    .single = {
+                        .func = sort_threaded,
+                        .arg = &right_args,
+                    },
                 };
                 thread_work_push(&right_work);
 
@@ -527,8 +530,11 @@ static void merge_threaded(void *args_) {
                     .num_threads = right_threads,
                 };
                 struct thread_work right_work = {
-                    .func = merge_threaded,
-                    .arg = &right_args,
+                    .type = THREAD_WORK_SINGLE,
+                    .single = {
+                        .func = merge_threaded,
+                        .arg = &right_args,
+                    },
                 };
                 thread_work_push(&right_work);
 
@@ -604,8 +610,11 @@ void bitonic_sort_threaded(void *arr, size_t length, size_t num_threads) {
         .num_threads = num_threads,
     };
     struct thread_work root_work = {
-        .func = root_work_function,
-        .arg = &root_args,
+        .type = THREAD_WORK_SINGLE,
+        .single = {
+            .func = root_work_function,
+            .arg = &root_args,
+        },
     };
     thread_work_push(&root_work);
     thread_start_work();
