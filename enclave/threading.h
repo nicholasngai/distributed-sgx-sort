@@ -7,6 +7,7 @@
 
 enum thread_work_type {
     THREAD_WORK_SINGLE,
+    THREAD_WORK_ITER,
 };
 
 struct thread_work {
@@ -16,6 +17,14 @@ struct thread_work {
             void (*func)(void *arg);
             void *arg;
         } single;
+        struct {
+            void (*func)(void *arg, size_t i);
+            void *arg;
+            size_t count;
+
+            size_t num_remaining;
+            size_t curr;
+        } iter;
     };
 
     sema_t done;

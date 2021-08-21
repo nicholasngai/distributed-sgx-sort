@@ -347,19 +347,17 @@ exit:
     return ret;
 }
 
-struct merge_split_range_args {
+struct merge_split_idx_args {
     void *arr;
     size_t bit_idx;
     size_t bucket_stride;
-    size_t start_bucket_idx;
-    size_t end_bucket_idx;
 
     int ret;
 };
 
-/* Performs the merge_split operation over a series of several buckets.
- * The bucket_idx parameters is just a way of dividing work between threads. It
- * is equivalent to
+/* Performs the merge_split operation over a starting bucket specified by an
+ * index. The BUCKET_IDX parameter is just a way of dividing work between
+ * threads. Iterating from 0 to NUM_BUCKETS / 2 is equivalent to
  *
  * for (size_t bucket_start = 0; bucket_start < num_buckets;
  *         bucket_start += bucket_stride) {
@@ -371,24 +369,26 @@ struct merge_split_range_args {
  *
  * but with easier task generation.
  */
-static void merge_split_range(void *args_) {
-    struct merge_split_range_args *args = args_;
+static void merge_split_idx(void *args_, size_t bucket_idx) {
+    struct merge_split_idx_args *args = args_;
+    int ret;
 
-    for (size_t bucket_idx = args->start_bucket_idx;
-            bucket_idx < args->end_bucket_idx; bucket_idx++) {
-        size_t bucket = bucket_idx % (args->bucket_stride / 2)
-            + bucket_idx / (args->bucket_stride / 2) * args->bucket_stride;
-        size_t other_bucket = bucket + args->bucket_stride / 2;
-        args->ret = merge_split(args->arr, bucket, other_bucket, args->bit_idx);
-        if (args->ret) {
-            handle_error_string(
-                    "Error in merge split with indices %lu and %lu\n", bucket,
-                    other_bucket);
-            goto exit;
-        }
+    size_t bucket = bucket_idx % (args->bucket_stride / 2)
+        + bucket_idx / (args->bucket_stride / 2) * args->bucket_stride;
+    size_t other_bucket = bucket + args->bucket_stride / 2;
+    ret = merge_split(args->arr, bucket, other_bucket, args->bit_idx);
+    if (ret) {
+        handle_error_string(
+                "Error in merge split with indices %lu and %lu\n", bucket,
+                other_bucket);
+        goto exit;
     }
 
 exit:
+    if (ret) {
+        __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
+                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    }
     ;
 }
 
@@ -873,7 +873,7 @@ exit:
     return ret;
 }
 
-int bucket_sort(void *arr, size_t length, size_t num_threads) {
+int bucket_sort(void *arr, size_t length, size_t num_threads UNUSED) {
     int ret;
 
     total_length = length;
@@ -921,42 +921,30 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     size_t bit_idx = 0;
     for (size_t bucket_stride = 2; bucket_stride <= num_buckets;
             bucket_stride <<= 1) {
-        /* Create and push work for all threads but self. */
-        struct merge_split_range_args args[num_threads];
-        struct thread_work work[num_threads];
-        for (size_t i = 1; i < num_threads; i++) {
-            args[i].arr = arr;
-            args[i].bit_idx = bit_idx;
-            args[i].bucket_stride = bucket_stride;
-            args[i].start_bucket_idx = num_buckets / 2 * i / num_threads;
-            args[i].end_bucket_idx = num_buckets / 2 * (i + 1) / num_threads;
-            work[i].type = THREAD_WORK_SINGLE;
-            work[i].single.func = merge_split_range;
-            work[i].single.arg = &args[i];
-            thread_work_push(&work[i]);
-        }
+        /* Create iterative task for merge split. */
+        struct merge_split_idx_args args = {
+            .arr = arr,
+            .bit_idx = bit_idx,
+            .bucket_stride = bucket_stride,
+        };
+        struct thread_work work = {
+            .type = THREAD_WORK_ITER,
+            .iter = {
+                .func = merge_split_idx,
+                .arg = &args,
+                .count = num_buckets / 2,
+            },
+        };
+        thread_work_push(&work);
 
-        /* Do own work, which is equivalent to i = 0. */
-        args[0].arr = arr;
-        args[0].bit_idx = bit_idx;
-        args[0].bucket_stride = bucket_stride;
-        args[0].start_bucket_idx = 0;
-        args[0].end_bucket_idx = num_buckets / 2 / num_threads;
-        merge_split_range(&args);
-        ret = args[0].ret;
+        thread_work_until_empty();
+
+        /* Get work from others. */
+        thread_wait(&work);
+        ret = args.ret;
         if (ret) {
             handle_error_string("Error in merge split range");
             goto exit;
-        }
-
-        /* Get work from others. */
-        for (size_t i = 1; i < num_threads; i++) {
-            thread_wait(&work[i]);
-            ret = args[i].ret;
-            if (ret) {
-                handle_error_string("Error in merge split range");
-                goto exit;
-            }
         }
 
         bit_idx++;

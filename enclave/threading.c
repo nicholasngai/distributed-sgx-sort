@@ -28,6 +28,10 @@ void thread_work_push(struct thread_work *work) {
         case THREAD_WORK_SINGLE:
             // Do nothing.
             break;
+        case THREAD_WORK_ITER:
+            work->iter.curr = 0;
+            work->iter.num_remaining = work->iter.count;
+            break;
     }
 
     spinlock_lock(&thread_work_lock);
@@ -60,6 +64,14 @@ static bool get_task(struct task *task) {
                 case THREAD_WORK_SINGLE:
                     pop_work = true;
                     break;
+                case THREAD_WORK_ITER:
+                    task->iter.i = task->work->iter.curr;
+                    task->work->iter.curr++;
+                    if (task->work->iter.curr
+                            >= task->work->iter.count) {
+                        pop_work = true;
+                    }
+                    break;
             }
 
             if (pop_work) {
@@ -79,6 +91,17 @@ static void do_task(struct task *task) {
         case THREAD_WORK_SINGLE:
             task->work->single.func(task->work->single.arg);
             sema_up(&task->work->done);
+            break;
+        case THREAD_WORK_ITER:
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+            task->work->iter.func(task->work->iter.arg,
+                    task->iter.i);
+#pragma GCC diagnostic pop
+            if (!__atomic_sub_fetch(&task->work->iter.num_remaining, 1,
+                        __ATOMIC_RELEASE)) {
+                sema_up(&task->work->done);
+            }
             break;
     }
 }
