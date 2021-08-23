@@ -16,6 +16,12 @@ void spinlock_lock(spinlock_t *lock) {
     }
 }
 
+bool spinlock_trylock(spinlock_t *lock) {
+    return
+        !lock->locked
+        && !__atomic_test_and_set(&lock->locked, __ATOMIC_ACQUIRE);
+}
+
 void spinlock_unlock(spinlock_t *lock) {
     __atomic_clear(&lock->locked, __ATOMIC_RELEASE);
 }
