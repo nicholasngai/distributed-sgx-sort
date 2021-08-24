@@ -35,13 +35,15 @@ static _Thread_local node_t *buffer;
 /* Cache used to store decrypted buckets in enclave memory. */
 static node_t *cache;
 static struct {
-    bool valid;
-    size_t bucket_idx;
     spinlock_t lock;
-    condvar_t released;
-    unsigned int acquired;
-} cache_meta[CACHE_SETS * CACHE_ASSOCIATIVITY];
-spinlock_t cache_meta_lock;
+    struct {
+        bool valid;
+        size_t bucket_idx;
+        spinlock_t lock;
+        condvar_t released;
+        unsigned int acquired;
+    } lines[CACHE_ASSOCIATIVITY];
+} cache_meta[CACHE_SETS];
 unsigned int cache_counter;
 
 /* Helpers. */
@@ -183,46 +185,48 @@ static node_t *load_bucket(void *arr_, size_t bucket_idx) {
     unsigned char *arr = arr_;
 
     size_t local_bucket_start = get_local_bucket_start(world_rank);
-    size_t cache_start_idx =
-        (bucket_idx - local_bucket_start) % CACHE_SETS * CACHE_ASSOCIATIVITY;
+    size_t set_idx = (bucket_idx - local_bucket_start) % CACHE_SETS;
 
     /* Lock bucket in cache. */
-    size_t cache_idx = cache_start_idx;
-    spinlock_lock(&cache_meta_lock);
-    for (size_t i = cache_start_idx; i < cache_start_idx + CACHE_ASSOCIATIVITY;
-            i++) {
-        if (cache_meta[cache_idx].lock.locked) {
+    spinlock_lock(&cache_meta[set_idx].lock);
+    size_t line_idx = 0;
+    for (size_t i = 0; i < CACHE_ASSOCIATIVITY; i++) {
+        if (cache_meta[set_idx].lines[line_idx].lock.locked) {
             /* If locked, check for non-locked bucket. */
-            if (!cache_meta[i].lock.locked) {
-                cache_idx = i;
+            if (!cache_meta[set_idx].lines[i].lock.locked) {
+                line_idx = i;
             }
-        } else if (cache_meta[cache_idx].valid) {
+        } else if (cache_meta[set_idx].lines[line_idx].valid) {
             /* If valid, check for invalid bucket or bucket with earlier
              * acquisition. */
-            if (!cache_meta[i].valid
-                    || cache_meta[i].acquired
-                        < cache_meta[cache_idx].acquired) {
-                cache_idx = i;
+            if (!cache_meta[set_idx].lines[i].valid
+                    || cache_meta[set_idx].lines[i].acquired
+                        < cache_meta[set_idx].lines[line_idx].acquired) {
+                line_idx = i;
             }
         }
 
         /* Check for bucket already resident in cache. */
-        if (cache_meta[i].valid && cache_meta[i].bucket_idx == bucket_idx) {
-            cache_idx = i;
-            while (cache_meta[i].lock.locked) {
-                condvar_wait(&cache_meta[i].released, &cache_meta_lock);
+        if (cache_meta[set_idx].lines[i].valid
+                && cache_meta[set_idx].lines[i].bucket_idx == bucket_idx) {
+            line_idx = i;
+            while (cache_meta[set_idx].lines[i].lock.locked) {
+                condvar_wait(&cache_meta[set_idx].lines[i].released,
+                        &cache_meta[set_idx].lock);
             }
             break;
         }
     }
-    size_t old_bucket_idx = cache_meta[cache_idx].bucket_idx;
-    bool was_valid = cache_meta[cache_idx].valid;
-    cache_meta[cache_idx].valid = true;
-    cache_meta[cache_idx].bucket_idx = bucket_idx;
-    cache_meta[cache_idx].acquired = __atomic_fetch_add(&cache_counter, 1,
-            __ATOMIC_RELAXED);
-    spinlock_lock(&cache_meta[cache_idx].lock);
-    spinlock_unlock(&cache_meta_lock);
+    size_t old_bucket_idx = cache_meta[set_idx].lines[line_idx].bucket_idx;
+    bool was_valid = cache_meta[set_idx].lines[line_idx].valid;
+    cache_meta[set_idx].lines[line_idx].valid = true;
+    cache_meta[set_idx].lines[line_idx].bucket_idx = bucket_idx;
+    cache_meta[set_idx].lines[line_idx].acquired =
+        __atomic_fetch_add(&cache_counter, 1, __ATOMIC_RELAXED);
+    spinlock_lock(&cache_meta[set_idx].lines[line_idx].lock);
+    spinlock_unlock(&cache_meta[set_idx].lock);
+
+    size_t cache_idx = set_idx * CACHE_ASSOCIATIVITY + line_idx;
 
     /* If valid, check if this was a hit. */
     if (was_valid) {
@@ -267,25 +271,33 @@ exit:
 }
 
 static void free_bucket(node_t *bucket) {
-    spinlock_lock(&cache_meta_lock);
     size_t cache_idx = (uintptr_t) (bucket - cache) / BUCKET_SIZE;
-    spinlock_unlock(&cache_meta[cache_idx].lock);
-    condvar_signal(&cache_meta[cache_idx].released, &cache_meta_lock);
-    spinlock_unlock(&cache_meta_lock);
+    size_t set_idx = cache_idx / CACHE_ASSOCIATIVITY;
+    size_t line_idx = cache_idx % CACHE_ASSOCIATIVITY;
+
+    spinlock_lock(&cache_meta[set_idx].lock);
+    spinlock_unlock(&cache_meta[set_idx].lines[line_idx].lock);
+    condvar_signal(&cache_meta[set_idx].lines[line_idx].released,
+            &cache_meta[set_idx].lock);
+    spinlock_unlock(&cache_meta[set_idx].lock);
 }
 
 static int evict_buckets(void *arr) {
     int ret = 0;
 
-    for (size_t i = 0; i < CACHE_BUCKETS; i++) {
-        if (cache_meta[i].valid) {
-            ret = evict_bucket(arr, i, cache_meta[i].bucket_idx);
-            if (ret) {
-                handle_error_string("Error evicting bucket");
-                goto exit;
-            }
+    for (size_t i = 0; i < CACHE_SETS; i++) {
+        for (size_t j = 0; j < CACHE_ASSOCIATIVITY; j++) {
+            size_t cache_idx = i * CACHE_ASSOCIATIVITY + j;
+            if (cache_meta[i].lines[j].valid) {
+                ret = evict_bucket(arr, cache_idx,
+                        cache_meta[i].lines[j].bucket_idx);
+                if (ret) {
+                    handle_error_string("Error evicting bucket");
+                    goto exit;
+                }
 
-            cache_meta[i].valid = false;
+                cache_meta[i].lines[j].valid = false;
+            }
         }
     }
 
@@ -554,6 +566,7 @@ struct merge_split_idx_args {
     void *arr;
     size_t bit_idx;
     size_t bucket_stride;
+    size_t num_buckets;
 
     int ret;
 };
@@ -570,11 +583,17 @@ struct merge_split_idx_args {
  *     }
  * }
  *
- * but with easier task generation.
+ * but with easier task generation. The loop goes backwards if BIT_IDX is odd,
+ * since this hits buckets that were most recently loaded into the decrypted
+ * bucket cache.
  */
 static void merge_split_idx(void *args_, size_t bucket_idx) {
     struct merge_split_idx_args *args = args_;
     int ret;
+
+    if (args->bit_idx % 2 == 1) {
+        bucket_idx = args->num_buckets / 2 - bucket_idx;
+    }
 
     size_t bucket = bucket_idx % (args->bucket_stride / 2)
         + bucket_idx / (args->bucket_stride / 2) * args->bucket_stride;
@@ -1137,6 +1156,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
             .arr = arr,
             .bit_idx = bit_idx,
             .bucket_stride = bucket_stride,
+            .num_buckets = num_buckets,
         };
         struct thread_work work = {
             .type = THREAD_WORK_ITER,
