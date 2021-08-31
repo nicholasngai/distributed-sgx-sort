@@ -562,15 +562,6 @@ exit:
     return ret;
 }
 
-struct merge_split_idx_args {
-    void *arr;
-    size_t bit_idx;
-    size_t bucket_stride;
-    size_t num_buckets;
-
-    int ret;
-};
-
 /* Performs the merge_split operation over a starting bucket specified by an
  * index. The BUCKET_IDX parameter is just a way of dividing work between
  * threads. Iterating from 0 to NUM_BUCKETS / 2 is equivalent to
@@ -587,6 +578,14 @@ struct merge_split_idx_args {
  * since this hits buckets that were most recently loaded into the decrypted
  * bucket cache.
  */
+struct merge_split_idx_args {
+    void *arr;
+    size_t bit_idx;
+    size_t bucket_stride;
+    size_t num_buckets;
+
+    int ret;
+};
 static void merge_split_idx(void *args_, size_t bucket_idx) {
     struct merge_split_idx_args *args = args_;
     int ret;
@@ -699,61 +698,67 @@ static int mergesort_comparator(const void *a_, const void *b_) {
     return (comp_key << 1) + comp_orp_id;
 }
 
+/* Non-oblivoius sorting. */
+
+/* We will reuse the buffer from the ORP, so BUF_SIZE = BUCKET_SIZE * 2. WORK is
+ * a buffer that will be used to store intermediate data. */
+#define BUF_SIZE (BUCKET_SIZE * 2)
+
+/* Decrypt and sort ARR[RUN_IDX * BUF_SIZE] to ARR[MIN((RUN_IDX + 1), LENGTH)],
+ * where ARR[0] is encrypted with index START_IDX. The results will be stored in
+ * the same location as the inputs. */
 struct mergesort_first_pass_args {
     void *arr;
-    size_t start;
-    size_t len;
+    size_t length;
     size_t start_idx;
     int ret;
 };
-
-/* Decrypt and sort ARR[START] to ARR[START + LEN], where ARR[0] is encrypted
- * with index START_IDX. The results will be stored in the same location as the
- * inputs. */
-static void mergesort_first_pass(void *args_) {
+static void mergesort_first_pass(void *args_, size_t run_idx) {
     struct mergesort_first_pass_args *args = args_;
     unsigned char *arr = args->arr;
+    int ret;
+
+    size_t run_start = run_idx * BUF_SIZE;
+    size_t run_length = MIN(args->length - run_start, BUF_SIZE);
 
     /* Decrypt nodes. */
-    for (size_t j = 0; j < args->len; j++) {
-        args->ret = node_decrypt(key, &buffer[j],
-                arr + (args->start + j) * SIZEOF_ENCRYPTED_NODE,
-                args->start + j + args->start_idx);
-        if (args->ret) {
+    for (size_t j = 0; j < run_length; j++) {
+        ret = node_decrypt(key, &buffer[j],
+                arr + (run_start + j) * SIZEOF_ENCRYPTED_NODE,
+                run_start + j + args->start_idx);
+        if (ret) {
             handle_error_string("Error decrypting node");
             goto exit;
         }
     }
 
     /* Sort using libc quicksort. */
-    qsort(buffer, args->len, sizeof(*buffer), mergesort_comparator);
+    qsort(buffer, run_length, sizeof(*buffer), mergesort_comparator);
 
     /* Encrypt nodes. */
-    for (size_t j = 0; j < args->len; j++) {
-        args->ret = node_encrypt(key, &buffer[j],
-                arr + (args->start + j) * SIZEOF_ENCRYPTED_NODE,
-                args->start + j + args->start_idx);
-        if (args->ret) {
+    for (size_t j = 0; j < run_length; j++) {
+        ret = node_encrypt(key, &buffer[j],
+                arr + (run_start + j) * SIZEOF_ENCRYPTED_NODE,
+                run_start + j + args->start_idx);
+        if (ret) {
             handle_error_string("Error encrypting node");
             goto exit;
         }
     }
 
 exit:
+    if (ret) {
+        __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
+                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    }
     ;
 }
 
 /* Non-oblivious sort. Based on an external mergesort algorithm since decrypting
- * nodes from host memory is expensive. We will reuse the buffer from the ORP,
- * so BUF_SIZE = BUCKET_SIZE * 2. WORK is a buffer that will be used to store
- * intermediate data. */
-#define BUF_SIZE (BUCKET_SIZE * 2)
+ * nodes from host memory is expensive. */
 static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
     unsigned char *arr = arr_;
     unsigned char *out = out_;
-    size_t num_start_runs = CEIL_DIV(length, BUF_SIZE);
-    struct mergesort_first_pass_args args[num_start_runs];
-    struct thread_work work[num_start_runs];
     int ret;
 
     /* Allocate buffer used for BUF_SIZE-way merge. */
@@ -765,23 +770,26 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
     }
 
     /* Start by sorting runs of BUF_SIZE. */
-    for (size_t i = 0; i < num_start_runs; i++) {
-        args[i].arr = arr;
-        args[i].start = i * BUF_SIZE;
-        args[i].len = MIN(length - i * BUF_SIZE, BUF_SIZE);
-        args[i].start_idx = start_idx;
-        work[i].type = THREAD_WORK_SINGLE;
-        work[i].single.func = mergesort_first_pass;
-        work[i].single.arg = &args[i];
-        thread_work_push(&work[i]);
-    }
+    struct mergesort_first_pass_args args = {
+        .arr = arr,
+        .length = length,
+        .start_idx = start_idx,
+    };
+    struct thread_work work = {
+        .type = THREAD_WORK_ITER,
+        .iter = {
+            .func = mergesort_first_pass,
+            .arg = &args,
+            .count = CEIL_DIV(length, BUF_SIZE),
+        },
+    };
+    thread_work_push(&work);
     thread_work_until_empty();
-    for (size_t i = 0; i < num_start_runs; i++) {
-        ret = args[i].ret;
-        if (ret) {
-            handle_error_string("Error in first pass of mergesort");
-            goto exit;
-        }
+    thread_wait(&work);
+    ret = args.ret;
+    if (ret) {
+        handle_error_string("Error in first pass of mergesort");
+        goto exit;
     }
 
     /* Merge runs of increasing length in a BUF_SIZE-way merge by reading the
