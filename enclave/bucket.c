@@ -754,20 +754,122 @@ exit:
     ;
 }
 
+/* Decrypt and merge each BUF_SIZE runs of length RUN_LENGTH starting at element
+ * ARR[RUN_IDX * RUN_LENGTH * BUF_SIZE] and writing them to a single run of
+ * length RUN_LENGTH * BUF_SIZE at OUT[RUN_IDX * RUN_LENGTH * BUF_SIZE]. If
+ * LENGTH - RUN_IDX * RUN_LENGTH * BUF_SIZE is less than RUN_LENGTH * BUF_SIZE,
+ * then the number of runs is reduced, and the last run is truncated. Both
+ * ARR[0] and OUT[0] are encrypted with index START_IDX. */
+struct mergesort_pass_args {
+    void *input;
+    void *output;
+    size_t length;
+    size_t start_idx;
+    size_t run_length;
+    int ret;
+};
+static void mergesort_pass(void *args_, size_t run_idx) {
+    struct mergesort_pass_args *args = args_;
+    int ret;
+
+    /* Compute the current run length and start. */
+    size_t run_start = run_idx * args->run_length;
+
+    size_t num_runs =
+        CEIL_DIV(MIN(args->length - run_start, args->run_length * BUF_SIZE),
+                args->run_length);
+
+    /* Create index buffer. */
+    size_t merge_indices[BUF_SIZE];
+    memset(merge_indices, '\0', num_runs * sizeof(*merge_indices));
+
+    /* Read in the first (smallest) element from run j into
+     * buffer[j]. The runs start at element i. */
+    for (size_t j = 0; j < num_runs; j++) {
+        ret = node_decrypt(key, &buffer[j],
+                args->input
+                    + (run_start + j * args->run_length)
+                        * SIZEOF_ENCRYPTED_NODE,
+                run_start + j * args->run_length + args->start_idx);
+        if (ret) {
+            handle_error_string("Error decrypting node");
+            goto exit;
+        }
+    }
+
+    /* Merge the runs in the buffer and encrypt to the output array.
+     * Nodes for which we have reach the end of the array are marked as
+     * a dummy element, so we continue until all nodes in buffer are
+     * dummy nodes. */
+    size_t output_idx = 0;
+    bool all_dummy;
+    do {
+        /* Scan for lowest node. */
+        // TODO Use a heap?
+        size_t lowest_run;
+        all_dummy = true;
+        for (size_t j = 0; j < num_runs; j++) {
+            if (buffer[j].is_dummy) {
+                continue;
+            }
+            if (all_dummy
+                    || mergesort_comparator(&buffer[j],
+                        &buffer[lowest_run]) < 0) {
+                lowest_run = j;
+            }
+            all_dummy = false;
+        }
+
+        /* Break out of loop if all nodes were dummy. */
+        if (all_dummy) {
+            continue;
+        }
+
+        /* Encrypt lowest node to output. */
+        ret = node_encrypt(key, &buffer[lowest_run],
+                args->output + (run_start + output_idx) * SIZEOF_ENCRYPTED_NODE,
+                run_start + output_idx + args->start_idx);
+        merge_indices[lowest_run]++;
+        output_idx++;
+
+        /* Check if we have reached the end of the run. */
+        if (merge_indices[lowest_run] >= args->run_length
+                || run_start + lowest_run * args->run_length
+                    + merge_indices[lowest_run] >= args->length) {
+            /* Reached the end, so mark the node as dummy so that we
+             * ignore it. */
+            buffer[lowest_run].is_dummy = true;
+        } else {
+            /* Not yet reached the end, so read the next node in the
+             * input run. */
+            ret = node_decrypt(key, &buffer[lowest_run],
+                    args->input
+                        + (run_start + lowest_run * args->run_length +
+                                merge_indices[lowest_run])
+                            * SIZEOF_ENCRYPTED_NODE,
+                    run_start + lowest_run * args->run_length
+                        + merge_indices[lowest_run] + args->start_idx);
+            if (ret) {
+                handle_error_string("Error decrypting node");
+                goto exit;
+            }
+        }
+    } while (!all_dummy);
+
+exit:
+    if (ret) {
+        __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
+                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    }
+    ;
+}
+
 /* Non-oblivious sort. Based on an external mergesort algorithm since decrypting
  * nodes from host memory is expensive. */
 static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
     unsigned char *arr = arr_;
     unsigned char *out = out_;
     int ret;
-
-    /* Allocate buffer used for BUF_SIZE-way merge. */
-    size_t *merge_indices = malloc(BUF_SIZE * sizeof(*merge_indices));
-    if (!merge_indices) {
-        perror("Error allocating merge index buffer");
-        ret = errno;
-        goto exit;
-    }
 
     /* Start by sorting runs of BUF_SIZE. */
     struct mergesort_first_pass_args args = {
@@ -799,83 +901,29 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
     unsigned char *output = out;
     for (size_t run_length = BUF_SIZE; run_length < length;
             run_length *= BUF_SIZE) {
-        for (size_t i = 0; i < length; i += run_length * BUF_SIZE) {
-            size_t num_runs =
-                CEIL_DIV(MIN(length - i, run_length * BUF_SIZE), run_length);
-
-            /* Zero out index buffer. */
-            memset(merge_indices, '\0', num_runs * sizeof(*merge_indices));
-
-            /* Read in the first (smallest) element from run j into
-             * buffer[j]. The runs start at element i. */
-            for (size_t j = 0; j < num_runs; j++) {
-                ret = node_decrypt(key, &buffer[j],
-                        input + (i + j * run_length) * SIZEOF_ENCRYPTED_NODE,
-                        i + j * run_length + start_idx);
-                if (ret) {
-                    handle_error_string("Error decrypting node");
-                    goto exit_free_merge_indices;
-                }
-            }
-
-            /* Merge the runs in the buffer and encrypt to the output array.
-             * Nodes for which we have reach the end of the array are marked as
-             * a dummy element, so we continue until all nodes in buffer are
-             * dummy nodes. */
-            size_t output_idx = 0;
-            bool all_dummy;
-            do {
-                /* Scan for lowest node. */
-                // TODO Use a heap?
-                size_t lowest_run;
-                all_dummy = true;
-                for (size_t j = 0; j < num_runs; j++) {
-                    if (buffer[j].is_dummy) {
-                        continue;
-                    }
-                    if (all_dummy
-                            || mergesort_comparator(&buffer[j],
-                                &buffer[lowest_run]) < 0) {
-                        lowest_run = j;
-                    }
-                    all_dummy = false;
-                }
-
-                /* Break out of loop if all nodes were dummy. */
-                if (all_dummy) {
-                    continue;
-                }
-
-                /* Encrypt lowest node to output. */
-                ret = node_encrypt(key, &buffer[lowest_run],
-                        output + (i + output_idx) * SIZEOF_ENCRYPTED_NODE,
-                        i + output_idx + start_idx);
-                merge_indices[lowest_run]++;
-                output_idx++;
-
-                /* Check if we have reached the end of the run. */
-                if (merge_indices[lowest_run] >= run_length
-                        || i + lowest_run * run_length
-                            + merge_indices[lowest_run] >= length) {
-                    /* Reached the end, so mark the node as dummy so that we
-                     * ignore it. */
-                    buffer[lowest_run].is_dummy = true;
-                } else {
-                    /* Not yet reached the end, so read the next node in the
-                     * input run. */
-                    ret = node_decrypt(key, &buffer[lowest_run],
-                            input
-                                + (i + lowest_run * run_length +
-                                    merge_indices[lowest_run])
-                                * SIZEOF_ENCRYPTED_NODE,
-                            i + lowest_run * run_length
-                                + merge_indices[lowest_run] + start_idx);
-                    if (ret) {
-                        handle_error_string("Error decrypting node");
-                        goto exit_free_merge_indices;
-                    }
-                }
-            } while (!all_dummy);
+        /* BUF_SIZE-way merge. */
+        struct mergesort_pass_args args = {
+            .input = input,
+            .output = output,
+            .length = length,
+            .start_idx = start_idx,
+            .run_length = run_length,
+        };
+        struct thread_work work = {
+            .type = THREAD_WORK_ITER,
+            .iter = {
+                .func = mergesort_pass,
+                .arg = &args,
+                .count = CEIL_DIV(length, run_length * BUF_SIZE),
+            },
+        };
+        thread_work_push(&work);
+        thread_work_until_empty();
+        thread_wait(&work);
+        ret = args.ret;
+        if (ret) {
+            handle_error_string("Error in merge of mergesort");
+            goto exit;
         }
 
         /* Swap the input and output arrays. */
@@ -892,8 +940,6 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
 
     ret = 0;
 
-exit_free_merge_indices:
-    free(merge_indices);
 exit:
     return ret;
 }
