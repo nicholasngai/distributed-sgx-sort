@@ -60,7 +60,7 @@ static long next_pow2l(long x) {
     while (next < x) {
         next <<= 1;
     }
-    return next << 1;
+    return next;
 #endif
 }
 
@@ -392,7 +392,6 @@ struct merge_split_swapper_aux {
     node_t *bucket2;
     size_t bit_idx;
 };
-
 static void merge_split_swapper(size_t a, size_t b, void *aux_) {
     struct merge_split_swapper_aux *aux = aux_;
     node_t *node_a =
@@ -610,13 +609,7 @@ exit:
         __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
                 __ATOMIC_RELAXED, __ATOMIC_RELAXED);
     }
-    ;
 }
-
-struct permute_swap_aux {
-    void *arr;
-    size_t bucket;
-};
 
 /* Compares elements by their ORP ID. */
 static int permute_comparator(const void *a_, const void *b_,
