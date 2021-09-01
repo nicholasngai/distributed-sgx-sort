@@ -64,6 +64,19 @@ static long next_pow2l(long x) {
 #endif
 }
 
+static long log2li(long x) {
+#ifdef __GNUC__
+    return sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1;
+#else
+    long log = -1;
+    while (x) {
+        log++;
+        x >>= 1;
+    }
+    return log;
+#endif
+}
+
 static int get_bucket_rank(size_t bucket) {
     size_t num_buckets =
         MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size * 2);
@@ -563,7 +576,8 @@ exit:
 
 /* Performs the merge_split operation over a starting bucket specified by an
  * index. The BUCKET_IDX parameter is just a way of dividing work between
- * threads. Iterating from 0 to NUM_BUCKETS / 2 is equivalent to
+ * threads. Iterating from 0 to NUM_BUCKETS / 2 when BUCKET_OFFSET == 0 is
+ * equivalent to
  *
  * for (size_t bucket_start = 0; bucket_start < num_buckets;
  *         bucket_start += bucket_stride) {
@@ -575,12 +589,13 @@ exit:
  *
  * but with easier task generation. The loop goes backwards if BIT_IDX is odd,
  * since this hits buckets that were most recently loaded into the decrypted
- * bucket cache.
- */
+ * bucket cache. BUCKET_OFFSET is used for chunking so that we can reuse this
+ * function at different starting points for different chunks. */
 struct merge_split_idx_args {
     void *arr;
     size_t bit_idx;
     size_t bucket_stride;
+    size_t bucket_offset;
     size_t num_buckets;
 
     int ret;
@@ -590,11 +605,12 @@ static void merge_split_idx(void *args_, size_t bucket_idx) {
     int ret;
 
     if (args->bit_idx % 2 == 1) {
-        bucket_idx = args->num_buckets / 2 - bucket_idx;
+        bucket_idx = args->num_buckets / 2 - bucket_idx - 1;
     }
 
     size_t bucket = bucket_idx % (args->bucket_stride / 2)
-        + bucket_idx / (args->bucket_stride / 2) * args->bucket_stride;
+        + bucket_idx / (args->bucket_stride / 2) * args->bucket_stride
+        + args->bucket_offset;
     size_t other_bucket = bucket + args->bucket_stride / 2;
     ret = merge_split(args->arr, bucket, other_bucket, args->bit_idx);
     if (ret) {
@@ -1195,14 +1211,59 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     /* Run merge-split as part of a butterfly network. This is modified from
      * the paper, since all merge-split operations will be constrained to the
      * same buckets of memory. */
-    size_t bit_idx = 0;
-    for (size_t bucket_stride = 2; bucket_stride <= num_buckets;
-            bucket_stride <<= 1) {
+
+    /* Merge the first log2(BUF_SIZE) levels going by chunks of BUF_SIZE, since
+     * all BUF_SIZE buckets in a given chunk can be kept in the cache. For
+     * example, instead of merging 0-1, 2-3, 4-5, 6-7, 0-2, 1-3, 4-6, 5-7, we
+     * might do 0-1, 2-3, 0-2, 1-3 with a BUF_SIZE of 4. */
+    size_t num_chunked_levels = log2li(MIN(CACHE_BUCKETS, num_buckets));
+    for (size_t chunk_start = 0; chunk_start < num_buckets;
+            chunk_start += CACHE_BUCKETS) {
+        for (size_t bit_idx = 0; bit_idx < num_chunked_levels; bit_idx++) {
+            size_t bucket_stride = 2u << bit_idx;
+
+            /* Create iterative task for merge split. */
+            struct merge_split_idx_args args = {
+                .arr = arr,
+                .bit_idx = bit_idx,
+                .bucket_stride = bucket_stride,
+                .bucket_offset = chunk_start,
+                .num_buckets = CACHE_BUCKETS,
+            };
+            struct thread_work work = {
+                .type = THREAD_WORK_ITER,
+                .iter = {
+                    .func = merge_split_idx,
+                    .arg = &args,
+                    .count = CACHE_BUCKETS / 2,
+                },
+            };
+            thread_work_push(&work);
+
+            thread_work_until_empty();
+
+            /* Get work from others. */
+            thread_wait(&work);
+            ret = args.ret;
+            if (ret) {
+                handle_error_string("Error in merge split range");
+                goto exit;
+            }
+        }
+    }
+
+    /* Merge split remaining levels, when chunks of BUF_SIZE buckets can't all
+     * be kept in the cache. */
+    for (size_t bit_idx = num_chunked_levels; 2u << bit_idx <= num_buckets;
+            bit_idx++) {
+        size_t bucket_stride = 2u << bit_idx;
+
         /* Create iterative task for merge split. */
         struct merge_split_idx_args args = {
             .arr = arr,
             .bit_idx = bit_idx,
             .bucket_stride = bucket_stride,
+            .bucket_offset = 0,
             .num_buckets = num_buckets,
         };
         struct thread_work work = {
@@ -1224,8 +1285,6 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
             handle_error_string("Error in merge split range");
             goto exit;
         }
-
-        bit_idx++;
     }
     ret = evict_buckets(arr);
     if (ret) {
