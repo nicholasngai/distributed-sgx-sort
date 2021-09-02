@@ -16,8 +16,6 @@
 #include "enclave/synch.h"
 #include "enclave/threading.h"
 
-#define BUCKET_SIZE 512
-
 /* The cache has CACHE_SETS * CACHE_ASSOCIATIVITY buckets. */
 #define CACHE_SETS 16
 #define CACHE_ASSOCIATIVITY 64

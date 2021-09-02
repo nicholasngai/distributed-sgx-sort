@@ -11,6 +11,7 @@
 #include "common/defs.h"
 #include "common/error.h"
 #include "common/node_t.h"
+#include "enclave/bucket.h"
 #include "host/error.h"
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include "host/parallel_u.h"
@@ -267,7 +268,7 @@ int main(int argc, char **argv) {
             arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE);
             break;
         case SORT_BUCKET:
-            arr = malloc(MAX(local_length, 512) * SIZEOF_ENCRYPTED_NODE * 4);
+            arr = malloc(MAX(local_length, BUCKET_SIZE) * SIZEOF_ENCRYPTED_NODE * 4);
             break;
     }
     if (!arr) {
