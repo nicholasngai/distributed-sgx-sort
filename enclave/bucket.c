@@ -787,7 +787,12 @@ static void mergesort_pass(void *args_, size_t run_idx) {
                 args->run_length);
 
     /* Create index buffer. */
-    size_t merge_indices[BUF_SIZE];
+    size_t *merge_indices = malloc(BUF_SIZE * sizeof(*merge_indices));
+    if (!merge_indices) {
+        perror("Allocate merge index buffer");
+        ret = errno;
+        goto exit;
+    }
     memset(merge_indices, '\0', num_runs * sizeof(*merge_indices));
 
     /* Read in the first (smallest) element from run j into
@@ -800,7 +805,7 @@ static void mergesort_pass(void *args_, size_t run_idx) {
                 run_start + j * args->run_length + args->start_idx);
         if (ret) {
             handle_error_string("Error decrypting node");
-            goto exit;
+            goto exit_free_merge_indices;
         }
     }
 
@@ -858,11 +863,13 @@ static void mergesort_pass(void *args_, size_t run_idx) {
                         + merge_indices[lowest_run] + args->start_idx);
             if (ret) {
                 handle_error_string("Error decrypting node");
-                goto exit;
+                goto exit_free_merge_indices;
             }
         }
     } while (!all_dummy);
 
+exit_free_merge_indices:
+    free(merge_indices);
 exit:
     if (ret) {
         __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
