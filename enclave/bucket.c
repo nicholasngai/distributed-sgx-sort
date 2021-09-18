@@ -170,7 +170,8 @@ static int evict_bucket(void *arr_, size_t buffer_idx, size_t bucket_idx) {
                         * SIZEOF_ENCRYPTED_NODE,
                 bucket_idx * BUCKET_SIZE + i);
         if (ret) {
-            handle_error_string("Error encrypting node");
+            handle_error_string("Error encrypting node %lu",
+                    bucket_idx * BUCKET_SIZE + i);
             goto exit;
         }
     }
@@ -252,7 +253,8 @@ static node_t *load_bucket(void *arr_, size_t bucket_idx) {
         /* Else, evict the current bucket to host memory. */
         int ret = evict_bucket(arr, cache_idx, old_bucket_idx);
         if (ret) {
-            handle_error_string("Error evicting bucket");
+            handle_error_string("Error evicting bucket %lu from %lu",
+                    old_bucket_idx, cache_idx);
             goto exit;
         }
     }
@@ -270,7 +272,8 @@ static node_t *load_bucket(void *arr_, size_t bucket_idx) {
                         * SIZEOF_ENCRYPTED_NODE,
                 bucket_idx * BUCKET_SIZE + i);
         if (ret) {
-            handle_error_string("Error decrypting node");
+            handle_error_string("Error decrypting node %lu",
+                    bucket_idx * BUCKET_SIZE + i);
             goto exit;
         }
     }
@@ -303,7 +306,8 @@ static int evict_buckets(void *arr) {
                 ret = evict_bucket(arr, cache_idx,
                         cache_meta[i].lines[j].bucket_idx);
                 if (ret) {
-                    handle_error_string("Error evicting bucket");
+                    handle_error_string("Error evicting bucket %lu from %lu",
+                            cache_meta[i].lines[j].bucket_idx, cache_idx);
                     goto exit;
                 }
 
@@ -342,14 +346,15 @@ static int assign_random_ids_and_spread(void *arr_, size_t length,
         ret = node_decrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE,
                 i + src_start_idx);
         if (ret) {
-            handle_error_string("Error decrypting node");
+            handle_error_string("Error decrypting node %lu", i + src_start_idx);
             goto exit;
         }
 
         /* Assign ORP ID and initialize node. */
         ret = rand_read(&node.orp_id, sizeof(node.orp_id));
         if (ret) {
-            handle_error_string("Error assigning random ID");
+            handle_error_string("Error assigning random ID to node %lu",
+                    2 * i + result_start_idx);
             goto exit;
         }
         node.is_dummy = false;
@@ -358,7 +363,8 @@ static int assign_random_ids_and_spread(void *arr_, size_t length,
         ret = node_encrypt(key, &node, arr + 2 * i * SIZEOF_ENCRYPTED_NODE,
                 2 * i + result_start_idx);
         if (ret) {
-            handle_error_string("Error encrypting node");
+            handle_error_string("Error encrypting node %lu",
+                    2 * i + result_start_idx);
             goto exit;
         }
 
@@ -367,7 +373,8 @@ static int assign_random_ids_and_spread(void *arr_, size_t length,
                 arr + (2 * i + 1) * SIZEOF_ENCRYPTED_NODE,
                 2 * i + 1 + result_start_idx);
         if (ret) {
-            handle_error_string("Error encrypting dummy node");
+            handle_error_string("Error encrypting dummy node %lu",
+                    2 * i + 1 + result_start_idx);
             goto exit;
         }
     }
@@ -377,7 +384,8 @@ static int assign_random_ids_and_spread(void *arr_, size_t length,
         ret = node_encrypt(key, &dummy_node, arr + i * SIZEOF_ENCRYPTED_NODE,
                 i + result_start_idx);
         if (ret) {
-            handle_error_string("Error encrypting dummy node");
+            handle_error_string("Error encrypting dummy node %lu",
+                    i + result_start_idx);
             goto exit;
         }
     }
@@ -443,7 +451,7 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     if (bucket1_local) {
         bucket1 = load_bucket(arr, bucket1_idx);
         if (!bucket1) {
-            handle_error_string("Error loading bucket");
+            handle_error_string("Error loading bucket %lu", bucket1_idx);
             ret = -1;
             goto exit;
         }
@@ -454,7 +462,7 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     if (bucket2_local) {
         bucket2 = load_bucket(arr, bucket2_idx);
         if (!bucket2) {
-            handle_error_string("Error loading bucket");
+            handle_error_string("Error loading bucket %lu", bucket2_idx);
             ret = -1;
             goto exit;
         }
@@ -486,7 +494,8 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
         ret = mpi_tls_send_bytes(&count1, sizeof(count1), nonlocal_rank,
                 local_bucket_idx);
         if (ret) {
-            handle_error_string("Error sending count1");
+            handle_error_string("Error sending count1 from %d to %d",
+                    world_rank, nonlocal_rank);
             goto exit;
         }
 
@@ -496,7 +505,8 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
                 sizeof(*bucket1) * BUCKET_SIZE, nonlocal_rank,
                 local_bucket_idx);
         if (ret) {
-            handle_error_string("Error sending local bucket");
+            handle_error_string("Error sending local bucket from %d to %d",
+                    world_rank, nonlocal_rank);
             goto exit;
         }
 
@@ -505,7 +515,8 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
         ret = mpi_tls_recv_bytes(&remote_count1, sizeof(remote_count1),
                 nonlocal_rank, nonlocal_bucket_idx);
         if (ret) {
-            handle_error_string("Error receiving count1");
+            handle_error_string("Error receiving count1 into %d from %d",
+                    world_rank, nonlocal_rank);
             goto exit;
         }
 
@@ -513,7 +524,8 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
         ret = mpi_tls_recv_bytes(buffer, sizeof(*buffer) * BUCKET_SIZE,
                 nonlocal_rank, nonlocal_bucket_idx);
         if (ret) {
-            handle_error_string("Error receiving remote bucket");
+            handle_error_string("Error receiving remote bucket into %d from %d",
+                    world_rank, nonlocal_rank);
             goto exit;
         }
         if (bucket1_local) {
@@ -653,7 +665,7 @@ static int permute_and_compress(void *arr_, size_t bucket,
                 arr + (bucket * BUCKET_SIZE + i) * SIZEOF_ENCRYPTED_NODE,
                 i_idx);
         if (ret) {
-            handle_error_string("Error decrypting node");
+            handle_error_string("Error decrypting node %lu", i_idx);
             goto exit;
         }
     }
@@ -675,7 +687,8 @@ static int permute_and_compress(void *arr_, size_t bucket,
         /* Assign random ORP ID. */
         ret = rand_read(&buffer[i].orp_id, sizeof(buffer[i].orp_id));
         if (ret) {
-            handle_error_string("Error assigning random ID");
+            handle_error_string("Error assigning random ID to %lu",
+                    *compress_idx + start_idx);
             goto exit;
         }
 
@@ -734,7 +747,8 @@ static void mergesort_first_pass(void *args_, size_t run_idx) {
                 arr + (run_start + j) * SIZEOF_ENCRYPTED_NODE,
                 run_start + j + args->start_idx);
         if (ret) {
-            handle_error_string("Error decrypting node");
+            handle_error_string("Error decrypting node %lu",
+                    run_start + j + args->start_idx);
             goto exit;
         }
     }
@@ -748,7 +762,8 @@ static void mergesort_first_pass(void *args_, size_t run_idx) {
                 arr + (run_start + j) * SIZEOF_ENCRYPTED_NODE,
                 run_start + j + args->start_idx);
         if (ret) {
-            handle_error_string("Error encrypting node");
+            handle_error_string("Error encrypting node %lu",
+                    run_start + j + args->start_idx);
             goto exit;
         }
     }
@@ -804,7 +819,8 @@ static void mergesort_pass(void *args_, size_t run_idx) {
                         * SIZEOF_ENCRYPTED_NODE,
                 run_start + j * args->run_length + args->start_idx);
         if (ret) {
-            handle_error_string("Error decrypting node");
+            handle_error_string("Error decrypting node %lu",
+                    run_start + j * args->run_length + args->start_idx);
             goto exit_free_merge_indices;
         }
     }
@@ -862,7 +878,9 @@ static void mergesort_pass(void *args_, size_t run_idx) {
                     run_start + lowest_run * args->run_length
                         + merge_indices[lowest_run] + args->start_idx);
             if (ret) {
-                handle_error_string("Error decrypting node");
+                handle_error_string("Error decrypting node %lu",
+                        run_start + lowest_run * args->run_length
+                            + merge_indices[lowest_run] + args->start_idx);
                 goto exit_free_merge_indices;
             }
         }
@@ -936,7 +954,8 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
         thread_wait(&work);
         ret = args.ret;
         if (ret) {
-            handle_error_string("Error in merge of mergesort");
+            handle_error_string("Error in run-length %lu merges of mergesort",
+                    run_length);
             goto exit;
         }
 
@@ -982,7 +1001,8 @@ static int enclave_merge_send(int merger, const void *run_, size_t *run_idx,
                     run + (i + *run_idx) * SIZEOF_ENCRYPTED_NODE,
                     i + *run_idx + run_start_idx);
             if (ret) {
-                handle_error_string("Error decrypting node");
+                handle_error_string("Error decrypting node %lu",
+                        i + *run_idx + run_start_idx);
                 goto exit;
             }
         }
@@ -996,14 +1016,17 @@ static int enclave_merge_send(int merger, const void *run_, size_t *run_idx,
         ret = mpi_tls_send_bytes(buf, ENCLAVE_MERGE_BUF_SIZE * sizeof(*buf),
                 merger, 0);
         if (ret) {
-            handle_error_string("Error sending nodes to merge");
+            handle_error_string("Error sending nodes to merge from %d to %d",
+                    world_rank, merger);
             goto exit;
         }
 
         /* Receive the next stat. */
         ret = mpi_tls_recv_bytes(&stat, sizeof(stat), merger, 0);
         if (ret) {
-            handle_error_string("Error receiving next merge action");
+            handle_error_string(
+                    "Error receiving next merge action into %d from %d",
+                    world_rank, merger);
             goto exit;
         }
 
@@ -1042,7 +1065,8 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
                         run + *run_idx * SIZEOF_ENCRYPTED_NODE,
                         *run_idx + run_start_idx);
                 if (ret) {
-                    handle_error_string("Error decrypting node to merge");
+                    handle_error_string("Error decrypting node %lu",
+                            *run_idx + run_start_idx);
                     goto exit;
                 }
             } else {
@@ -1053,7 +1077,9 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
             /* Receive node sent from enclave_merge_send. */
             ret = mpi_tls_recv_bytes(&buf[i], sizeof(buf[i]), i, 0);
             if (ret) {
-                handle_error_string("Error receiving node to merge");
+                handle_error_string(
+                        "Error receiving node to merge into %d from %d",
+                        world_rank, i);
                 goto exit;
             }
         }
@@ -1083,7 +1109,8 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
         ret = node_encrypt(key, &buf[lowest_idx][merge_indices[lowest_idx]],
                 dest + i * SIZEOF_ENCRYPTED_NODE, i + dest_start_idx);
         if (ret) {
-            handle_error_string("Error encrypting merged node");
+            handle_error_string("Error encrypting node %lu",
+                    i + dest_start_idx);
             goto exit_free_merge_indices;
         }
 
@@ -1104,7 +1131,8 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
                             run + *run_idx * SIZEOF_ENCRYPTED_NODE,
                             *run_idx + run_start_idx);
                     if (ret) {
-                        handle_error_string("Error decrypting node to merge");
+                        handle_error_string("Error decrypting node %lu",
+                                *run_idx + run_start_idx);
                         goto exit_free_merge_indices;
                     }
                 } else {
@@ -1120,13 +1148,17 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
                 };
                 ret = mpi_tls_send_bytes(&stat, sizeof(stat), lowest_idx, 0);
                 if (ret) {
-                    handle_error_string("Error sending continue merge stat");
+                    handle_error_string(
+                            "Error sending continue merge stat from %d to %d",
+                            world_rank, lowest_idx);
                     goto exit_free_merge_indices;
                 }
                 ret = mpi_tls_recv_bytes(&buf[lowest_idx],
                         sizeof(buf[lowest_idx]), lowest_idx, 0);
                 if (ret) {
-                    handle_error_string("Error receiving next node to merge");
+                    handle_error_string(
+                            "Error receiving next node to merge into %d from %d",
+                            world_rank, lowest_idx);
                     goto exit_free_merge_indices;
                 }
                 merge_indices[lowest_idx] = 0;
@@ -1150,7 +1182,9 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
         };
         ret = mpi_tls_send_bytes(&stat, sizeof(stat), i, 0);
         if (ret) {
-            handle_error_string("Error sending finished merge stat");
+            handle_error_string(
+                    "Error sending finished merge stat from %d to %d",
+                    world_rank, lowest_idx);
             goto exit_free_merge_indices;
         }
     }
@@ -1251,7 +1285,8 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
             thread_wait(&work);
             ret = args.ret;
             if (ret) {
-                handle_error_string("Error in merge split range");
+                handle_error_string("Error in merge split range at level %lu",
+                        bit_idx);
                 goto exit;
             }
         }
@@ -1287,7 +1322,8 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
         thread_wait(&work);
         ret = args.ret;
         if (ret) {
-            handle_error_string("Error in merge split range");
+            handle_error_string("Error in merge split range at level %lu",
+                    bit_idx);
             goto exit;
         }
     }
