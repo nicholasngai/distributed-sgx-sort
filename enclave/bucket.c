@@ -795,14 +795,12 @@ static void mergesort_pass(void *args_, size_t run_idx) {
     int ret;
 
     /* Compute the current run length and start. */
-    size_t run_start = run_idx * args->run_length;
-
+    size_t run_start = run_idx * args->run_length * BUF_SIZE;
     size_t num_runs =
-        CEIL_DIV(MIN(args->length - run_start, args->run_length * BUF_SIZE),
-                args->run_length);
+        MIN(CEIL_DIV(args->length - run_start, args->run_length), BUF_SIZE);
 
     /* Create index buffer. */
-    size_t *merge_indices = malloc(BUF_SIZE * sizeof(*merge_indices));
+    size_t *merge_indices = malloc(num_runs * sizeof(*merge_indices));
     if (!merge_indices) {
         perror("Allocate merge index buffer");
         ret = errno;
