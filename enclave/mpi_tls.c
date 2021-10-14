@@ -39,8 +39,8 @@ struct mpi_tls_session {
     int tag;
 };
 
-static size_t world_rank;
-static size_t world_size;
+static int world_rank;
+static int world_size;
 static mbedtls_x509_crt cert;
 static mbedtls_pk_context privkey;
 static struct mpi_tls_session *sessions;
@@ -308,7 +308,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
         perror("malloc TLS sessions");
         goto exit_free_keys;
     }
-    for (size_t i = 0; i < world_size; i++) {
+    for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
             /* Skip our own rank. */
             continue;
@@ -320,7 +320,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
                 entropy, i);
         if (ret) {
             handle_error_string("Failed to initialize TLS session structures");
-            for (size_t j = 0; j < i; j++) {
+            for (int j = 0; j < i; j++) {
                 free_session(&sessions[j]);
             }
             free(sessions);
@@ -336,7 +336,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
     bool all_init_finished;
     do {
         all_init_finished = true;
-        for (size_t i = 0; i < world_size; i++) {
+        for (int i = 0; i < world_size; i++) {
             /* Skip our own rank. */
             if (i == world_rank) {
                 continue;
@@ -364,7 +364,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
     return 0;
 
 exit_free_sessions:
-    for (size_t i = 0; i < world_size; i++) {
+    for (int i = 0; i < world_size; i++) {
         free_session(&sessions[i]);
     }
     free(sessions);
@@ -376,7 +376,7 @@ exit:
 }
 
 void mpi_tls_free(void) {
-    for (size_t i = 0; i < world_size; i++) {
+    for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
             /* Skip our own rank. */
             continue;
