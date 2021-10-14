@@ -90,12 +90,16 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
 
     MPI_Status status;
     int ret;
+    int available;
 
     /* Probe for an available message. */
-    ret = MPI_Probe(source, tag, MPI_COMM_WORLD, &status);
+    ret = MPI_Iprobe(source, tag, MPI_COMM_WORLD, &available, &status);
     if (ret) {
         handle_mpi_error(ret, "MPI_Probe");
         return -1;
+    }
+    if (!available) {
+        return 0;
     }
 
     /* Get the number of bytes to receive. */

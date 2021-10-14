@@ -99,8 +99,9 @@ static int recv_callback(void *session_, unsigned char *buf, size_t len,
         buf += bytes_to_copy;
     }
 
-    /* If there are bytes remaining afterwards, receive bytes from MPI. */
-    while (bytes_remaining) {
+    /* If there are bytes remaining afterwards, receive bytes from MPI until MPI
+     * indicates blocking. */
+    while (bytes_remaining && ret) {
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
         oe_result_t result = ocall_mpi_try_recv_bytes(&ret, session->buffer,
                 BUFFER_SIZE, session->rank, session->tag);
@@ -126,7 +127,10 @@ static int recv_callback(void *session_, unsigned char *buf, size_t len,
         buf += bytes_to_copy;
     }
 
-    ret = len;
+    ret = len - bytes_remaining;
+    if (!ret) {
+        ret = MBEDTLS_ERR_SSL_WANT_READ;
+    }
 
 exit:
     return ret;
@@ -352,7 +356,8 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
 
             /* Do handshake. */
             ret = mbedtls_ssl_handshake_step(&sessions[i].ssl);
-            if (ret) {
+            if (ret && ret != MBEDTLS_ERR_SSL_WANT_READ
+                    && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
                 handle_mbedtls_error(ret, "mbedtls_ssl_handshake_step");
                 goto exit_free_sessions;
             }
