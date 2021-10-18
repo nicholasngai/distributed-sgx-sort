@@ -376,23 +376,31 @@ int mpi_tls_send_bytes(const void *buf_, size_t count, int dest, int tag) {
     size_t bytes_remaining = count;
     size_t max_payload_len =
         mbedtls_ssl_get_max_out_record_payload(&sessions[dest].ssl);
-    spinlock_lock(&sessions[dest].lock);
     while (bytes_remaining) {
-        sessions[dest].tag = tag;
         size_t bytes_to_write = MIN(bytes_remaining, max_payload_len);
+        /* Only lock if we haven't started sending. Otherwise, we already have
+         * the lock and didn't unlock last time (see below). */
+        if (bytes_remaining == count) {
+            spinlock_lock(&sessions[dest].lock);
+        }
+        sessions[dest].tag = tag;
         ret = mbedtls_ssl_write(&sessions[dest].ssl, buf, bytes_to_write);
         if (ret < 0) {
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ
-                || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-                continue;
+            if (ret != MBEDTLS_ERR_SSL_WANT_READ
+                && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+                handle_mbedtls_error(ret, "mbedtls_ssl_write");
+                goto exit;
             }
-            handle_mbedtls_error(ret, "mbedtls_ssl_write");
-            goto exit;
+            ret = 0;
         }
         buf += ret;
         bytes_remaining -= ret;
+        /* Only unlock if we haven't started sending or if we are finished.
+         * Otherwise, all fragments must be sent atomically. */
+        if (bytes_remaining == count || !bytes_remaining) {
+            spinlock_unlock(&sessions[dest].lock);
+        }
     }
-    spinlock_unlock(&sessions[dest].lock);
 
     ret = 0;
 
@@ -407,23 +415,31 @@ int mpi_tls_recv_bytes(void *buf_, size_t count, int src, int tag) {
     size_t bytes_remaining = count;
     size_t max_payload_len =
         mbedtls_ssl_get_max_out_record_payload(&sessions[src].ssl);
-    spinlock_lock(&sessions[src].lock);
     while (bytes_remaining) {
-        sessions[src].tag = tag;
         size_t bytes_to_read = MIN(bytes_remaining, max_payload_len);
+        /* Only lock if we haven't started receiving. Otherwise, we already have
+         * the lock and didn't unlock last time (see below). */
+        if (bytes_remaining == count) {
+            spinlock_lock(&sessions[src].lock);
+        }
+        sessions[src].tag = tag;
         ret = mbedtls_ssl_read(&sessions[src].ssl, buf, bytes_to_read);
         if (ret < 0) {
-            if (ret == MBEDTLS_ERR_SSL_WANT_READ
-                || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-                continue;
+            if (ret != MBEDTLS_ERR_SSL_WANT_READ
+                && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+                handle_mbedtls_error(ret, "mbedtls_ssl_write");
+                goto exit;
             }
-            handle_mbedtls_error(ret, "mbedtls_ssl_read");
-            goto exit;
+            ret = 0;
         }
         buf += ret;
         bytes_remaining -= ret;
+        /* Only unlock if we haven't started receiving or if we are finished.
+         * Otherwise, all fragments must be sent atomically. */
+        if (bytes_remaining == count || !bytes_remaining) {
+            spinlock_unlock(&sessions[src].lock);
+        }
     }
-    spinlock_unlock(&sessions[src].lock);
 
     ret = 0;
 
