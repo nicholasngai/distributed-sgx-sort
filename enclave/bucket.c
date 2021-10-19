@@ -203,21 +203,6 @@ static node_t *load_bucket(void *arr_, size_t bucket_idx) {
     spinlock_lock(&cache_meta[set_idx].lock);
     size_t line_idx = 0;
     for (size_t i = 0; i < CACHE_ASSOCIATIVITY; i++) {
-        if (cache_meta[set_idx].lines[line_idx].lock.locked) {
-            /* If locked, check for non-locked bucket. */
-            if (!cache_meta[set_idx].lines[i].lock.locked) {
-                line_idx = i;
-            }
-        } else if (cache_meta[set_idx].lines[line_idx].valid) {
-            /* If valid, check for invalid bucket or bucket with earlier
-             * acquisition. */
-            if (!cache_meta[set_idx].lines[i].valid
-                    || cache_meta[set_idx].lines[i].acquired
-                        < cache_meta[set_idx].lines[line_idx].acquired) {
-                line_idx = i;
-            }
-        }
-
         /* Check for bucket already resident in cache. */
         if (cache_meta[set_idx].lines[i].valid
                 && cache_meta[set_idx].lines[i].bucket_idx == bucket_idx) {
@@ -227,6 +212,32 @@ static node_t *load_bucket(void *arr_, size_t bucket_idx) {
                         &cache_meta[set_idx].lock);
             }
             break;
+        }
+
+        /* Skip other locked buckets. */
+        if (cache_meta[set_idx].lines[i].lock.locked) {
+            continue;
+        }
+
+        /* If current bucket is locked, prioritize non-locked bucket. */
+        if (cache_meta[set_idx].lines[line_idx].lock.locked) {
+            line_idx = i;
+            continue;
+        }
+
+        /* If current bucket is invalid, we don't need to check for another
+         * invalid bucket. */
+        if (!cache_meta[set_idx].lines[line_idx].valid) {
+            continue;
+        }
+
+        /* If current bucket is valid, check for invalid bucket or bucket with
+         * earlier acquisition. */
+        if (!cache_meta[set_idx].lines[i].valid
+                || cache_meta[set_idx].lines[i].acquired
+                    < cache_meta[set_idx].lines[line_idx].acquired) {
+            line_idx = i;
+            continue;
         }
     }
     size_t old_bucket_idx = cache_meta[set_idx].lines[line_idx].bucket_idx;
