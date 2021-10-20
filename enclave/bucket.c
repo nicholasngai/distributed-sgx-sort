@@ -10,6 +10,7 @@
 #include <liboblivious/primitives.h>
 #include "common/defs.h"
 #include "common/error.h"
+#include "common/heap.h"
 #include "common/node_t.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
@@ -729,6 +730,14 @@ static int mergesort_comparator(const void *a_, const void *b_) {
     return (comp_key << 1) + comp_orp_id;
 }
 
+static int mergesort_heap_comparator(const void *a_, const void *b_,
+        void *arr_) {
+    const size_t *a = a_;
+    const size_t *b = b_;
+    node_t *arr = arr_;
+    return mergesort_comparator(&arr[*a], &arr[*b]);
+}
+
 /* Non-oblivoius sorting. */
 
 /* We will reuse the buffer from the ORP, so BUF_SIZE = BUCKET_SIZE * 2. WORK is
@@ -811,13 +820,19 @@ static void mergesort_pass(void *args_, size_t run_idx) {
         MIN(CEIL_DIV(args->length - run_start, args->run_length), BUF_SIZE);
 
     /* Create index buffer. */
-    size_t *merge_indices = malloc(num_runs * sizeof(*merge_indices));
-    if (!merge_indices) {
+    size_t *run_indices = malloc(num_runs * sizeof(*run_indices));
+    if (!run_indices) {
         perror("Allocate merge index buffer");
         ret = errno;
         goto exit;
     }
-    memset(merge_indices, '\0', num_runs * sizeof(*merge_indices));
+    memset(run_indices, '\0', num_runs * sizeof(*run_indices));
+    size_t *index_heap = malloc(BUF_SIZE * sizeof(*index_heap));
+    if (!index_heap) {
+        perror("Error allocating index heap");
+        ret = errno;
+        goto exit_free_run_indices;
+    }
 
     /* Read in the first (smallest) element from run j into
      * buffer[j]. The runs start at element i. */
@@ -830,73 +845,69 @@ static void mergesort_pass(void *args_, size_t run_idx) {
         if (ret) {
             handle_error_string("Error decrypting node %lu",
                     run_start + j * args->run_length + args->start_idx);
-            goto exit_free_merge_indices;
+            goto exit_free_index_heap;
         }
     }
+
+    /* Build heap of lowest indices of current elements. */
+    for (size_t i = 0; i < num_runs; i++) {
+        index_heap[i] = i;
+    }
+    heap_heapify(index_heap, num_runs, sizeof(*index_heap),
+            mergesort_heap_comparator, buffer);
+    size_t heap_len = num_runs;
 
     /* Merge the runs in the buffer and encrypt to the output array.
      * Nodes for which we have reach the end of the array are marked as
      * a dummy element, so we continue until all nodes in buffer are
      * dummy nodes. */
     size_t output_idx = 0;
-    bool all_dummy;
     do {
-        /* Scan for lowest node. */
-        // TODO Use a heap?
-        size_t lowest_run;
-        all_dummy = true;
-        for (size_t j = 0; j < num_runs; j++) {
-            if (buffer[j].is_dummy) {
-                continue;
-            }
-            if (all_dummy
-                    || mergesort_comparator(&buffer[j],
-                        &buffer[lowest_run]) < 0) {
-                lowest_run = j;
-            }
-            all_dummy = false;
-        }
-
-        /* Break out of loop if all nodes were dummy. */
-        if (all_dummy) {
-            continue;
-        }
+        /* Peek at lowest node. */
+        size_t lowest_run = index_heap[0];
 
         /* Encrypt lowest node to output. */
         ret = node_encrypt(key, &buffer[lowest_run],
                 args->output + (run_start + output_idx) * SIZEOF_ENCRYPTED_NODE,
                 run_start + output_idx + args->start_idx);
-        merge_indices[lowest_run]++;
+        run_indices[lowest_run]++;
         output_idx++;
 
         /* Check if we have reached the end of the run. */
-        if (merge_indices[lowest_run] >= args->run_length
+        if (run_indices[lowest_run] >= args->run_length
                 || run_start + lowest_run * args->run_length
-                    + merge_indices[lowest_run] >= args->length) {
-            /* Reached the end, so mark the node as dummy so that we
-             * ignore it. */
-            buffer[lowest_run].is_dummy = true;
+                    + run_indices[lowest_run] >= args->length) {
+            /* Permanently remove the empty run. */
+            heap_pop(&lowest_run, index_heap, &heap_len, sizeof(*index_heap),
+                    mergesort_heap_comparator, buffer);
         } else {
             /* Not yet reached the end, so read the next node in the
              * input run. */
             ret = node_decrypt(key, &buffer[lowest_run],
                     args->input
                         + (run_start + lowest_run * args->run_length +
-                                merge_indices[lowest_run])
+                                run_indices[lowest_run])
                             * SIZEOF_ENCRYPTED_NODE,
                     run_start + lowest_run * args->run_length
-                        + merge_indices[lowest_run] + args->start_idx);
+                        + run_indices[lowest_run] + args->start_idx);
             if (ret) {
                 handle_error_string("Error decrypting node %lu",
                         run_start + lowest_run * args->run_length
-                            + merge_indices[lowest_run] + args->start_idx);
-                goto exit_free_merge_indices;
+                            + run_indices[lowest_run] + args->start_idx);
+                goto exit_free_index_heap;
             }
-        }
-    } while (!all_dummy);
 
-exit_free_merge_indices:
-    free(merge_indices);
+            /* Re-heapify based on updated buffer. */
+            size_t temp;
+            heap_pushpop(&temp, &lowest_run, index_heap, &heap_len,
+                    sizeof(*index_heap), mergesort_heap_comparator, buffer);
+        }
+    } while (heap_len > 0);
+
+exit_free_index_heap:
+    free(index_heap);
+exit_free_run_indices:
+    free(run_indices);
 exit:
     if (ret) {
         __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
@@ -1096,31 +1107,31 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
 
     /* Write nodes until we reach the end of the buffer. */
     int lowest_idx = -1;
-    size_t *merge_indices = malloc(world_size * sizeof(*merge_indices));
-    if (!merge_indices) {
+    size_t *run_indices = malloc(world_size * sizeof(*run_indices));
+    if (!run_indices) {
         goto exit;
     }
-    memset(merge_indices, '\0', world_size * sizeof(*merge_indices));
+    memset(run_indices, '\0', world_size * sizeof(*run_indices));
     for (size_t i = 0; i < dest_len; i++) {
         /* Scan for the lowest node. */
         lowest_idx = -1;
         // TODO Use a heap?
         for (int j = 0; j < world_size; j++) {
-            if (!buf[j][merge_indices[j]].is_dummy
+            if (!buf[j][run_indices[j]].is_dummy
                     && (lowest_idx == -1
-                        || buf[j][merge_indices[j]].key
-                            < buf[lowest_idx][merge_indices[lowest_idx]].key)) {
+                        || buf[j][run_indices[j]].key
+                            < buf[lowest_idx][run_indices[lowest_idx]].key)) {
                 lowest_idx = j;
             }
         }
 
         /* Encrypt the lowest index to the output. */
-        ret = node_encrypt(key, &buf[lowest_idx][merge_indices[lowest_idx]],
+        ret = node_encrypt(key, &buf[lowest_idx][run_indices[lowest_idx]],
                 dest + i * SIZEOF_ENCRYPTED_NODE, i + dest_start_idx);
         if (ret) {
             handle_error_string("Error encrypting node %lu",
                     i + dest_start_idx);
-            goto exit_free_merge_indices;
+            goto exit_free_run_indices;
         }
 
         if (lowest_idx == world_rank) {
@@ -1128,7 +1139,7 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
             (*run_idx)++;
         } else {
             /* Increment the merge index of the received run we used. */
-            merge_indices[lowest_idx]++;
+            run_indices[lowest_idx]++;
         }
 
         /* If we haven't reached the end, get the next node if necessary. */
@@ -1142,17 +1153,17 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
                     if (ret) {
                         handle_error_string("Error decrypting node %lu",
                                 *run_idx + run_start_idx);
-                        goto exit_free_merge_indices;
+                        goto exit_free_run_indices;
                     }
                 } else {
                     /* Mark dummy terminator. */
                     buf[lowest_idx][0].is_dummy = true;
                 }
-            } else if (merge_indices[lowest_idx] == ENCLAVE_MERGE_BUF_SIZE) {
+            } else if (run_indices[lowest_idx] == ENCLAVE_MERGE_BUF_SIZE) {
                 /* For remote nodes, send a status message to the enclave whose
                  * node we used to send the next node, then receive the node. */
                 struct enclave_merge_stat stat = {
-                    .num_used = merge_indices[lowest_idx],
+                    .num_used = run_indices[lowest_idx],
                     .done = false,
                 };
                 ret = mpi_tls_send_bytes(&stat, sizeof(stat), lowest_idx, 0);
@@ -1160,7 +1171,7 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
                     handle_error_string(
                             "Error sending continue merge stat from %d to %d",
                             world_rank, lowest_idx);
-                    goto exit_free_merge_indices;
+                    goto exit_free_run_indices;
                 }
                 ret = mpi_tls_recv_bytes(&buf[lowest_idx],
                         sizeof(buf[lowest_idx]), lowest_idx, 0);
@@ -1168,9 +1179,9 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
                     handle_error_string(
                             "Error receiving next node to merge into %d from %d",
                             world_rank, lowest_idx);
-                    goto exit_free_merge_indices;
+                    goto exit_free_run_indices;
                 }
-                merge_indices[lowest_idx] = 0;
+                run_indices[lowest_idx] = 0;
             }
         }
     }
@@ -1186,7 +1197,7 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
 
         /* Send finish states. */
         struct enclave_merge_stat stat = {
-            .num_used = merge_indices[i],
+            .num_used = run_indices[i],
             .done = true,
         };
         ret = mpi_tls_send_bytes(&stat, sizeof(stat), i, 0);
@@ -1194,14 +1205,14 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
             handle_error_string(
                     "Error sending finished merge stat from %d to %d",
                     world_rank, lowest_idx);
-            goto exit_free_merge_indices;
+            goto exit_free_run_indices;
         }
     }
 
     ret = 0;
 
-exit_free_merge_indices:
-    free(merge_indices);
+exit_free_run_indices:
+    free(run_indices);
 exit:
     return ret;
 }
