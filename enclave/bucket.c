@@ -31,9 +31,16 @@ static unsigned char key[16];
 static _Thread_local node_t *buffer;
 
 /* Cache used to store decrypted buckets in enclave memory. */
+struct eviction {
+    size_t idx;
+    condvar_t finished;
+    struct eviction *prev;
+    struct eviction *next;
+};
 static node_t *cache;
 static struct {
     spinlock_t lock;
+    struct eviction *evictions;
     struct {
         bool valid;
         size_t bucket_idx;
@@ -199,9 +206,28 @@ static node_t *load_bucket(void *arr_, size_t bucket_idx) {
     size_t local_bucket_start = get_local_bucket_start(world_rank);
     size_t set_idx = (bucket_idx - local_bucket_start) % CACHE_SETS;
 
-    /* Lock bucket in cache. */
+    /* Lock set in cache. */
     spinlock_lock(&cache_meta[set_idx].lock);
+
+    /* Check eviction list and sleep until our bucket is cleared from the
+     * eviction list. */
     size_t line_idx = 0;
+    bool bucket_is_evicted = true;
+    while (bucket_is_evicted) {
+        bucket_is_evicted = false;
+        struct eviction *cur_eviction = cache_meta[set_idx].evictions;
+        while (cur_eviction) {
+            if (cur_eviction->idx == bucket_idx) {
+                bucket_is_evicted = true;
+                condvar_wait(&cur_eviction->finished,
+                        &cache_meta[set_idx].lock);
+                break;
+            }
+            cur_eviction = cur_eviction->next;
+        }
+    }
+
+    /* Find a bucket to lock in the set. */
     for (size_t i = 0; i < CACHE_ASSOCIATIVITY; i++) {
         /* Check for bucket already resident in cache. */
         if (cache_meta[set_idx].lines[i].valid
@@ -214,8 +240,9 @@ static node_t *load_bucket(void *arr_, size_t bucket_idx) {
             break;
         }
 
-        /* Skip other locked buckets. */
-        if (cache_meta[set_idx].lines[i].lock.locked) {
+        /* Skip other locked or waited-for buckets. */
+        if (cache_meta[set_idx].lines[i].lock.locked
+                || cache_meta[set_idx].lines[i].released.head) {
             continue;
         }
 
@@ -240,8 +267,22 @@ static node_t *load_bucket(void *arr_, size_t bucket_idx) {
             continue;
         }
     }
+
+    /* Begin eviction process if necessary by adding to eviction list, lock the
+     * bucket, and unlock the set. */
     size_t old_bucket_idx = cache_meta[set_idx].lines[line_idx].bucket_idx;
     bool was_valid = cache_meta[set_idx].lines[line_idx].valid;
+    struct eviction eviction;
+    if (was_valid && old_bucket_idx != bucket_idx) {
+        eviction.idx = old_bucket_idx;
+        condvar_init(&eviction.finished);
+        eviction.prev = NULL;
+        eviction.next = cache_meta[set_idx].evictions;
+        if (eviction.next) {
+            eviction.next->prev = &eviction;
+        }
+        cache_meta[set_idx].evictions = &eviction;
+    }
     cache_meta[set_idx].lines[line_idx].valid = true;
     cache_meta[set_idx].lines[line_idx].bucket_idx = bucket_idx;
     cache_meta[set_idx].lines[line_idx].acquired =
@@ -261,13 +302,25 @@ static node_t *load_bucket(void *arr_, size_t bucket_idx) {
             return &cache[cache_idx * BUCKET_SIZE];
         }
 
-        /* Else, evict the current bucket to host memory. */
+        /* Else, evict the current bucket to host memory, then remove the bucket
+         * from the eviction list. */
         int ret = evict_bucket(arr, cache_idx, old_bucket_idx);
         if (ret) {
             handle_error_string("Error evicting bucket %lu from %lu",
                     old_bucket_idx, cache_idx);
             goto exit;
         }
+        spinlock_lock(&cache_meta[set_idx].lock);
+        if (eviction.prev) {
+            eviction.prev->next = eviction.next;
+        } else {
+            cache_meta[set_idx].evictions = eviction.next;
+        }
+        if (eviction.next) {
+            eviction.next->prev = eviction.prev;
+        }
+        condvar_broadcast(&eviction.finished, &cache_meta[set_idx].lock);
+        spinlock_unlock(&cache_meta[set_idx].lock);
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER
