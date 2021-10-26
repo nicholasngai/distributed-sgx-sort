@@ -35,7 +35,7 @@ ENCLAVE_CONF = $(ENCLAVE_DIR)/$(APP_NAME).conf
 HOSTONLY_TARGET = hostonly
 
 CPPFLAGS = -I. -I$(INCDIR)
-CFLAGS = -g -O3 -Wall -Wextra
+CFLAGS = -O3 -Wall -Wextra
 LDFLAGS =
 LDLIBS =
 
