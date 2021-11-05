@@ -6,10 +6,10 @@
 #include <openenclave/bits/result.h>
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 
-void _handle_mbedtls_error(int errno, const char *msg, const char *file,
+void _handle_mbedtls_error(int ret, const char *msg, const char *file,
         int line) {
     char error[256];
-    mbedtls_strerror(errno, error, sizeof(error));
+    mbedtls_strerror(ret, error, sizeof(error));
     fprintf(stderr, "%s:%d: %s: %s\n", file, line, msg, error);
 }
 
