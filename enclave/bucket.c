@@ -1317,7 +1317,8 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
      * all BUF_SIZE buckets in a given chunk can be kept in the cache. For
      * example, instead of merging 0-1, 2-3, 4-5, 6-7, 0-2, 1-3, 4-6, 5-7, we
      * might do 0-1, 2-3, 0-2, 1-3 with a BUF_SIZE of 4. */
-    size_t num_chunked_levels = log2li(MIN(CACHE_BUCKETS, num_buckets));
+    size_t num_chunked_buckets = MIN(CACHE_BUCKETS, num_buckets);
+    size_t num_chunked_levels = log2li(num_chunked_buckets);
     for (size_t chunk_start = 0; chunk_start < num_buckets;
             chunk_start += CACHE_BUCKETS) {
         for (size_t bit_idx = 0; bit_idx < num_chunked_levels; bit_idx++) {
@@ -1329,14 +1330,14 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
                 .bit_idx = bit_idx,
                 .bucket_stride = bucket_stride,
                 .bucket_offset = chunk_start,
-                .num_buckets = CACHE_BUCKETS,
+                .num_buckets = num_chunked_buckets,
             };
             struct thread_work work = {
                 .type = THREAD_WORK_ITER,
                 .iter = {
                     .func = merge_split_idx,
                     .arg = &args,
-                    .count = CACHE_BUCKETS / 2,
+                    .count = num_chunked_buckets / 2,
                 },
             };
             thread_work_push(&work);
