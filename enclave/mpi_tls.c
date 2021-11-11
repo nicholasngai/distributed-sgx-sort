@@ -379,9 +379,14 @@ int mpi_tls_send_bytes(const void *buf_, size_t count, int dest, int tag) {
     const unsigned char *buf = buf_;
     int ret = -1;
 
+    ret = mbedtls_ssl_get_max_out_record_payload(&sessions[dest].ssl);
+    if (ret < 0) {
+        handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
+        goto exit;
+    }
+    size_t max_payload_len = ret;
+
     size_t bytes_remaining = count;
-    size_t max_payload_len =
-        mbedtls_ssl_get_max_out_record_payload(&sessions[dest].ssl);
     while (bytes_remaining) {
         size_t bytes_to_write = MIN(bytes_remaining, max_payload_len);
         /* Only lock if we haven't started sending. Otherwise, we already have
@@ -418,9 +423,14 @@ int mpi_tls_recv_bytes(void *buf_, size_t count, int src, int tag) {
     unsigned char *buf = buf_;
     int ret = -1;
 
+    ret = mbedtls_ssl_get_max_out_record_payload(&sessions[src].ssl);
+    if (ret < 0) {
+        handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
+        goto exit;
+    }
+    size_t max_payload_len = ret;
+
     size_t bytes_remaining = count;
-    size_t max_payload_len =
-        mbedtls_ssl_get_max_out_record_payload(&sessions[src].ssl);
     while (bytes_remaining) {
         size_t bytes_to_read = MIN(bytes_remaining, max_payload_len);
         /* Only lock if we haven't started receiving. Otherwise, we already have
