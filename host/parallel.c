@@ -11,6 +11,7 @@
 #include "common/defs.h"
 #include "common/error.h"
 #include "common/node_t.h"
+#include "common/ocalls.h"
 #include "enclave/bucket.h"
 #include "host/error.h"
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
@@ -71,29 +72,45 @@ int ocall_mpi_send_bytes(const unsigned char *buf, size_t count, int dest,
 }
 
 int ocall_mpi_recv_bytes(unsigned char *buf, size_t count, int source,
-        int tag) {
+        int tag, ocall_mpi_status_t *status) {
+    int ret;
+
     if (count > INT_MAX) {
         handle_error_string("Count too large");
-        return MPI_ERR_COUNT;
+        ret = MPI_ERR_COUNT;
+        goto exit;
     }
 
-    return MPI_Recv(buf, (int) count, MPI_UNSIGNED_CHAR, source, tag,
-            MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Status mpi_status;
+    ret = MPI_Recv(buf, (int) count, MPI_UNSIGNED_CHAR, source, tag,
+            MPI_COMM_WORLD, &mpi_status);
+
+    /* Populate status. */
+    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Get_count");
+        goto exit;
+    }
+    status->source = mpi_status.MPI_SOURCE;
+    status->tag = mpi_status.MPI_TAG;
+
+exit:
+    return ret;
 }
 
 int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
-        int tag) {
+        int tag, ocall_mpi_status_t *status) {
     if (count > INT_MAX) {
         handle_error_string("Count too large");
         return -1;
     }
 
-    MPI_Status status;
+    MPI_Status mpi_status;
     int ret;
     int available;
 
     /* Probe for an available message. */
-    ret = MPI_Iprobe(source, tag, MPI_COMM_WORLD, &available, &status);
+    ret = MPI_Iprobe(source, tag, MPI_COMM_WORLD, &available, &mpi_status);
     if (ret) {
         handle_mpi_error(ret, "MPI_Probe");
         return -1;
@@ -102,13 +119,15 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
         return 0;
     }
 
-    /* Get the number of bytes to receive. */
+    /* Get incoming message parameters. */
     int bytes_to_recv;
-    ret = MPI_Get_count(&status, MPI_UNSIGNED_CHAR, &bytes_to_recv);
+    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &bytes_to_recv);
     if (ret) {
         handle_mpi_error(ret, "MPI_Get_count");
         return -1;
     }
+    source = mpi_status.MPI_SOURCE;
+    tag = mpi_status.MPI_TAG;
 
     /* Read in that number of bytes. */
     ret = MPI_Recv(buf, count, MPI_UNSIGNED_CHAR, source, tag,
@@ -117,6 +136,11 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
         handle_mpi_error(ret, "MPI_Recv");
         return -1;
     }
+
+    /* Populate status. */
+    status->count = bytes_to_recv;
+    status->source = source;
+    status->tag = tag;
 
     return bytes_to_recv;
 }

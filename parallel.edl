@@ -2,6 +2,8 @@ enclave {
     from "openenclave/edl/syscall.edl" import *;
     from "platform.edl" import *;
 
+    include "common/ocalls.h"
+
     untrusted {
         int ocall_mpi_send_bytes(
                 [in, count=count] const unsigned char *buf,
@@ -12,12 +14,14 @@ enclave {
                 [out, count=count] unsigned char *buf,
                 size_t count,
                 int source,
-                int tag);
+                int tag,
+                [out] ocall_mpi_status_t *status);
         int ocall_mpi_try_recv_bytes(
                 [out, count=count] unsigned char *buf,
                 size_t count,
                 int source,
-                int tag);
+                int tag,
+                [out] ocall_mpi_status_t *status);
         void ocall_mpi_barrier(void);
     };
 

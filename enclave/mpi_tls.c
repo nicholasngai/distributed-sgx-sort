@@ -12,6 +12,7 @@
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 #include "common/defs.h"
 #include "common/error.h"
+#include "common/ocalls.h"
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include "enclave/parallel_t.h"
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
@@ -84,15 +85,17 @@ static int recv_callback(void *session_, unsigned char *buf, size_t len,
 
     /* If there are bytes remaining afterwards, receive bytes from MPI until MPI
      * indicates blocking. */
+    ocall_mpi_status_t status;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result = ocall_mpi_try_recv_bytes(&ret, buf, len, session->rank,
-            session->tag);
+            session->tag, &status);
     if (result != OE_OK) {
         handle_oe_error(result, "ocall_mpi_try_recv_bytes");
         goto exit;
     }
 #else /* DISTRUBTED_SGX_SORT_HOSTONLY */
-    ret = ocall_mpi_try_recv_bytes(buf, len, session->rank, session->tag);
+    ret = ocall_mpi_try_recv_bytes(buf, len, session->rank, session->tag,
+            &status);
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
     if (ret < 0) {
         handle_error_string("Failed to receive TLS encrypted bytes");
