@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -21,6 +22,11 @@
 enum sort_type {
     SORT_BITONIC,
     SORT_BUCKET,
+};
+
+struct ocall_mpi_request {
+    void *buf;
+    MPI_Request mpi_request;
 };
 
 static int world_rank;
@@ -143,6 +149,113 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
     status->tag = tag;
 
     return bytes_to_recv;
+}
+
+int ocall_mpi_isend_bytes(const unsigned char *buf, size_t count, int dest,
+        int tag, ocall_mpi_request_t *request) {
+    int ret;
+
+    if (count > INT_MAX) {
+        handle_error_string("Count too large");
+        return MPI_ERR_COUNT;
+    }
+
+    /* Allocate request. */
+    *request = malloc(sizeof(**request));
+    if (!*request) {
+        perror("malloc ocall_mpi_request");
+        ret = errno;
+        goto exit;
+    }
+    (*request)->buf = malloc(count);
+    if (!*request) {
+        perror("malloc isend buf");
+        ret = errno;
+        goto exit_free_request;
+    }
+
+    /* Copy bytes to send to permanent buffer. */
+    memcpy((*request)->buf, buf, count);
+
+    /* Start request. */
+    ret = MPI_Isend((*request)->buf, (int) count, MPI_UNSIGNED_CHAR, dest, tag,
+            MPI_COMM_WORLD, &(*request)->mpi_request);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Isend");
+        goto exit_free_buf;
+    }
+
+    ret = 0;
+
+    return ret;
+
+exit_free_buf:
+    free((*request)->buf);
+exit_free_request:
+    free(*request);
+exit:
+    return ret;
+}
+
+int ocall_mpi_irecv_bytes(size_t count, int source, int tag,
+        ocall_mpi_request_t *request) {
+    int ret;
+
+    if (count > INT_MAX) {
+        handle_error_string("Count too large");
+        return MPI_ERR_COUNT;
+    }
+
+    /* Allocate request. */
+    *request = malloc(sizeof(**request));
+    if (!*request) {
+        perror("malloc ocall_mpi_request");
+        ret = errno;
+        goto exit;
+    }
+    (*request)->buf = malloc(count);
+    if (!*request) {
+        perror("malloc irecv buf");
+        ret = errno;
+        goto exit_free_request;
+    }
+
+    /* Start request. */
+    ret = MPI_Irecv((*request)->buf, (int) count, MPI_UNSIGNED_CHAR, source,
+            tag, MPI_COMM_WORLD, &(*request)->mpi_request);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Irecv");
+        goto exit_free_buf;
+    }
+
+    ret = 0;
+
+    return ret;
+
+exit_free_buf:
+    free((*request)->buf);
+exit_free_request:
+    free(*request);
+exit:
+    return ret;
+}
+
+int ocall_mpi_wait(unsigned char *buf, size_t count,
+        ocall_mpi_request_t *request) {
+    int ret;
+
+    ret = MPI_Wait(&(*request)->mpi_request, MPI_STATUS_IGNORE);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Wait");
+        goto exit_free_request;
+    }
+
+    memcpy(buf, (*request)->buf, count);
+
+exit_free_request:
+    free((*request)->buf);
+    free(*request);
+    return ret;
 }
 
 void ocall_mpi_barrier(void) {

@@ -7,4 +7,6 @@ typedef struct ocall_mpi_status {
     int tag;
 } ocall_mpi_status_t;
 
+typedef struct ocall_mpi_request * ocall_mpi_request_t;
+
 #endif /* distributed-sgx-sort/common/ocalls.h */
