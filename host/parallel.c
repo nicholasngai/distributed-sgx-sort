@@ -241,14 +241,24 @@ exit:
 }
 
 int ocall_mpi_wait(unsigned char *buf, size_t count,
-        ocall_mpi_request_t *request) {
+        ocall_mpi_request_t *request, ocall_mpi_status_t *status) {
     int ret;
 
-    ret = MPI_Wait(&(*request)->mpi_request, MPI_STATUS_IGNORE);
+    MPI_Status mpi_status;
+    ret = MPI_Wait(&(*request)->mpi_request, &mpi_status);
     if (ret) {
         handle_mpi_error(ret, "MPI_Wait");
         goto exit_free_request;
     }
+
+    /* Populate status. */
+    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Get_count");
+        goto exit_free_request;
+    }
+    status->source = mpi_status.MPI_SOURCE;
+    status->tag = mpi_status.MPI_TAG;
 
     memcpy(buf, (*request)->buf, count);
 

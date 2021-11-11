@@ -36,7 +36,8 @@ enclave {
         int ocall_mpi_wait(
                 [out, count=count] unsigned char *buf,
                 size_t count,
-                [in] ocall_mpi_request_t *request);
+                [in] ocall_mpi_request_t *request,
+                [out] ocall_mpi_status_t *status);
         void ocall_mpi_barrier(void);
     };
 
