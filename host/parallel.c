@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
@@ -11,6 +12,7 @@
 #include "common/defs.h"
 #include "common/error.h"
 #include "common/node_t.h"
+#include "common/ocalls.h"
 #include "enclave/bucket.h"
 #include "host/error.h"
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
@@ -20,6 +22,11 @@
 enum sort_type {
     SORT_BITONIC,
     SORT_BUCKET,
+};
+
+struct ocall_mpi_request {
+    void *buf;
+    MPI_Request mpi_request;
 };
 
 static int world_rank;
@@ -71,54 +78,245 @@ int ocall_mpi_send_bytes(const unsigned char *buf, size_t count, int dest,
 }
 
 int ocall_mpi_recv_bytes(unsigned char *buf, size_t count, int source,
-        int tag) {
+        int tag, ocall_mpi_status_t *status) {
+    int ret;
+
     if (count > INT_MAX) {
         handle_error_string("Count too large");
-        return MPI_ERR_COUNT;
+        ret = MPI_ERR_COUNT;
+        goto exit;
     }
 
-    return MPI_Recv(buf, (int) count, MPI_UNSIGNED_CHAR, source, tag,
-            MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+    MPI_Status mpi_status;
+    ret = MPI_Recv(buf, (int) count, MPI_UNSIGNED_CHAR, source, tag,
+            MPI_COMM_WORLD, &mpi_status);
+
+    /* Populate status. */
+    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Get_count");
+        goto exit;
+    }
+    status->source = mpi_status.MPI_SOURCE;
+    status->tag = mpi_status.MPI_TAG;
+
+exit:
+    return ret;
 }
 
 int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
-        int tag) {
+        int tag, int *flag, ocall_mpi_status_t *status) {
     if (count > INT_MAX) {
         handle_error_string("Count too large");
         return -1;
     }
 
-    MPI_Status status;
+    MPI_Status mpi_status;
     int ret;
-    int available;
 
     /* Probe for an available message. */
-    ret = MPI_Iprobe(source, tag, MPI_COMM_WORLD, &available, &status);
+    ret = MPI_Iprobe(source, tag, MPI_COMM_WORLD, flag, &mpi_status);
     if (ret) {
         handle_mpi_error(ret, "MPI_Probe");
-        return -1;
+        goto exit;
     }
-    if (!available) {
-        return 0;
+    if (!*flag) {
+        goto exit;
     }
 
-    /* Get the number of bytes to receive. */
+    /* Get incoming message parameters. */
     int bytes_to_recv;
-    ret = MPI_Get_count(&status, MPI_UNSIGNED_CHAR, &bytes_to_recv);
+    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &bytes_to_recv);
     if (ret) {
         handle_mpi_error(ret, "MPI_Get_count");
-        return -1;
+        goto exit;
     }
+    source = mpi_status.MPI_SOURCE;
+    tag = mpi_status.MPI_TAG;
 
     /* Read in that number of bytes. */
     ret = MPI_Recv(buf, count, MPI_UNSIGNED_CHAR, source, tag,
             MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     if (ret) {
         handle_mpi_error(ret, "MPI_Recv");
-        return -1;
+        goto exit;
     }
 
-    return bytes_to_recv;
+    /* Populate status. */
+    status->count = bytes_to_recv;
+    status->source = source;
+    status->tag = tag;
+
+exit:
+    return ret;
+}
+
+int ocall_mpi_isend_bytes(const unsigned char *buf, size_t count, int dest,
+        int tag, ocall_mpi_request_t *request) {
+    int ret;
+
+    if (count > INT_MAX) {
+        handle_error_string("Count too large");
+        return MPI_ERR_COUNT;
+    }
+
+    /* Allocate request. */
+    *request = malloc(sizeof(**request));
+    if (!*request) {
+        perror("malloc ocall_mpi_request");
+        ret = errno;
+        goto exit;
+    }
+    (*request)->buf = malloc(count);
+    if (!(*request)->buf) {
+        perror("malloc isend buf");
+        ret = errno;
+        goto exit_free_request;
+    }
+
+    /* Copy bytes to send to permanent buffer. */
+    memcpy((*request)->buf, buf, count);
+
+    /* Start request. */
+    ret = MPI_Isend((*request)->buf, (int) count, MPI_UNSIGNED_CHAR, dest, tag,
+            MPI_COMM_WORLD, &(*request)->mpi_request);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Isend");
+        goto exit_free_buf;
+    }
+
+    ret = 0;
+
+    return ret;
+
+exit_free_buf:
+    free((*request)->buf);
+exit_free_request:
+    free(*request);
+exit:
+    return ret;
+}
+
+int ocall_mpi_irecv_bytes(size_t count, int source, int tag,
+        ocall_mpi_request_t *request) {
+    int ret;
+
+    if (count > INT_MAX) {
+        handle_error_string("Count too large");
+        return MPI_ERR_COUNT;
+    }
+
+    /* Allocate request. */
+    *request = malloc(sizeof(**request));
+    if (!*request) {
+        perror("malloc ocall_mpi_request");
+        ret = errno;
+        goto exit;
+    }
+    (*request)->buf = malloc(count);
+    if (!(*request)->buf) {
+        perror("malloc irecv buf");
+        ret = errno;
+        goto exit_free_request;
+    }
+
+    /* Start request. */
+    ret = MPI_Irecv((*request)->buf, (int) count, MPI_UNSIGNED_CHAR, source,
+            tag, MPI_COMM_WORLD, &(*request)->mpi_request);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Irecv");
+        goto exit_free_buf;
+    }
+
+    ret = 0;
+
+    return ret;
+
+exit_free_buf:
+    free((*request)->buf);
+exit_free_request:
+    free(*request);
+exit:
+    return ret;
+}
+
+int ocall_mpi_wait(unsigned char *buf, size_t count,
+        ocall_mpi_request_t *request, ocall_mpi_status_t *status) {
+    int ret;
+
+    MPI_Status mpi_status;
+    ret = MPI_Wait(&(*request)->mpi_request, &mpi_status);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Wait");
+        goto exit_free_request;
+    }
+
+    /* Populate status. */
+    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Get_count");
+        goto exit_free_request;
+    }
+    status->source = mpi_status.MPI_SOURCE;
+    status->tag = mpi_status.MPI_TAG;
+
+    /* Copy bytes to output. */
+    memcpy(buf, (*request)->buf, MIN(count, (size_t) status->count));
+
+exit_free_request:
+    free((*request)->buf);
+    free(*request);
+    return ret;
+}
+
+int ocall_mpi_try_wait(unsigned char *buf, size_t count,
+        ocall_mpi_request_t *request, int *flag, ocall_mpi_status_t *status) {
+    int ret;
+
+    MPI_Status mpi_status;
+
+    /* Test request status. */
+    ret = MPI_Test(&(*request)->mpi_request, flag, &mpi_status);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Test");
+        goto exit_free_request;
+    }
+    if (!*flag) {
+        goto exit;
+    }
+
+    /* Populate status. */
+    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Get_count");
+        goto exit_free_request;
+    }
+    status->source = mpi_status.MPI_SOURCE;
+    status->tag = mpi_status.MPI_TAG;
+
+    /* Copy bytes to output. */
+    memcpy(buf, (*request)->buf, MIN(count, (size_t) status->count));
+
+exit_free_request:
+    free((*request)->buf);
+    free(*request);
+exit:
+    return ret;
+}
+
+int ocall_mpi_cancel(ocall_mpi_request_t *request) {
+    int ret;
+
+    ret = MPI_Cancel(&(*request)->mpi_request);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Cancel");
+        goto exit_free_request;
+    }
+
+exit_free_request:
+    free((*request)->buf);
+    free(*request);
+    return ret;
 }
 
 void ocall_mpi_barrier(void) {
