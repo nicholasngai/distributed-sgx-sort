@@ -99,44 +99,41 @@ static int recv_callback(void *session_, unsigned char *buf, size_t len,
     struct mpi_tls_session *session = session_;
     int ret = -1;
 
+    ocall_mpi_status_t status;
+    int ready;
     if (session->async) {
-        ocall_mpi_status_t status;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-        oe_result_t result = ocall_mpi_wait(&ret, buf, len, session->async,
-                &status);
+        oe_result_t result = ocall_mpi_try_wait(&ret, buf, len, session->async,
+                &ready, &status);
         if (result != OE_OK) {
             handle_oe_error(result, "ocall_mpi_try_recv_bytes");
             goto exit;
         }
 #else /* DISTRUBTED_SGX_SORT_HOSTONLY */
-        ret = ocall_mpi_wait(buf, len, session->async, &status);
+        ret = ocall_mpi_try_wait(buf, len, session->async, &ready, &status);
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
-        if (ret) {
-            handle_error_string("Failed to receive async TLS encrypted bytes");
-            goto exit;
-        }
-        ret = status.count;
     } else {
-        ocall_mpi_status_t status;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
         oe_result_t result = ocall_mpi_try_recv_bytes(&ret, buf, len,
-                session->rank, session->tag, &status);
+                session->rank, session->tag, &ready, &status);
         if (result != OE_OK) {
             handle_oe_error(result, "ocall_mpi_try_recv_bytes");
             goto exit;
         }
 #else /* DISTRUBTED_SGX_SORT_HOSTONLY */
         ret = ocall_mpi_try_recv_bytes(buf, len, session->rank, session->tag,
-                &status);
+                &ready, &status);
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
-        if (ret < 0) {
-            handle_error_string("Failed to receive TLS encrypted bytes");
-            goto exit;
-        }
+    }
+    if (ret < 0) {
+        handle_error_string("Failed to receive TLS encrypted bytes");
+        goto exit;
     }
 
-    if (!ret) {
+    if (!ready) {
         ret = MBEDTLS_ERR_SSL_WANT_READ;
+    } else {
+        ret = status.count;
     }
 
 exit:
