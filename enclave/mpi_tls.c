@@ -417,33 +417,48 @@ int mpi_tls_send_bytes(const void *buf_, size_t count, int dest, int tag) {
     }
     size_t max_payload_len = ret;
 
-    size_t bytes_remaining = count;
-    while (bytes_remaining) {
-        size_t bytes_to_write = MIN(bytes_remaining, max_payload_len);
-        /* Only lock if we haven't started sending. Otherwise, we already have
-         * the lock and didn't unlock last time (see below). */
-        if (bytes_remaining == count) {
-            spinlock_lock(&sessions[dest].lock);
-        }
+    struct mpi_tls_frag_header header = {
+        .num_frags = CEIL_DIV(count, max_payload_len) + 1,
+    };
+    do {
+        spinlock_lock(&sessions[dest].lock);
         sessions[dest].tag = tag;
         sessions[dest].async = NULL;
-        ret = mbedtls_ssl_write(&sessions[dest].ssl, buf, bytes_to_write);
-        if (ret < 0) {
-            if (ret != MBEDTLS_ERR_SSL_WANT_READ
+        ret = mbedtls_ssl_write(&sessions[dest].ssl,
+                (const unsigned char *) &header, sizeof(header));
+        if (ret < 0 && ret != MBEDTLS_ERR_SSL_WANT_READ
                 && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-                handle_mbedtls_error(ret, "mbedtls_ssl_write");
-                goto exit;
-            }
-            ret = 0;
+            handle_mbedtls_error(ret, "mbedtls_ssl_write");
+            goto exit;
+        }
+
+        /* Only unlock the lock if we haven't started sending yet. */
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ
+                || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            spinlock_unlock(&sessions[dest].lock);
+        }
+    } while (ret == MBEDTLS_ERR_SSL_WANT_READ
+            || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+    size_t bytes_remaining = count;
+    size_t i = 1;
+    while (i < header.num_frags) {
+        size_t bytes_to_write = MIN(bytes_remaining, max_payload_len);
+        ret = mbedtls_ssl_write(&sessions[dest].ssl, buf, bytes_to_write);
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ
+            || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            continue;
+        }
+        if (ret < 0) {
+            handle_mbedtls_error(ret, "mbedtls_ssl_write");
+            goto exit;
         }
         buf += ret;
         bytes_remaining -= ret;
-        /* Only unlock if we haven't started sending or if we are finished.
-         * Otherwise, all fragments must be sent atomically. */
-        if (bytes_remaining == count || !bytes_remaining) {
-            spinlock_unlock(&sessions[dest].lock);
-        }
+        i++;
     }
+
+    spinlock_unlock(&sessions[dest].lock);
 
     ret = 0;
 
@@ -462,33 +477,51 @@ int mpi_tls_recv_bytes(void *buf_, size_t count, int src, int tag) {
     }
     size_t max_payload_len = ret;
 
-    size_t bytes_remaining = count;
-    while (bytes_remaining) {
-        size_t bytes_to_read = MIN(bytes_remaining, max_payload_len);
-        /* Only lock if we haven't started receiving. Otherwise, we already have
-         * the lock and didn't unlock last time (see below). */
-        if (bytes_remaining == count) {
-            spinlock_lock(&sessions[src].lock);
-        }
+    struct mpi_tls_frag_header header;
+    do {
+        spinlock_lock(&sessions[src].lock);
         sessions[src].tag = tag;
         sessions[src].async = NULL;
-        ret = mbedtls_ssl_read(&sessions[src].ssl, buf, bytes_to_read);
-        if (ret < 0) {
-            if (ret != MBEDTLS_ERR_SSL_WANT_READ
+        ret = mbedtls_ssl_read(&sessions[src].ssl, (unsigned char *) &header,
+                sizeof(header));
+        if (ret < 0 && ret != MBEDTLS_ERR_SSL_WANT_READ
                 && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-                handle_mbedtls_error(ret, "mbedtls_ssl_write");
-                goto exit;
-            }
-            ret = 0;
+            handle_mbedtls_error(ret, "mbedtls_ssl_read");
+            goto exit;
         }
-        buf += ret;
-        bytes_remaining -= ret;
-        /* Only unlock if we haven't started receiving or if we are finished.
-         * Otherwise, all fragments must be sent atomically. */
-        if (bytes_remaining == count || !bytes_remaining) {
+
+        /* Only unlock the lock if we haven't started sending yet. */
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ
+                || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
             spinlock_unlock(&sessions[src].lock);
         }
+    } while (ret == MBEDTLS_ERR_SSL_WANT_READ
+            || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+    size_t i = 1;
+    while (i < header.num_frags) {
+        /* Receive bytes. */
+        ret = mbedtls_ssl_read(&sessions[src].ssl, buf,
+                MAX(count, max_payload_len));
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ
+                || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            continue;
+        }
+        if (ret < 0) {
+            handle_mbedtls_error(ret, "mbedtls_ssl_write");
+            goto exit;
+        }
+
+        if ((size_t) ret > count) {
+            handle_error_string("Message is longer than buffer");
+            goto exit;
+        }
+        buf += ret;
+        count -= ret;
+        i++;
     }
+
+    spinlock_unlock(&sessions[src].lock);
 
     ret = 0;
 
@@ -508,8 +541,9 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
     }
     size_t max_payload_len = ret;
 
+    request->header.num_frags = CEIL_DIV(count, max_payload_len);
     request->type = MPI_TLS_SEND;
-    request->num_requests = CEIL_DIV(count, max_payload_len);
+    request->num_requests = request->header.num_frags;
     request->mpi_requests =
         malloc(request->num_requests * sizeof(*request->mpi_requests));
     if (!request->mpi_requests) {
@@ -518,33 +552,47 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
         goto exit;
     }
 
-    size_t bytes_remaining = count;
-    for (size_t i = 0; i < request->num_requests; i++) {
-        size_t bytes_to_write = MIN(bytes_remaining, max_payload_len);
-        /* Only lock if we haven't started sending. Otherwise, we already have
-         * the lock and didn't unlock last time (see below). */
-        if (bytes_remaining == count) {
-            spinlock_lock(&sessions[dest].lock);
-        }
+    do {
+        spinlock_lock(&sessions[dest].lock);
         sessions[dest].tag = tag;
+        sessions[dest].async = &request->mpi_requests[0];
+        ret = mbedtls_ssl_write(&sessions[dest].ssl,
+                (const unsigned char *) &request->header.num_frags,
+                sizeof(request->header.num_frags));
+        if (ret < 0 && ret != MBEDTLS_ERR_SSL_WANT_READ
+                && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+            handle_mbedtls_error(ret, "mbedtls_ssl_write");
+            goto exit;
+        }
+
+        /* Only unlock the lock if we haven't started sending yet. */
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ
+                || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            spinlock_unlock(&sessions[dest].lock);
+        }
+    } while (ret == MBEDTLS_ERR_SSL_WANT_READ
+            || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+    size_t bytes_remaining = count;
+    size_t i = 1;
+    while (i < request->header.num_frags) {
+        size_t bytes_to_write = MIN(bytes_remaining, max_payload_len);
         sessions[dest].async = &request->mpi_requests[i];
         ret = mbedtls_ssl_write(&sessions[dest].ssl, buf, bytes_to_write);
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ
+            || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            continue;
+        }
         if (ret < 0) {
-            if (ret != MBEDTLS_ERR_SSL_WANT_READ
-                && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-                handle_mbedtls_error(ret, "mbedtls_ssl_write");
-                goto exit;
-            }
-            ret = 0;
+            handle_mbedtls_error(ret, "mbedtls_ssl_write");
+            goto exit;
         }
         buf += ret;
         bytes_remaining -= ret;
-        /* Only unlock if we haven't started sending or if we are finished.
-         * Otherwise, all fragments must be sent atomically. */
-        if (bytes_remaining == count || !bytes_remaining) {
-            spinlock_unlock(&sessions[dest].lock);
-        }
+        i++;
     }
+
+    spinlock_unlock(&sessions[dest].lock);
 
     ret = 0;
 
@@ -572,7 +620,7 @@ int mpi_tls_irecv_bytes(void *buf_, size_t count, int src, int tag,
     size_t max_record_len = max_payload_len + ret;
 
     request->type = MPI_TLS_RECV;
-    request->num_requests = CEIL_DIV(count, max_payload_len);
+    request->num_requests = CEIL_DIV(count, max_payload_len) + 1;
     request->mpi_requests =
         malloc(request->num_requests * sizeof(*request->mpi_requests));
     if (!request->mpi_requests) {
@@ -599,15 +647,18 @@ int mpi_tls_irecv_bytes(void *buf_, size_t count, int src, int tag,
         ret = ocall_mpi_irecv_bytes(max_record_len, request->rank, request->tag,
                 &request->mpi_requests[i]);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+        if (ret) {
+            handle_error_string("Error posting irecv for TLS encrypted bytes");
+            goto exit_free_requests;
+        }
     }
     spinlock_unlock(&sessions[request->rank].lock);
 
     ret = 0;
-    goto exit;
 
-#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    return ret;
+
 exit_free_requests:
-#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     free(request->mpi_requests);
 exit:
     return ret;
@@ -649,26 +700,66 @@ int mpi_tls_wait(mpi_tls_request_t *request) {
         }
         size_t max_payload_len = ret;
 
-        size_t bytes_remaining = request->count;
-        for (size_t i = 0; i < request->num_requests; i++) {
-            size_t bytes_to_read = MIN(bytes_remaining, max_payload_len);
+        do {
             spinlock_lock(&sessions[request->rank].lock);
             sessions[request->rank].tag = request->tag;
-            sessions[request->rank].async = &request->mpi_requests[i];
-            ret = mbedtls_ssl_read(&sessions[request->rank].ssl, request->buf,
-                    bytes_to_read);
+            sessions[request->rank].async = &request->mpi_requests[0];
+            ret = mbedtls_ssl_read(&sessions[request->rank].ssl,
+                    (unsigned char *) &request->header,
+                    sizeof(request->header));
             spinlock_unlock(&sessions[request->rank].lock);
-            if (ret < 0) {
-                if (ret != MBEDTLS_ERR_SSL_WANT_READ
+            if (ret < 0 && ret != MBEDTLS_ERR_SSL_WANT_READ
                     && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+                handle_mbedtls_error(ret, "mbedtls_ssl_read");
+                goto exit;
+            }
+        } while (ret == MBEDTLS_ERR_SSL_WANT_READ
+                || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+        for (size_t i = 1; i < request->header.num_frags; i++) {
+            /* Receive bytes. */
+            do {
+                spinlock_lock(&sessions[request->rank].lock);
+                sessions[request->rank].tag = request->tag;
+                sessions[request->rank].async = &request->mpi_requests[i];
+                ret = mbedtls_ssl_read(&sessions[request->rank].ssl,
+                        request->buf, MAX(max_payload_len, request->count));
+                spinlock_unlock(&sessions[request->rank].lock);
+                if (ret < 0 && ret != MBEDTLS_ERR_SSL_WANT_READ
+                        && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
                     handle_mbedtls_error(ret, "mbedtls_ssl_read");
                     goto exit;
                 }
-                ret = 0;
+            } while (ret == MBEDTLS_ERR_SSL_WANT_READ
+                    || ret == MBEDTLS_ERR_SSL_WANT_WRITE);
+
+            if ((size_t) ret > request->count && request->count && ret != 1) {
+                handle_error_string("Message is longer than buffer");
+                goto exit;
             }
             request->buf += ret;
-            bytes_remaining -= ret;
+            request->count -= ret;
         }
+
+        /* Cancel remaining fragments. */
+        for (size_t i = request->header.num_frags; i < request->num_requests;
+                i++) {
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+            oe_result_t result = ocall_mpi_cancel(&ret,
+                    &request->mpi_requests[i]);
+            if (result != OE_OK) {
+                handle_oe_error(result, "ocall_mpi_cancel");
+                goto exit;
+            }
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+            ret = ocall_mpi_cancel(&request->mpi_requests[i]);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+            if (ret) {
+                handle_error_string("Error cancelling speculative irecv");
+                goto exit;
+            }
+        }
+
         break;
     }
 

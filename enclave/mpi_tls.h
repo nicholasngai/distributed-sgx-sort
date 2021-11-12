@@ -5,6 +5,11 @@
 #include <mbedtls/entropy.h>
 #include "common/ocalls.h"
 
+struct mpi_tls_frag_header {
+    size_t num_frags;
+    unsigned char checksum[32]; // TODO Checksum not yet implemented.
+};
+
 enum mpi_tls_request_type {
     MPI_TLS_SEND,
     MPI_TLS_RECV,
@@ -14,6 +19,7 @@ typedef struct mpi_tls_request {
     enum mpi_tls_request_type type;
     size_t num_requests;
     ocall_mpi_request_t *mpi_requests;
+    struct mpi_tls_frag_header header;
 
     void *buf;
     size_t count;

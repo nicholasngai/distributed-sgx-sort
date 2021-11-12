@@ -45,6 +45,8 @@ enclave {
                 [in] ocall_mpi_request_t *request,
                 [out] int *flag,
                 [out] ocall_mpi_status_t *status);
+        int ocall_mpi_cancel(
+                [in] ocall_mpi_request_t *request);
         void ocall_mpi_barrier(void);
     };
 
