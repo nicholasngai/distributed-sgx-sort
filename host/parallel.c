@@ -260,7 +260,7 @@ int ocall_mpi_wait(unsigned char *buf, size_t count,
     status->source = mpi_status.MPI_SOURCE;
     status->tag = mpi_status.MPI_TAG;
 
-    memcpy(buf, (*request)->buf, count);
+    memcpy(buf, (*request)->buf, MIN(count, (size_t) status->count));
 
 exit_free_request:
     free((*request)->buf);
