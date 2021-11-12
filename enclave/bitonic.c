@@ -234,6 +234,16 @@ static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
             }
         }
 
+        /* Post receive for remote nodes to encrypted buffer. */
+        mpi_tls_request_t request;
+        ret = mpi_tls_irecv_bytes(remote_buffer,
+                nodes_to_swap * sizeof(*remote_buffer), remote_rank, local_idx,
+                &request);
+        if (ret) {
+            handle_error_string("Error receiving node bytes");
+            return;
+        }
+
         /* Send local nodes to the remote. */
         ret = mpi_tls_send_bytes(local_buffer,
                 nodes_to_swap * sizeof(*local_buffer), remote_rank, remote_idx);
@@ -242,11 +252,10 @@ static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
             return;
         }
 
-        /* Receive remote nodes to encrypted buffer. */
-        ret = mpi_tls_recv_bytes(remote_buffer,
-                nodes_to_swap * sizeof(*remote_buffer), remote_rank, local_idx);
+        /* Wait for received nodes to come in. */
+        ret = mpi_tls_wait(&request);
         if (ret) {
-            handle_error_string("Error receiving node bytes");
+            handle_error_string("Error waiting on receive for node bytes");
             return;
         }
 
