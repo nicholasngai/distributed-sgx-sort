@@ -168,7 +168,7 @@ int ocall_mpi_isend_bytes(const unsigned char *buf, size_t count, int dest,
         goto exit;
     }
     (*request)->buf = malloc(count);
-    if (!*request) {
+    if (!(*request)->buf) {
         perror("malloc isend buf");
         ret = errno;
         goto exit_free_request;
@@ -214,7 +214,7 @@ int ocall_mpi_irecv_bytes(size_t count, int source, int tag,
         goto exit;
     }
     (*request)->buf = malloc(count);
-    if (!*request) {
+    if (!(*request)->buf) {
         perror("malloc irecv buf");
         ret = errno;
         goto exit_free_request;
