@@ -943,7 +943,7 @@ int mpi_tls_wait(mpi_tls_request_t *request) {
         struct mpi_tls_frag_header header;
         ret =
             recv_from_bio(&sessions[status.source], request->bio, status.count,
-                &header, request->buf, request->count);
+                    &header, request->buf, request->count);
         if (ret) {
             handle_error_string("Error receiving DTLS message from bio");
             goto exit;
