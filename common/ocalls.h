@@ -1,6 +1,9 @@
 #ifndef __DISTRIBUTED_SGX_SORT_COMMON_OCALLS_H
 #define __DISTRIBUTED_SGX_SORT_COMMON_OCALLS_H
 
+#define OCALL_MPI_ANY_SOURCE (-2)
+#define OCALL_MPI_ANY_TAG (-3)
+
 typedef struct ocall_mpi_status {
     int count;
     int source;

@@ -733,6 +733,12 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
     if (status == MPI_TLS_STATUS_IGNORE) {
         status = &ignored_status;
     }
+    if (src == MPI_TLS_ANY_SOURCE) {
+        src = OCALL_MPI_ANY_SOURCE;
+    }
+    if (tag == MPI_TLS_ANY_TAG) {
+        tag = OCALL_MPI_ANY_TAG;
+    }
 
     ret = mbedtls_ssl_get_max_out_record_payload(&sessions[src].ssl);
     if (ret < 0) {
@@ -851,6 +857,13 @@ int mpi_tls_irecv_bytes(void *buf_, size_t count, int src, int tag,
         mpi_tls_request_t *request) {
     unsigned char *buf = buf_;
     int ret = -1;
+
+    if (src == MPI_TLS_ANY_SOURCE) {
+        src = OCALL_MPI_ANY_SOURCE;
+    }
+    if (tag == MPI_TLS_ANY_TAG) {
+        tag = OCALL_MPI_ANY_TAG;
+    }
 
     ret = mbedtls_ssl_get_max_out_record_payload(&sessions[src].ssl);
     if (ret < 0) {

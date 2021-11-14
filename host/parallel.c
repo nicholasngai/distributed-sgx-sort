@@ -87,6 +87,13 @@ int ocall_mpi_recv_bytes(unsigned char *buf, size_t count, int source,
         goto exit;
     }
 
+    if (source == OCALL_MPI_ANY_SOURCE) {
+        source = MPI_ANY_SOURCE;
+    }
+    if (tag == OCALL_MPI_ANY_TAG) {
+        tag = MPI_ANY_TAG;
+    }
+
     MPI_Status mpi_status;
     ret = MPI_Recv(buf, (int) count, MPI_UNSIGNED_CHAR, source, tag,
             MPI_COMM_WORLD, &mpi_status);
@@ -113,6 +120,13 @@ int ocall_mpi_try_recv_bytes(unsigned char *buf, size_t count, int source,
 
     MPI_Status mpi_status;
     int ret;
+
+    if (source == OCALL_MPI_ANY_SOURCE) {
+        source = MPI_ANY_SOURCE;
+    }
+    if (tag == OCALL_MPI_ANY_TAG) {
+        tag = MPI_ANY_TAG;
+    }
 
     /* Probe for an available message. */
     ret = MPI_Iprobe(source, tag, MPI_COMM_WORLD, flag, &mpi_status);
@@ -204,6 +218,13 @@ int ocall_mpi_irecv_bytes(size_t count, int source, int tag,
     if (count > INT_MAX) {
         handle_error_string("Count too large");
         return MPI_ERR_COUNT;
+    }
+
+    if (source == OCALL_MPI_ANY_SOURCE) {
+        source = MPI_ANY_SOURCE;
+    }
+    if (tag == OCALL_MPI_ANY_TAG) {
+        tag = MPI_ANY_TAG;
     }
 
     /* Allocate request. */

@@ -22,6 +22,8 @@ typedef struct mpi_tls_request {
 
 typedef ocall_mpi_status_t mpi_tls_status_t;
 
+#define MPI_TLS_ANY_SOURCE (-2)
+#define MPI_TLS_ANY_TAG (-3)
 #define MPI_TLS_STATUS_IGNORE ((mpi_tls_status_t *) 0)
 
 int mpi_tls_init(size_t world_rank, size_t world_size,
