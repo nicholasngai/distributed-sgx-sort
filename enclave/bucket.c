@@ -1075,8 +1075,8 @@ static int enclave_merge_send(int merger, const void *run_, size_t *run_idx,
     struct enclave_merge_stat stat;
     do {
         /* Get the next sequence of nodes starting at *RUN_IDX. */
-        for (size_t i = 0; i < MIN(run_len - *run_idx, ENCLAVE_MERGE_BUF_SIZE);
-                i++) {
+        size_t nodes_to_send = MIN(run_len - *run_idx, ENCLAVE_MERGE_BUF_SIZE);
+        for (size_t i = 0; i < nodes_to_send; i++) {
             ret = node_decrypt(key, &buf[i],
                     run + (i + *run_idx) * SIZEOF_ENCRYPTED_NODE,
                     i + *run_idx + run_start_idx);
@@ -1088,13 +1088,13 @@ static int enclave_merge_send(int merger, const void *run_, size_t *run_idx,
         }
 
         /* Mark dummy terminator if we reached the end. */
-        if (run_len - *run_idx < ENCLAVE_MERGE_BUF_SIZE) {
+        if (nodes_to_send < ENCLAVE_MERGE_BUF_SIZE) {
             buf[run_len - *run_idx].is_dummy = true;
+            nodes_to_send++;
         }
 
         /* Send the nodes to the recipient. */
-        ret = mpi_tls_send_bytes(buf, ENCLAVE_MERGE_BUF_SIZE * sizeof(*buf),
-                merger, 0);
+        ret = mpi_tls_send_bytes(buf, nodes_to_send * sizeof(*buf), merger, 0);
         if (ret) {
             handle_error_string("Error sending nodes to merge from %d to %d",
                     world_rank, merger);
