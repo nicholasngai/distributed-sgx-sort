@@ -725,8 +725,14 @@ exit:
     return ret;
 }
 
-int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag) {
+int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
+        mpi_tls_status_t *status) {
     int ret = -1;
+
+    mpi_tls_status_t ignored_status;
+    if (status == MPI_TLS_STATUS_IGNORE) {
+        status = &ignored_status;
+    }
 
     ret = mbedtls_ssl_get_max_out_record_payload(&sessions[src].ssl);
     if (ret < 0) {
@@ -752,16 +758,15 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag) {
     }
 
     /* Receive bio over MPI. */
-    ocall_mpi_status_t status;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result =
-        ocall_mpi_recv_bytes(&ret, bio, bio_len, src, tag, &status);
+        ocall_mpi_recv_bytes(&ret, bio, bio_len, src, tag, status);
     if (result != OE_OK) {
         handle_oe_error(ret, "ocall_mpi_recv_bytes");
         goto exit_free_bio;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ret = ocall_mpi_recv_bytes(bio, bio_len, src, tag, &status);
+    ret = ocall_mpi_recv_bytes(bio, bio_len, src, tag, status);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error receiving DTLS bytes");
@@ -769,8 +774,8 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag) {
     }
 
     ret =
-        recv_from_bio(&sessions[status.source], bio, status.count, &header, buf,
-                count);
+        recv_from_bio(&sessions[status->source], bio, status->count, &header,
+                buf, count);
     if (ret) {
         handle_error_string("Error receiving DTLS message from bio");
         goto exit_free_bio;
@@ -900,8 +905,13 @@ exit_free_bio:
     return ret;
 }
 
-int mpi_tls_wait(mpi_tls_request_t *request) {
+int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
     int ret;
+
+    mpi_tls_status_t ignored_status;
+    if (status == MPI_TLS_STATUS_IGNORE) {
+        status = &ignored_status;
+    }
 
     unsigned char *wait_bio;
     size_t wait_bio_len;
@@ -916,11 +926,10 @@ int mpi_tls_wait(mpi_tls_request_t *request) {
         break;
     }
 
-    ocall_mpi_status_t status;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result =
         ocall_mpi_wait(&ret, wait_bio, wait_bio_len, &request->mpi_request,
-                &status);
+                status);
     if (result != OE_OK) {
         handle_oe_error(result, "ocall_mpi_wait");
         ret = result;
@@ -928,7 +937,7 @@ int mpi_tls_wait(mpi_tls_request_t *request) {
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ret =
-        ocall_mpi_wait(wait_bio, wait_bio_len, &request->mpi_request, &status);
+        ocall_mpi_wait(wait_bio, wait_bio_len, &request->mpi_request, status);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error waiting on request");
@@ -942,8 +951,8 @@ int mpi_tls_wait(mpi_tls_request_t *request) {
     case MPI_TLS_RECV: {
         struct mpi_tls_frag_header header;
         ret =
-            recv_from_bio(&sessions[status.source], request->bio, status.count,
-                    &header, request->buf, request->count);
+            recv_from_bio(&sessions[status->source], request->bio,
+                    status->count, &header, request->buf, request->count);
         if (ret) {
             handle_error_string("Error receiving DTLS message from bio");
             goto exit;

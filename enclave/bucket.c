@@ -601,14 +601,14 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
         }
 
         /* Wait for count and bucket to come in. */
-        ret = mpi_tls_wait(&count_request);
+        ret = mpi_tls_wait(&count_request, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string(
                     "Error waiting on receive for count1 into %d from %d",
                     world_rank, nonlocal_rank);
             goto exit;
         }
-        ret = mpi_tls_wait(&bucket_request);
+        ret = mpi_tls_wait(&bucket_request, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string(
                     "Error waiting on receive for bucket into %d from %d",
@@ -663,6 +663,7 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     ret = 0;
 
 exit:
+
     return ret;
 }
 
@@ -1102,7 +1103,9 @@ static int enclave_merge_send(int merger, const void *run_, size_t *run_idx,
         }
 
         /* Receive the next stat. */
-        ret = mpi_tls_recv_bytes(&stat, sizeof(stat), merger, 0);
+        ret =
+            mpi_tls_recv_bytes(&stat, sizeof(stat), merger, 0,
+                MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string(
                     "Error receiving next merge action into %d from %d",
@@ -1155,7 +1158,8 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
             }
         } else {
             /* Receive node sent from enclave_merge_send. */
-            ret = mpi_tls_recv_bytes(&buf[i], sizeof(buf[i]), i, 0);
+            ret = mpi_tls_recv_bytes(&buf[i], sizeof(buf[i]), i, 0,
+                    MPI_TLS_STATUS_IGNORE);
             if (ret) {
                 handle_error_string(
                         "Error receiving node to merge into %d from %d",
@@ -1234,7 +1238,8 @@ static int enclave_merge_recv(void *dest_, size_t dest_len,
                     goto exit_free_merge_indices;
                 }
                 ret = mpi_tls_recv_bytes(&buf[lowest_idx],
-                        sizeof(buf[lowest_idx]), lowest_idx, 0);
+                        sizeof(buf[lowest_idx]), lowest_idx, 0,
+                        MPI_TLS_STATUS_IGNORE);
                 if (ret) {
                     handle_error_string(
                             "Error receiving next node to merge into %d from %d",

@@ -253,7 +253,7 @@ static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
         }
 
         /* Wait for received nodes to come in. */
-        ret = mpi_tls_wait(&request);
+        ret = mpi_tls_wait(&request, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string("Error waiting on receive for node bytes");
             return;

@@ -20,15 +20,20 @@ typedef struct mpi_tls_request {
     void *bio;
 } mpi_tls_request_t;
 
+typedef ocall_mpi_status_t mpi_tls_status_t;
+
+#define MPI_TLS_STATUS_IGNORE ((mpi_tls_status_t *) 0)
+
 int mpi_tls_init(size_t world_rank, size_t world_size,
         mbedtls_entropy_context *entropy);
 void mpi_tls_free(void);
 int mpi_tls_send_bytes(const void *buf, size_t count, int dest, int tag);
-int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag);
+int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
+        ocall_mpi_status_t *status);
 int mpi_tls_isend_bytes(const void *buf, size_t count, int dest, int tag,
         mpi_tls_request_t *request);
 int mpi_tls_irecv_bytes(void *buf, size_t count, int src, int tag,
         mpi_tls_request_t *request);
-int mpi_tls_wait(mpi_tls_request_t *request);
+int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status);
 
 #endif /* distributed-sgx-sort/enclave/mpi_tls.h */
