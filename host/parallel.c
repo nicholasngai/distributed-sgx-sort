@@ -13,6 +13,7 @@
 #include "common/error.h"
 #include "common/node_t.h"
 #include "common/ocalls.h"
+#include "common/util.h"
 #include "enclave/bucket.h"
 #include "host/error.h"
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
@@ -560,9 +561,18 @@ int main(int argc, char **argv) {
         case SORT_BITONIC:
             arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE);
             break;
-        case SORT_BUCKET:
-            arr = malloc(MAX(local_length, BUCKET_SIZE) * SIZEOF_ENCRYPTED_NODE * 4);
+        case SORT_BUCKET: {
+            size_t num_buckets =
+                MAX(next_pow2l(length) * 2 / BUCKET_SIZE, world_size * 2);
+            size_t local_num_buckets =
+                num_buckets * (world_rank + 1) / world_size
+                    - num_buckets * world_rank / world_size;
+            arr =
+                malloc(
+                        local_num_buckets * BUCKET_SIZE * SIZEOF_ENCRYPTED_NODE
+                            * 4);
             break;
+        }
     }
     if (!arr) {
         perror("malloc arr");

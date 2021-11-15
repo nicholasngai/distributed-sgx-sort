@@ -52,37 +52,6 @@ static struct {
 } cache_meta[CACHE_SETS];
 unsigned int cache_counter;
 
-/* Helpers. */
-
-static long next_pow2l(long x) {
-#ifdef __GNUC__
-    long next = 1 << (sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1);
-    if (next < x) {
-        next <<= 1;
-    }
-    return next;
-#else
-    long next = 1;
-    while (next < x) {
-        next <<= 1;
-    }
-    return next;
-#endif
-}
-
-static long log2li(long x) {
-#ifdef __GNUC__
-    return sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1;
-#else
-    long log = -1;
-    while (x) {
-        log++;
-        x >>= 1;
-    }
-    return log;
-#endif
-}
-
 static int get_bucket_rank(size_t bucket) {
     size_t num_buckets =
         MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size * 2);
