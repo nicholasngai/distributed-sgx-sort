@@ -621,7 +621,8 @@ exit:
 
 static int recv_from_bio(struct mpi_tls_session *session,
         const unsigned char *bio, size_t bio_len,
-        struct mpi_tls_frag_header *header, void *out_, size_t out_len) {
+        struct mpi_tls_frag_header *header, void *out_, size_t out_len,
+        size_t *bytes_read) {
     unsigned char *out = out_;
     int ret;
 
@@ -646,9 +647,12 @@ static int recv_from_bio(struct mpi_tls_session *session,
     }
 
     /* Receive data. */
-    while (out_len) {
+    *bytes_read = 0;
+    size_t bytes_remaining = out_len;
+    while (bytes_remaining) {
         ret =
-            mbedtls_ssl_read(&session->ssl, out, MAX(out_len, max_payload_len));
+            mbedtls_ssl_read(&session->ssl, out,
+                    MAX(bytes_remaining, max_payload_len));
         if (ret == MBEDTLS_ERR_SSL_WANT_READ) {
             break;
         }
@@ -657,15 +661,17 @@ static int recv_from_bio(struct mpi_tls_session *session,
             goto exit;
         }
 
-        if ((size_t) ret > out_len) {
+        if ((size_t) ret > bytes_remaining) {
             handle_error_string("Message is longer than buffer");
             goto exit;
         }
         out += ret;
-        out_len -= ret;
+        bytes_remaining -= ret;
     }
 
     spinlock_unlock(&session->lock);
+
+    *bytes_read = out_len - bytes_remaining;
 
     ret = 0;
 
@@ -740,13 +746,16 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
         tag = OCALL_MPI_ANY_TAG;
     }
 
-    ret = mbedtls_ssl_get_max_out_record_payload(&sessions[src].ssl);
+    ret = mbedtls_ssl_get_max_out_record_payload(
+            &sessions[src != OCALL_MPI_ANY_SOURCE ? src : world_rank == 0].ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
         goto exit;
     }
     size_t max_payload_len = ret;
-    ret = mbedtls_ssl_get_record_expansion(&sessions[src].ssl);
+
+    ret = mbedtls_ssl_get_record_expansion(
+            &sessions[src != OCALL_MPI_ANY_SOURCE ? src : world_rank == 0].ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_record_expansion");
         goto exit;
@@ -779,13 +788,15 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
         goto exit;
     }
 
+    size_t bytes_read;
     ret =
         recv_from_bio(&sessions[status->source], bio, status->count, &header,
-                buf, count);
+                buf, count, &bytes_read);
     if (ret) {
         handle_error_string("Error receiving DTLS message from bio");
         goto exit_free_bio;
     }
+    status->count = bytes_read;
 
 exit_free_bio:
     free(bio);
@@ -816,6 +827,8 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
         goto exit;
     }
 
+    request->type = MPI_TLS_SEND;
+
     /* Send message to bio. */
     size_t bio_used;
     ret =
@@ -837,8 +850,8 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ret =
-        ocall_mpi_send_bytes(request->bio, bio_used, dest, tag,
-                request->mpi_request);
+        ocall_mpi_isend_bytes(request->bio, bio_used, dest, tag,
+                &request->mpi_request);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error sending DTLS bytes");
@@ -858,26 +871,28 @@ int mpi_tls_irecv_bytes(void *buf_, size_t count, int src, int tag,
     unsigned char *buf = buf_;
     int ret = -1;
 
-    if (src == MPI_TLS_ANY_SOURCE) {
-        src = OCALL_MPI_ANY_SOURCE;
-    }
-    if (tag == MPI_TLS_ANY_TAG) {
-        tag = OCALL_MPI_ANY_TAG;
-    }
-
-    ret = mbedtls_ssl_get_max_out_record_payload(&sessions[src].ssl);
+    ret = mbedtls_ssl_get_max_out_record_payload(
+            &sessions[src != OCALL_MPI_ANY_SOURCE ? src : world_rank == 0].ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
         goto exit;
     }
     size_t max_payload_len = ret;
 
-    ret = mbedtls_ssl_get_record_expansion(&sessions[src].ssl);
+    ret = mbedtls_ssl_get_record_expansion(
+            &sessions[src != OCALL_MPI_ANY_SOURCE ? src : world_rank == 0].ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_record_expansion");
         goto exit;
     }
     size_t max_record_len = max_payload_len + ret;
+
+    if (src == MPI_TLS_ANY_SOURCE) {
+        src = OCALL_MPI_ANY_SOURCE;
+    }
+    if (tag == MPI_TLS_ANY_TAG) {
+        tag = OCALL_MPI_ANY_TAG;
+    }
 
     struct mpi_tls_frag_header header; // TODO
     size_t num_frags = CEIL_DIV(count, max_payload_len) + 1;
@@ -963,13 +978,16 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
 
     case MPI_TLS_RECV: {
         struct mpi_tls_frag_header header;
+        size_t bytes_read;
         ret =
             recv_from_bio(&sessions[status->source], request->bio,
-                    status->count, &header, request->buf, request->count);
+                    status->count, &header, request->buf, request->count,
+                    &bytes_read);
         if (ret) {
             handle_error_string("Error receiving DTLS message from bio");
             goto exit;
         }
+        status->count = bytes_read;
         break;
     }
     }
@@ -1019,7 +1037,7 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ret =
-        ocall_mpi_wait(wait_bio, wait_bio_len, count, mpi_requests, index,
+        ocall_mpi_waitany(wait_bio, wait_bio_len, count, mpi_requests, index,
                 status);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
@@ -1033,13 +1051,16 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
 
     case MPI_TLS_RECV: {
         struct mpi_tls_frag_header header;
+        size_t bytes_read;
         ret =
             recv_from_bio(&sessions[status->source], wait_bio, status->count,
-                    &header, requests[*index].buf, requests[*index].count);
+                    &header, requests[*index].buf, requests[*index].count,
+                    &bytes_read);
         if (ret) {
             handle_error_string("Error receiving DTLS message from bio");
             goto exit;
         }
+        status->count = bytes_read;
         break;
     }
     }
