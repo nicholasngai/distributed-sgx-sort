@@ -1,4 +1,5 @@
 #include "enclave/bucket.h"
+#include <assert.h>
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
@@ -1440,11 +1441,13 @@ static int distributed_sample_partition(void *arr_, void *out_,
      * for REQUESTS[WORLD_RANK], which is our receive request. */
     for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
-            if (num_received < src_local_length) {
+            size_t nodes_to_recv =
+                MIN(src_local_length - num_received, SAMPLE_PARTITION_BUF_SIZE);
+            if (nodes_to_recv > 0) {
                 ret =
                     mpi_tls_irecv_bytes(&partition_buf[i],
-                            sizeof(partition_buf[i]), MPI_TLS_ANY_SOURCE, 0,
-                            &requests[requests_len]);
+                            nodes_to_recv * sizeof(*partition_buf[i]),
+                            MPI_TLS_ANY_SOURCE, 0, &requests[requests_len]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
                     goto exit_free_buf;
@@ -1467,7 +1470,7 @@ static int distributed_sample_partition(void *arr_, void *out_,
                                 sample_scan_idxs[i] + j + local_start);
                     if (ret) {
                         handle_error_string("Error decrypting node %lu",
-                                sample_scan_idxs[i] + j + local_start);
+                                sample_scan_idxs[i] + j);
                         goto exit_free_buf;
                     }
                 }
@@ -1516,13 +1519,14 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 }
             }
             num_received += req_num_received;
+
             size_t nodes_to_recv =
                 MIN(src_local_length - num_received, SAMPLE_PARTITION_BUF_SIZE);
             keep_rank = nodes_to_recv > 0;
             if (keep_rank) {
                 ret =
-                    mpi_tls_irecv_bytes(&partition_buf[index],
-                            nodes_to_recv * sizeof(*partition_buf[index]),
+                    mpi_tls_irecv_bytes(&partition_buf[world_rank],
+                            nodes_to_recv * sizeof(*partition_buf[world_rank]),
                             MPI_TLS_ANY_SOURCE, 0, &requests[index]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
@@ -1560,8 +1564,9 @@ static int distributed_sample_partition(void *arr_, void *out_,
 
                 /* Asynchronously send to enclave. */
                 ret =
-                    mpi_tls_isend_bytes(&partition_buf[index],
-                            nodes_to_send * sizeof(*partition_buf[index]),
+                    mpi_tls_isend_bytes(&partition_buf[request_rank],
+                            nodes_to_send
+                                * sizeof(*partition_buf[request_rank]),
                             request_rank, 0, &requests[index]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
@@ -1579,6 +1584,8 @@ static int distributed_sample_partition(void *arr_, void *out_,
             requests_len--;
         }
     }
+
+    assert(num_received == src_local_length);
 
 exit_free_buf:
     free(partition_buf);
