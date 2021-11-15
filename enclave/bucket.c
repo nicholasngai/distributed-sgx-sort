@@ -22,7 +22,7 @@
 #define CACHE_ASSOCIATIVITY 64
 #define CACHE_BUCKETS (CACHE_SETS * CACHE_ASSOCIATIVITY)
 
-#define ENCLAVE_MERGE_BUF_SIZE 512
+#define SAMPLE_PARTITION_BUF_SIZE 512
 
 static size_t total_length;
 
@@ -1072,7 +1072,7 @@ static int node_sample_comparator(const node_t *a, const struct sample *b) {
 
 static int distributed_quickselect_helper(void *arr, size_t local_length,
         size_t local_start, size_t *targets, struct sample *samples,
-        size_t num_targets, size_t left, size_t right) {
+        size_t *sample_idxs, size_t num_targets, size_t left, size_t right) {
     int ret;
 
     /* Get the next master by choosing the lowest node with a non-empty
@@ -1333,10 +1333,11 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     bool found_target = geq_target_idx < num_targets && *geq_target == cur_pivot;
     size_t gt_target_idx = geq_target_idx + found_target;
 
-    /* If we found a target, set the sample. */
+    /* If we found a target, set the sample and its index. */
     if (found_target) {
         size_t i = geq_target - targets;
         samples[i] = pivot;
+        sample_idxs[i] = partition_right;
     }
 
     /* Set up next iteration(s) if we have targets on either side. If the next
@@ -1347,7 +1348,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         /* Targets less than pivot. */
         ret =
             distributed_quickselect_helper(arr, local_length, local_start,
-                    targets, samples, geq_target_idx, left, partition_right);
+                    targets, samples, sample_idxs, geq_target_idx, left,
+                    partition_right);
         if (ret) {
             goto exit;
         }
@@ -1357,7 +1359,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         ret =
             distributed_quickselect_helper(arr, local_length, local_start,
                     targets + gt_target_idx, samples + gt_target_idx,
-                    num_targets - gt_target_idx, partition_left, right);
+                    sample_idxs + gt_target_idx, num_targets - gt_target_idx,
+                    partition_left, right);
         if (ret) {
             goto exit;
         }
@@ -1374,10 +1377,10 @@ exit:
  * sorted array. */
 static int distributed_quickselect(void *arr, size_t local_length,
         size_t local_start, size_t *targets, struct sample *samples,
-        size_t num_targets) {
+        size_t *sample_idxs, size_t num_targets) {
     int ret =
         distributed_quickselect_helper(arr, local_length, local_start, targets,
-                samples, num_targets, 0, local_length);
+                samples, sample_idxs, num_targets, 0, local_length);
     if (ret) {
         handle_error_string("Error in distributed quickselect");
         goto exit;
@@ -1388,8 +1391,13 @@ exit:
 }
 
 /* Performs a non-oblivious samplesort across all enclaves. */
-static int distributed_sample_partition(void *arr, void *out,
+static int distributed_sample_partition(void *arr_, void *out_,
         size_t local_length, size_t local_start, size_t total_length) {
+    unsigned char *arr = arr_;
+    unsigned char *out = out_;
+    size_t src_local_start = total_length * world_rank / world_size;
+    size_t src_local_length =
+        total_length * (world_rank + 1) / world_size - src_local_start;
     int ret;
 
     if (world_size == 1) {
@@ -1399,20 +1407,213 @@ static int distributed_sample_partition(void *arr, void *out,
     /* Construct samples to and pass to quickselect. We want an even
      * distribution of elements across all ranks. */
     size_t sample_targets[world_size - 1];
-    struct sample samples[world_size - 1];
     for (size_t i = 0; i < (size_t) world_size - 1; i++) {
         sample_targets[i] = total_length * (i + 1) / world_size;
     }
+    struct sample samples[world_size - 1];
+    size_t sample_idxs[world_size];
+    size_t sample_scan_idxs[world_size];
+    mpi_tls_request_t requests[world_size];
+    int request_ranks[world_size];
+    size_t requests_len = 0;
     ret =
         distributed_quickselect(arr, local_length, local_start, sample_targets,
-                samples, world_size - 1);
+                samples, sample_idxs, world_size - 1);
+    if (ret) {
+        handle_error_string("Error in distributed quickselect");
+        goto exit;
+    }
+    memcpy(&sample_scan_idxs[1], sample_idxs,
+            (world_size - 1) * sizeof(*sample_scan_idxs));
+    sample_idxs[world_size - 1] = local_length;
+    sample_scan_idxs[0] = 0;
 
-    if (world_rank == 0) {
-        for (size_t i = 0; i < (size_t) world_size - 1; i++) {
-            printf("%lu\n", samples[i].key);
+    /* Send elements to their corresponding enclaves. The elements in the array
+     * should already be partitioned. */
+
+    /* Allocate buffer for decrypted partitions. */
+    node_t (*partition_buf)[SAMPLE_PARTITION_BUF_SIZE] =
+        malloc(world_size * sizeof(*partition_buf));
+    if (!partition_buf) {
+        perror("malloc partition send buffer");
+        ret = errno;
+        goto exit;
+    }
+
+    /* Copy own partition's elements to the output. */
+    size_t num_received =
+        sample_idxs[world_rank] - sample_scan_idxs[world_rank];
+    for (size_t i = 0; i < num_received; i++) {
+        node_t node;
+        ret =
+            node_decrypt(key, &node,
+                    arr
+                        + (sample_scan_idxs[world_rank] + i)
+                            * SIZEOF_ENCRYPTED_NODE,
+                    sample_scan_idxs[world_rank] + i + local_start);
+        if (ret) {
+            handle_error_string("Error decrypting node %lu",
+                    sample_scan_idxs[world_rank] + i + local_start);
+            goto exit_free_buf;
+        }
+        ret =
+            node_encrypt(key, &node, out + i * SIZEOF_ENCRYPTED_NODE,
+                    i + src_local_start);
+        if (ret) {
+            handle_error_string("Error encrypting node %lu",
+                    i + src_local_start);
+            goto exit_free_buf;
+        }
+    }
+    sample_scan_idxs[world_rank] = sample_idxs[world_rank];
+
+    /* Construct initial requests. REQUESTS is used for all send requests except
+     * for REQUESTS[WORLD_RANK], which is our receive request. */
+    for (int i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            if (num_received < src_local_length) {
+                ret =
+                    mpi_tls_irecv_bytes(&partition_buf[i],
+                            sizeof(partition_buf[i]), MPI_TLS_ANY_SOURCE, 0,
+                            &requests[requests_len]);
+                if (ret) {
+                    handle_error_string("Error receiving partitioned data");
+                    goto exit_free_buf;
+                }
+                request_ranks[requests_len] = i;
+                requests_len++;
+            }
+        } else {
+            if (sample_scan_idxs[i] < sample_idxs[i]) {
+                /* Decrypt nodes. */
+                size_t nodes_to_send =
+                    MIN(sample_idxs[i] - sample_scan_idxs[i],
+                            SAMPLE_PARTITION_BUF_SIZE);
+                for (size_t j = 0; j < nodes_to_send; j++) {
+                    ret =
+                        node_decrypt(key, &partition_buf[i][j],
+                                arr
+                                    + (sample_scan_idxs[i] + j)
+                                        * SIZEOF_ENCRYPTED_NODE,
+                                sample_scan_idxs[i] + j + local_start);
+                    if (ret) {
+                        handle_error_string("Error decrypting node %lu",
+                                sample_scan_idxs[i] + j + local_start);
+                        goto exit_free_buf;
+                    }
+                }
+                sample_scan_idxs[i] += nodes_to_send;
+
+                /* Asynchronously send to enclave. */
+                ret =
+                    mpi_tls_isend_bytes(&partition_buf[i],
+                            nodes_to_send * sizeof(*partition_buf[i]), i, 0,
+                            &requests[requests_len]);
+                if (ret) {
+                    handle_error_string("Error sending partitioned data");
+                    goto exit_free_buf;
+                }
+
+                request_ranks[requests_len] = i;
+                requests_len++;
+            }
         }
     }
 
+    /* Get completed requests in a loop. */
+    while (requests_len) {
+        size_t index;
+        mpi_tls_status_t status;
+        ret = mpi_tls_waitany(requests_len, requests, &index, &status);
+        if (ret) {
+            handle_error_string("Error waiting on partition requests");
+            goto exit_free_buf;
+        }
+        int request_rank = request_ranks[index];
+        bool keep_rank;
+        if (request_rank == world_rank) {
+            /* Receive request completed. */
+            size_t req_num_received =
+                status.count / sizeof(*partition_buf[world_rank]);
+            for (size_t i = 0; i < req_num_received; i++) {
+                ret =
+                    node_encrypt(key, &partition_buf[world_rank][i],
+                            out + (num_received + i) * SIZEOF_ENCRYPTED_NODE,
+                            num_received + i + src_local_start);
+                if (ret) {
+                    handle_error_string("Error encrypting node %lu",
+                            num_received + src_local_start);
+                    goto exit_free_buf;
+                }
+            }
+            num_received += req_num_received;
+            size_t nodes_to_recv =
+                MIN(src_local_length - num_received, SAMPLE_PARTITION_BUF_SIZE);
+            keep_rank = nodes_to_recv > 0;
+            if (keep_rank) {
+                ret =
+                    mpi_tls_irecv_bytes(&partition_buf[index],
+                            nodes_to_recv * sizeof(*partition_buf[index]),
+                            MPI_TLS_ANY_SOURCE, 0, &requests[index]);
+                if (ret) {
+                    handle_error_string("Error receiving partitioned data");
+                    goto exit_free_buf;
+                }
+            }
+        } else {
+            /* Send request completed. */
+
+            keep_rank =
+                sample_idxs[request_rank] - sample_scan_idxs[request_rank] > 0;
+
+            if (keep_rank) {
+                /* Decrypt nodes. */
+                size_t nodes_to_send =
+                    MIN(sample_idxs[request_rank]
+                                - sample_scan_idxs[request_rank],
+                            SAMPLE_PARTITION_BUF_SIZE);
+                for (size_t i = 0; i < nodes_to_send; i++) {
+                    ret =
+                        node_decrypt(key, &partition_buf[request_rank][i],
+                                arr +
+                                    (sample_scan_idxs[request_rank] + i)
+                                        * SIZEOF_ENCRYPTED_NODE,
+                                sample_scan_idxs[request_rank]
+                                    + i + local_start);
+                    if (ret) {
+                        handle_error_string("Error decrypting node %lu",
+                                sample_scan_idxs[request_rank] + i
+                                    + local_start);
+                        goto exit_free_buf;
+                    }
+                }
+                sample_scan_idxs[request_rank] += nodes_to_send;
+
+                /* Asynchronously send to enclave. */
+                ret =
+                    mpi_tls_isend_bytes(&partition_buf[index],
+                            nodes_to_send * sizeof(*partition_buf[index]),
+                            request_rank, 0, &requests[index]);
+                if (ret) {
+                    handle_error_string("Error sending partitioned data");
+                    goto exit_free_buf;
+                }
+            }
+        }
+
+        if (!keep_rank) {
+            /* Remove the request from the array. */
+            memmove(&requests[index], &requests[index + 1],
+                    (requests_len - (index + 1)) * sizeof(*requests));
+            memmove(&request_ranks[index], &request_ranks[index + 1],
+                    (requests_len - (index + 1)) * sizeof(*request_ranks));
+            requests_len--;
+        }
+    }
+
+exit_free_buf:
+    free(partition_buf);
+exit:
     return ret;
 }
 
@@ -1430,7 +1631,6 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     total_length = length;
 
     size_t src_local_start = total_length * world_rank / world_size;
-
     size_t src_local_length =
         total_length * (world_rank + 1) / world_size - src_local_start;
     size_t num_buckets = get_local_bucket_start(world_size);
@@ -1509,6 +1709,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
                 handle_error_string("Error in merge split range at level %lu",
                         bit_idx);
                 goto exit;
+
             }
         }
     }
@@ -1586,25 +1787,31 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
 
     /* Partition permuted data such that each enclave has its own partition of
      * element, e.g. enclave 0 has the lowest elements, then enclave 1, etc. */
+    unsigned char *partitioned_out =
+        arr + local_length * 2 * SIZEOF_ENCRYPTED_NODE;
     ret =
-        distributed_sample_partition(arr,
-                arr + src_local_length * 2 * SIZEOF_ENCRYPTED_NODE,
-                compress_len, local_start, length);
+        distributed_sample_partition(arr, partitioned_out, compress_len,
+                local_start, length);
     if (ret) {
         handle_error_string("Error in distributed sample partitioning");
         goto exit;
     }
 
-    // TODO Sort local partitions.
-
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-    struct timespec time_local_sort;
-    if (clock_gettime(CLOCK_REALTIME, &time_local_sort)) {
+    struct timespec time_sample_partition;
+    if (clock_gettime(CLOCK_REALTIME, &time_sample_partition)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
+    /* Sort local partitions. */
+    ret = mergesort(partitioned_out, arr, src_local_length, src_local_start);
+    if (ret) {
+        handle_error_string("Error in non-oblivious local sort");
+        goto exit;
+    }
 
     /* Release threads. */
     thread_release_all();
@@ -1620,16 +1827,16 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     if (world_rank == 0) {
-        printf("assign_ids   : %f\n",
+        printf("assign_ids       : %f\n",
                 get_time_difference(&time_start, &time_assign_ids));
-        printf("merge_split  : %f\n",
+        printf("merge_split      : %f\n",
                 get_time_difference(&time_assign_ids, &time_merge_split));
-        printf("compression  : %f\n",
+        printf("compression      : %f\n",
                 get_time_difference(&time_merge_split, &time_compress));
-        printf("local_sort   : %f\n",
-                get_time_difference(&time_compress, &time_local_sort));
-        printf("enclave_merge: %f\n",
-                get_time_difference(&time_local_sort, &time_finish));
+        printf("sample_partition : %f\n",
+                get_time_difference(&time_compress, &time_sample_partition));
+        printf("local_sort       : %f\n",
+                get_time_difference(&time_sample_partition, &time_finish));
     }
 #endif
 
