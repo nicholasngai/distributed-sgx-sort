@@ -39,6 +39,13 @@ enclave {
                 size_t count,
                 [in] ocall_mpi_request_t *request,
                 [out] ocall_mpi_status_t *status);
+        int ocall_mpi_waitany(
+                [out, count=bufcount] unsigned char *buf,
+                size_t bufcount,
+                size_t count,
+                [in, count=count] ocall_mpi_request_t *requests,
+                [out] size_t *index,
+                [out] ocall_mpi_status_t *status);
         int ocall_mpi_try_wait(
                 [out, count=count] unsigned char *buf,
                 size_t count,

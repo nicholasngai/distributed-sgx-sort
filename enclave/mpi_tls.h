@@ -37,5 +37,7 @@ int mpi_tls_isend_bytes(const void *buf, size_t count, int dest, int tag,
 int mpi_tls_irecv_bytes(void *buf, size_t count, int src, int tag,
         mpi_tls_request_t *request);
 int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status);
+int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
+        mpi_tls_status_t *status);
 
 #endif /* distributed-sgx-sort/enclave/mpi_tls.h */

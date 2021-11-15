@@ -978,3 +978,73 @@ exit:
     free(request->bio);
     return ret;
 }
+
+int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
+        mpi_tls_status_t *status) {
+    int ret;
+
+    mpi_tls_status_t ignored_status;
+    if (status == MPI_TLS_STATUS_IGNORE) {
+        status = &ignored_status;
+    }
+
+    unsigned char *wait_bio = NULL;
+    size_t wait_bio_len = 0;
+    for (size_t i = 0; i < count; i++) {
+        switch (requests[i].type) {
+        case MPI_TLS_SEND:
+            break;
+        case MPI_TLS_RECV:
+            if (requests[i].bio_len > wait_bio_len) {
+                wait_bio = requests[i].bio;
+                wait_bio_len = requests[i].bio_len;
+            }
+            break;
+        }
+    }
+
+    ocall_mpi_request_t mpi_requests[count];
+    for (size_t i = 0; i < count; i++) {
+        mpi_requests[i] = requests[i].mpi_request;
+    }
+
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    oe_result_t result =
+        ocall_mpi_waitany(&ret, wait_bio, wait_bio_len, count, mpi_requests,
+                index, status);
+    if (result != OE_OK) {
+        handle_oe_error(result, "ocall_mpi_wait");
+        ret = result;
+        goto exit;
+    }
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    ret =
+        ocall_mpi_wait(wait_bio, wait_bio_len, count, mpi_requests, index,
+                status);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    if (ret) {
+        handle_error_string("Error waiting on request");
+        goto exit;
+    }
+
+    switch (requests[*index].type) {
+    case MPI_TLS_SEND:
+        break;
+
+    case MPI_TLS_RECV: {
+        struct mpi_tls_frag_header header;
+        ret =
+            recv_from_bio(&sessions[status->source], wait_bio, status->count,
+                    &header, requests[*index].buf, requests[*index].count);
+        if (ret) {
+            handle_error_string("Error receiving DTLS message from bio");
+            goto exit;
+        }
+        break;
+    }
+    }
+
+exit:
+    free(requests[*index].bio);
+    return ret;
+}

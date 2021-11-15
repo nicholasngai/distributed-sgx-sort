@@ -290,6 +290,43 @@ exit_free_request:
     return ret;
 }
 
+int ocall_mpi_waitany(unsigned char *buf, size_t bufcount, size_t count,
+        ocall_mpi_request_t *requests, size_t *index,
+        ocall_mpi_status_t *status) {
+    int ret;
+
+    MPI_Request mpi_requests[count];
+    for (size_t i = 0; i < count; i++) {
+        mpi_requests[i] = requests[i]->mpi_request;
+    }
+
+    MPI_Status mpi_status;
+    int mpi_index;
+    ret = MPI_Waitany(count, mpi_requests, &mpi_index, &mpi_status);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Waitany");
+        goto exit_free_request;
+    }
+    *index = mpi_index;
+
+    /* Populate status. */
+    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
+    if (ret) {
+        handle_mpi_error(ret, "MPI_Get_count");
+        goto exit_free_request;
+    }
+    status->source = mpi_status.MPI_SOURCE;
+    status->tag = mpi_status.MPI_TAG;
+
+    /* Copy bytes to output. */
+    memcpy(buf, requests[*index]->buf, MIN(bufcount, (size_t) status->count));
+
+exit_free_request:
+    free(requests[*index]->buf);
+    free(requests[*index]);
+    return ret;
+}
+
 int ocall_mpi_try_wait(unsigned char *buf, size_t count,
         ocall_mpi_request_t *request, int *flag, ocall_mpi_status_t *status) {
     int ret;
