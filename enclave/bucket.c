@@ -1330,10 +1330,11 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     size_t *geq_target =
         bsearch_ge(&cur_pivot, targets, num_targets, sizeof(*targets), comp_ul);
     size_t geq_target_idx = (size_t) (geq_target - targets);
-    size_t gt_target_idx = geq_target_idx + (*geq_target == cur_pivot);
+    bool found_target = geq_target_idx < num_targets && *geq_target == cur_pivot;
+    size_t gt_target_idx = geq_target_idx + found_target;
 
     /* If we found a target, set the sample. */
-    if (*geq_target == cur_pivot) {
+    if (found_target) {
         size_t i = geq_target - targets;
         samples[i] = pivot;
     }
