@@ -3,11 +3,41 @@
 
 #include <stddef.h>
 #include <mbedtls/entropy.h>
+#include "common/ocalls.h"
+
+enum mpi_tls_request_type {
+    MPI_TLS_SEND,
+    MPI_TLS_RECV,
+};
+
+typedef struct mpi_tls_request {
+    enum mpi_tls_request_type type;
+    ocall_mpi_request_t mpi_request;
+
+    void *buf;
+    size_t count;
+    size_t bio_len;
+    void *bio;
+} mpi_tls_request_t;
+
+typedef ocall_mpi_status_t mpi_tls_status_t;
+
+#define MPI_TLS_ANY_SOURCE (-2)
+#define MPI_TLS_ANY_TAG (-3)
+#define MPI_TLS_STATUS_IGNORE ((mpi_tls_status_t *) 0)
 
 int mpi_tls_init(size_t world_rank, size_t world_size,
         mbedtls_entropy_context *entropy);
 void mpi_tls_free(void);
 int mpi_tls_send_bytes(const void *buf, size_t count, int dest, int tag);
-int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag);
+int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
+        ocall_mpi_status_t *status);
+int mpi_tls_isend_bytes(const void *buf, size_t count, int dest, int tag,
+        mpi_tls_request_t *request);
+int mpi_tls_irecv_bytes(void *buf, size_t count, int src, int tag,
+        mpi_tls_request_t *request);
+int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status);
+int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
+        mpi_tls_status_t *status);
 
 #endif /* distributed-sgx-sort/enclave/mpi_tls.h */

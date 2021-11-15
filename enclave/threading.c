@@ -29,6 +29,9 @@ void thread_work_push(struct thread_work *work) {
             // Do nothing.
             break;
         case THREAD_WORK_ITER:
+            if (!work->iter.count) {
+                return;
+            }
             work->iter.curr = 0;
             work->iter.num_remaining = work->iter.count;
             break;

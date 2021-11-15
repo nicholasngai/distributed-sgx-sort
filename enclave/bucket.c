@@ -555,6 +555,32 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     /* If remote, send the current count and then our local buckets. Then,
      * receive the sent count and remote buckets from the other node. */
     if (!bucket1_local || !bucket2_local) {
+        /* Post receive for count. */
+        mpi_tls_request_t count_request;
+        size_t remote_count1;
+        ret = mpi_tls_irecv_bytes(&remote_count1, sizeof(remote_count1),
+                nonlocal_rank, nonlocal_bucket_idx, &count_request);
+        if (ret) {
+            handle_error_string("Error receiving count1 into %d from %d",
+                    world_rank, nonlocal_rank);
+            goto exit;
+        }
+
+        /* Post receive for remote bucket. */
+        mpi_tls_request_t bucket_request;
+        ret = mpi_tls_irecv_bytes(buffer, sizeof(*buffer) * BUCKET_SIZE,
+                nonlocal_rank, nonlocal_bucket_idx, &bucket_request);
+        if (ret) {
+            handle_error_string("Error receiving remote bucket into %d from %d",
+                    world_rank, nonlocal_rank);
+            goto exit;
+        }
+        if (bucket1_local) {
+            bucket2 = buffer;
+        } else {
+            bucket1 = buffer;
+        }
+
         /* Send count. */
         ret = mpi_tls_send_bytes(&count1, sizeof(count1), nonlocal_rank,
                 local_bucket_idx);
@@ -575,28 +601,20 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
             goto exit;
         }
 
-        /* Receive count. */
-        size_t remote_count1;
-        ret = mpi_tls_recv_bytes(&remote_count1, sizeof(remote_count1),
-                nonlocal_rank, nonlocal_bucket_idx);
+        /* Wait for count and bucket to come in. */
+        ret = mpi_tls_wait(&count_request, MPI_TLS_STATUS_IGNORE);
         if (ret) {
-            handle_error_string("Error receiving count1 into %d from %d",
+            handle_error_string(
+                    "Error waiting on receive for count1 into %d from %d",
                     world_rank, nonlocal_rank);
             goto exit;
         }
-
-        /* Receive remote bucket. */
-        ret = mpi_tls_recv_bytes(buffer, sizeof(*buffer) * BUCKET_SIZE,
-                nonlocal_rank, nonlocal_bucket_idx);
+        ret = mpi_tls_wait(&bucket_request, MPI_TLS_STATUS_IGNORE);
         if (ret) {
-            handle_error_string("Error receiving remote bucket into %d from %d",
+            handle_error_string(
+                    "Error waiting on receive for bucket into %d from %d",
                     world_rank, nonlocal_rank);
             goto exit;
-        }
-        if (bucket1_local) {
-            bucket2 = buffer;
-        } else {
-            bucket1 = buffer;
         }
 
         /* Add the received remote count to the local count to arrive at the
@@ -646,6 +664,7 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     ret = 0;
 
 exit:
+
     return ret;
 }
 
@@ -1075,7 +1094,9 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     for (int i = 0; i < world_size; i++) {
         bool is_ready;
         if (i != world_rank) {
-            ret = mpi_tls_recv_bytes(&is_ready, sizeof(is_ready), i, 0);
+            ret =
+                mpi_tls_recv_bytes(&is_ready, sizeof(is_ready), i, 0,
+                        MPI_TLS_STATUS_IGNORE);
             if (ret) {
                 handle_error_string(
                         "Error receiving ready flag from %d into %d", i,
@@ -1127,7 +1148,9 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         }
     } else {
         /* Receive pivot from master. */
-        ret = mpi_tls_recv_bytes(&pivot, sizeof(pivot), master_rank, 0);
+        ret =
+            mpi_tls_recv_bytes(&pivot, sizeof(pivot), master_rank, 0,
+                    MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string("Error receiving pivot into %d from %d",
                     world_rank, master_rank);
@@ -1255,7 +1278,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
                 size_t remote_partition_right;
                 ret =
                     mpi_tls_recv_bytes(&remote_partition_right,
-                            sizeof(remote_partition_right), i, 0);
+                            sizeof(remote_partition_right), i, 0,
+                            MPI_TLS_STATUS_IGNORE);
                 if (ret) {
                     handle_error_string(
                             "Error receiving partition size from %d into %d",
@@ -1289,7 +1313,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         }
 
         ret =
-            mpi_tls_recv_bytes(&cur_pivot, sizeof(cur_pivot), master_rank, 0);
+            mpi_tls_recv_bytes(&cur_pivot, sizeof(cur_pivot), master_rank, 0,
+                    MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string(
                     "Error receiving current pivot into %d from %d",
