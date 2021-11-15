@@ -24,7 +24,13 @@ enum sort_type {
     SORT_BUCKET,
 };
 
+enum ocall_mpi_request_type {
+    OCALL_MPI_SEND,
+    OCALL_MPI_RECV,
+};
+
 struct ocall_mpi_request {
+    enum ocall_mpi_request_type type;
     void *buf;
     MPI_Request mpi_request;
 };
@@ -181,6 +187,7 @@ int ocall_mpi_isend_bytes(const unsigned char *buf, size_t count, int dest,
         ret = errno;
         goto exit;
     }
+    (*request)->type = OCALL_MPI_SEND;
     (*request)->buf = malloc(count);
     if (!(*request)->buf) {
         perror("malloc isend buf");
@@ -234,6 +241,7 @@ int ocall_mpi_irecv_bytes(size_t count, int source, int tag,
         ret = errno;
         goto exit;
     }
+    (*request)->type = OCALL_MPI_RECV;
     (*request)->buf = malloc(count);
     if (!(*request)->buf) {
         perror("malloc irecv buf");
@@ -272,17 +280,25 @@ int ocall_mpi_wait(unsigned char *buf, size_t count,
         goto exit_free_request;
     }
 
-    /* Populate status. */
-    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
-    if (ret) {
-        handle_mpi_error(ret, "MPI_Get_count");
-        goto exit_free_request;
-    }
-    status->source = mpi_status.MPI_SOURCE;
-    status->tag = mpi_status.MPI_TAG;
+    switch ((*request)->type) {
+    case OCALL_MPI_SEND:
+        break;
 
-    /* Copy bytes to output. */
-    memcpy(buf, (*request)->buf, MIN(count, (size_t) status->count));
+    case OCALL_MPI_RECV:
+        /* Populate status. */
+        ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
+        if (ret) {
+            handle_mpi_error(ret, "MPI_Get_count");
+            goto exit_free_request;
+        }
+        status->source = mpi_status.MPI_SOURCE;
+        status->tag = mpi_status.MPI_TAG;
+
+        /* Copy bytes to output. */
+        memcpy(buf, (*request)->buf, MIN(count, (size_t) status->count));
+
+        break;
+    }
 
 exit_free_request:
     free((*request)->buf);
@@ -309,17 +325,26 @@ int ocall_mpi_waitany(unsigned char *buf, size_t bufcount, size_t count,
     }
     *index = mpi_index;
 
-    /* Populate status. */
-    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
-    if (ret) {
-        handle_mpi_error(ret, "MPI_Get_count");
-        goto exit_free_request;
-    }
-    status->source = mpi_status.MPI_SOURCE;
-    status->tag = mpi_status.MPI_TAG;
+    switch (requests[*index]->type) {
+    case OCALL_MPI_SEND:
+        break;
 
-    /* Copy bytes to output. */
-    memcpy(buf, requests[*index]->buf, MIN(bufcount, (size_t) status->count));
+    case OCALL_MPI_RECV:
+        /* Populate status. */
+        ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
+        if (ret) {
+            handle_mpi_error(ret, "MPI_Get_count");
+            goto exit_free_request;
+        }
+        status->source = mpi_status.MPI_SOURCE;
+        status->tag = mpi_status.MPI_TAG;
+
+        /* Copy bytes to output. */
+        memcpy(buf, requests[*index]->buf, MIN(bufcount,
+                    (size_t) status->count));
+
+        break;
+    }
 
 exit_free_request:
     free(requests[*index]->buf);
@@ -343,17 +368,25 @@ int ocall_mpi_try_wait(unsigned char *buf, size_t count,
         goto exit;
     }
 
-    /* Populate status. */
-    ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
-    if (ret) {
-        handle_mpi_error(ret, "MPI_Get_count");
-        goto exit_free_request;
-    }
-    status->source = mpi_status.MPI_SOURCE;
-    status->tag = mpi_status.MPI_TAG;
+    switch ((*request)->type) {
+    case OCALL_MPI_SEND:
+        break;
 
-    /* Copy bytes to output. */
-    memcpy(buf, (*request)->buf, MIN(count, (size_t) status->count));
+    case OCALL_MPI_RECV:
+        /* Populate status. */
+        ret = MPI_Get_count(&mpi_status, MPI_UNSIGNED_CHAR, &status->count);
+        if (ret) {
+            handle_mpi_error(ret, "MPI_Get_count");
+            goto exit_free_request;
+        }
+        status->source = mpi_status.MPI_SOURCE;
+        status->tag = mpi_status.MPI_TAG;
+
+        /* Copy bytes to output. */
+        memcpy(buf, (*request)->buf, MIN(count, (size_t) status->count));
+
+        break;
+    }
 
 exit_free_request:
     free((*request)->buf);
