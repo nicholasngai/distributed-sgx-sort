@@ -5,12 +5,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BENCHMARK_DIR=benchmarks
-CACHE_SETS=8
+BUCKET_SIZE=512
 
 mkdir -p "$BENCHMARK_DIR"
 
 find . -name '*.[ch]' -print0 | xargs -0 sed -Ei "$(cat <<EOF
-s/^#define (CACHE_SETS) .*$/#define \1 $CACHE_SETS/
+s/^#define (BUCKET_SIZE) .*$/#define \1 $BUCKET_SIZE/
 EOF
 )"
 
@@ -26,14 +26,14 @@ for e in 32 16 8 4 2 1; do
     hosts="${hosts%,}"
     cmd_template="mpirun -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed $a"
 
-    for b in 512 1024 2048 4096 8192 16384 32768 65536 131072 262144 524288 1048576 2097152 4194304; do
-        echo "Bucket size: $b"
+    for b in 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192; do
+        echo "Cache sets: $b"
 
         for s in 256 4096 65536 1048576 16777216; do
             for t in 1 2 4 8; do
                 CACHE_ASSOCIATIVITY=$(( t * 2 ))
                 find . -name '*.[ch]' -print0 | xargs -0 sed -Ei "$(cat <<EOF
-s/^#define (BUCKET_SIZE) .*$/#define \1 $b/
+s/^#define (CACHE_SETS) .*$/#define \1 $b/
 s/^#define (CACHE_ASSOCIATIVITY) .*$/#define \1 $CACHE_ASSOCIATIVITY/
 EOF
 )"
@@ -48,7 +48,7 @@ EOF
                 echo "Command: $cmd"
                 for i in {1..4}; do
                     $cmd
-                done | tee "$BENCHMARK_DIR/$a-enclaves$e-bucketsize$b-cachesize512-size$s-threads$t.txt"
+                done | tee "$BENCHMARK_DIR/$a-enclaves$e-bucketsize$BUCKET_SIZE-cachesize$(( b * CACHE_ASSOCIATIVITY * BUCKET_SIZE / 2 ))-size$s-threads$t.txt"
             done
         done
     done
