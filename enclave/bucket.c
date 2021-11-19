@@ -1045,6 +1045,11 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         size_t *sample_idxs, size_t num_targets, size_t left, size_t right) {
     int ret;
 
+    if (!num_targets) {
+        ret = 0;
+        goto exit;
+    }
+
     /* Get the next master by choosing the lowest node with a non-empty
      * slice. */
     bool ready = true;
@@ -1314,26 +1319,21 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
      * split is greater than the target, keep the current split and advance the
      * head of the slice. Else, advance the split and retract the tail of the
      * slice. */
-    if (geq_target_idx > 0) {
-        /* Targets less than pivot. */
-        ret =
-            distributed_quickselect_helper(arr, local_length, local_start,
-                    targets, samples, sample_idxs, geq_target_idx, left,
-                    partition_right);
-        if (ret) {
-            goto exit;
-        }
+    /* Targets less than pivot. */
+    ret =
+        distributed_quickselect_helper(arr, local_length, local_start, targets,
+                samples, sample_idxs, geq_target_idx, left, partition_right);
+    if (ret) {
+        goto exit;
     }
-    if (gt_target_idx < num_targets) {
-        /* Targets greater than pivot. */
-        ret =
-            distributed_quickselect_helper(arr, local_length, local_start,
-                    targets + gt_target_idx, samples + gt_target_idx,
-                    sample_idxs + gt_target_idx, num_targets - gt_target_idx,
-                    partition_left, right);
-        if (ret) {
-            goto exit;
-        }
+    /* Targets greater than pivot. */
+    ret =
+        distributed_quickselect_helper(arr, local_length, local_start,
+                targets + gt_target_idx, samples + gt_target_idx,
+                sample_idxs + gt_target_idx, num_targets - gt_target_idx,
+                partition_left, right);
+    if (ret) {
+        goto exit;
     }
 
 exit:
@@ -1371,6 +1371,7 @@ static int distributed_sample_partition(void *arr_, void *out_,
     int ret;
 
     if (world_size == 1) {
+        memcpy(out, arr, total_length * SIZEOF_ENCRYPTED_NODE);
         return 0;
     }
 
