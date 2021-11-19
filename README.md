@@ -72,6 +72,14 @@ The outputted gprof profile may then be analyzed using
 gprof ./hostonly
 ```
 
+## Benchmarking
+
+Benchmarking can be performed with scripts available in the `scripts` directory.
+The `benchmark.sh` script will run all available sorting algorithms from 1 to 32
+enclaves, each with 1 to 8 threads. This script assumes that each host will have
+the hostname `enclaveN`, where `N` is the zero-index of the enclave. The
+benchmarked outputs are placed in a `benchmarks` folder.
+
 ## Contributors
 
 - Nicholas Ngai (nicholas.ngai@berkeley.edu)
