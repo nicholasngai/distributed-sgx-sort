@@ -357,72 +357,104 @@ exit:
 
 /* Bucket sort. */
 
+struct assign_random_id_args {
+    const void *arr;
+    void *out;
+    size_t length;
+    size_t src_start_idx;
+    size_t result_start_idx;
+    node_t *dummy_node;
+    int ret;
+};
+static void assign_random_id(void *args_, size_t i) {
+    struct assign_random_id_args *args = args_;
+    const unsigned char *arr = args->arr;
+    unsigned char *out = args->out;
+    int ret;
+
+    node_t *node;
+    if (i % 2 == 0 && i < args->length * 2) {
+        /* Decrypt index i / 2 as node. */
+        node_t real_node;
+        ret = node_decrypt(key, &real_node, arr + i / 2 * SIZEOF_ENCRYPTED_NODE,
+                i / 2 + args->src_start_idx);
+        if (ret) {
+            handle_error_string("Error decrypting node %lu",
+                    i + args->src_start_idx);
+            goto exit;
+        }
+
+        /* Assign ORP ID and initialize node. */
+        ret = rand_read(&real_node.orp_id, sizeof(real_node.orp_id));
+        if (ret) {
+            handle_error_string("Error assigning random ID to node %lu",
+                    i + args->result_start_idx);
+            goto exit;
+        }
+        real_node.is_dummy = false;
+
+        node = &real_node;
+    } else {
+        /* Use dummy node. */
+        node = args->dummy_node;
+    }
+
+    /* Encrypt to index i. */
+    ret = node_encrypt(key, node, out + i * SIZEOF_ENCRYPTED_NODE,
+            i + args->result_start_idx);
+    if (ret) {
+        handle_error_string("Error encrypting node %lu",
+                i + args->result_start_idx);
+        goto exit;
+    }
+
+exit:
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret,
+                false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
+}
+
 /* Assigns random ORP IDs to the encrypted nodes, whose first element is
  * encrypted with index SRC_START_IDX, in ARR and distributes them evenly over
- * the 2 * LENGTH elements in ARR, re-encrypting them according to
+ * the 2 * LENGTH elements in OUT, re-encrypting them according to
  * RESULT_START_IDX. Thus, ARR is assumed to be at least
  * 2 * MAX(LENGTH, BUCKET_SIZE) * SIZEOF_ENCRYPTED_NODE bytes. The result is an
  * array with real elements interspersed with dummy elements. */
-// TODO Parallelize?
 // TODO Can we do the first bucket assignment scan while generating these?
-static int assign_random_ids_and_spread(void *arr_, size_t length,
-        size_t src_start_idx, size_t result_start_idx) {
+static int assign_random_ids_and_spread(const void *arr, void *out,
+        size_t length, size_t src_start_idx, size_t result_start_idx) {
     int ret;
-    unsigned char *arr = arr_;
 
     node_t dummy_node;
     memset(&dummy_node, '\0', sizeof(dummy_node));
     dummy_node.is_dummy = true;
 
-    for (size_t i = length - 1; i != SIZE_MAX; i--) {
-        node_t node;
-
-        /* Decrypt index i. */
-        ret = node_decrypt(key, &node, arr + i * SIZEOF_ENCRYPTED_NODE,
-                i + src_start_idx);
-        if (ret) {
-            handle_error_string("Error decrypting node %lu", i + src_start_idx);
-            goto exit;
-        }
-
-        /* Assign ORP ID and initialize node. */
-        ret = rand_read(&node.orp_id, sizeof(node.orp_id));
-        if (ret) {
-            handle_error_string("Error assigning random ID to node %lu",
-                    2 * i + result_start_idx);
-            goto exit;
-        }
-        node.is_dummy = false;
-
-        /* Encrypt to index 2 * i. */
-        ret = node_encrypt(key, &node, arr + 2 * i * SIZEOF_ENCRYPTED_NODE,
-                2 * i + result_start_idx);
-        if (ret) {
-            handle_error_string("Error encrypting node %lu",
-                    2 * i + result_start_idx);
-            goto exit;
-        }
-
-        /* Encrypt dummy node to index 2 * i + 1. */
-        ret = node_encrypt(key, &dummy_node,
-                arr + (2 * i + 1) * SIZEOF_ENCRYPTED_NODE,
-                2 * i + 1 + result_start_idx);
-        if (ret) {
-            handle_error_string("Error encrypting dummy node %lu",
-                    2 * i + 1 + result_start_idx);
-            goto exit;
-        }
-    }
-
-    /* Pad up to 2 * bucket size. */
-    for (size_t i = 2 * length; i < 2 * BUCKET_SIZE; i++) {
-        ret = node_encrypt(key, &dummy_node, arr + i * SIZEOF_ENCRYPTED_NODE,
-                i + result_start_idx);
-        if (ret) {
-            handle_error_string("Error encrypting dummy node %lu",
-                    i + result_start_idx);
-            goto exit;
-        }
+    struct assign_random_id_args args = {
+        .arr = arr,
+        .out = out,
+        .length = length,
+        .src_start_idx = src_start_idx,
+        .result_start_idx = result_start_idx,
+        .dummy_node = &dummy_node,
+        .ret = 0,
+    };
+    struct thread_work work = {
+        .type = THREAD_WORK_ITER,
+        .iter = {
+            .func = assign_random_id,
+            .arg = &args,
+            .count = MAX(length, BUCKET_SIZE) * 2,
+        },
+    };
+    thread_work_push(&work);
+    thread_work_until_empty();
+    thread_wait(&work);
+    ret = args.ret;
+    if (ret) {
+        handle_error_string("Error assigning random ids");
+        goto exit;
     }
 
 exit:
@@ -706,17 +738,25 @@ static int permute_comparator(const void *a_, const void *b_,
  * The nodes are then written sequentially to ARR[*COMPRESS_IDX], and
  * *COMPRESS_IDX is incremented. The nodes receive new random ORP IDs. The first
  * element is assumed to have START_IDX for the purposes of decryption. */
-static int permute_and_compress(void *arr_, size_t bucket,
-        size_t *compress_idx, size_t start_idx) {
+struct permute_and_compress_args {
+    const void *arr;
+    void *out;
+    size_t start_idx;
+    size_t *compress_idx;
     int ret;
-    unsigned char *arr = arr_;
+};
+static void permute_and_compress(void *args_, size_t bucket_idx) {
+    struct permute_and_compress_args *args = args_;
+    const unsigned char *arr = args->arr;
+    unsigned char *out = args->out;
+    int ret;
 
     /* Decrypt nodes from bucket to buffer. */
     for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        size_t i_idx = bucket * BUCKET_SIZE + i + start_idx;
+        size_t i_idx = bucket_idx * BUCKET_SIZE + i + args->start_idx;
 
         ret = node_decrypt(key, buffer + i,
-                arr + (bucket * BUCKET_SIZE + i) * SIZEOF_ENCRYPTED_NODE,
+                arr + (bucket_idx * BUCKET_SIZE + i) * SIZEOF_ENCRYPTED_NODE,
                 i_idx);
         if (ret) {
             handle_error_string("Error decrypting node %lu", i_idx);
@@ -738,27 +778,34 @@ static int permute_and_compress(void *arr_, size_t bucket,
     /* Assign random ORP IDs and encrypt nodes from buffer to compressed
      * array. */
     for (size_t i = 0; i < real_len; i++) {
+        /* Fetch the next index to encrypt. */
+        size_t out_idx =
+            __atomic_fetch_add(args->compress_idx, 1, __ATOMIC_RELAXED);
+
         /* Assign random ORP ID. */
         ret = rand_read(&buffer[i].orp_id, sizeof(buffer[i].orp_id));
         if (ret) {
             handle_error_string("Error assigning random ID to %lu",
-                    *compress_idx + start_idx);
+                    out_idx + args->start_idx);
             goto exit;
         }
 
         /* Encrypt. */
         ret = node_encrypt(key, buffer + i,
-                arr + *compress_idx * SIZEOF_ENCRYPTED_NODE,
-                *compress_idx + start_idx);
+                out + out_idx * SIZEOF_ENCRYPTED_NODE,
+                out_idx + args->start_idx);
         if (ret) {
             handle_error_string("Error encrypting node");
             goto exit;
         }
-        (*compress_idx)++;
     }
 
 exit:
-    return ret;
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
 }
 
 /* Compares elements by the tuple (key, ORP ID). The check for the ORP ID must
@@ -1617,6 +1664,8 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     size_t local_start = get_local_bucket_start(world_rank) * BUCKET_SIZE;
     size_t local_length = num_local_buckets * BUCKET_SIZE;
 
+    unsigned char *buf = arr + local_length * 2 * SIZEOF_ENCRYPTED_NODE;
+
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_start;
     if (clock_gettime(CLOCK_REALTIME, &time_start)) {
@@ -1627,8 +1676,8 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Spread the elements located in the first half of our input array. */
-    ret = assign_random_ids_and_spread(arr, src_local_length, src_local_start,
-            local_start);
+    ret = assign_random_ids_and_spread(arr, buf, src_local_length,
+            src_local_start, local_start);
     if (ret) {
         handle_error_string("Error assigning random IDs to nodes");
         ret = errno;
@@ -1661,7 +1710,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
 
             /* Create iterative task for merge split. */
             struct merge_split_idx_args args = {
-                .arr = arr,
+                .arr = buf,
                 .bit_idx = bit_idx,
                 .bucket_stride = bucket_stride,
                 .bucket_offset = chunk_start,
@@ -1699,7 +1748,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
 
         /* Create iterative task for merge split. */
         struct merge_split_idx_args args = {
-            .arr = arr,
+            .arr = buf,
             .bit_idx = bit_idx,
             .bucket_stride = bucket_stride,
             .bucket_offset = 0,
@@ -1726,7 +1775,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
             goto exit;
         }
     }
-    ret = evict_buckets(arr);
+    ret = evict_buckets(buf);
     if (ret) {
         handle_error_string("Error evicting buckets");
         goto exit;
@@ -1745,10 +1794,28 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
      * real nodes together. We also assign new ORP IDs so that all elements have
      * a unique tuple of (key, ORP ID), even if they have duplicate keys. */
     size_t compress_len = 0;
-    for (size_t bucket = 0; bucket < num_local_buckets; bucket++) {
-        ret = permute_and_compress(arr, bucket, &compress_len, local_start);
+    {
+        struct permute_and_compress_args args = {
+            .arr = buf,
+            .out = arr,
+            .start_idx = local_start,
+            .compress_idx = &compress_len,
+            .ret = 0,
+        };
+        struct thread_work work = {
+            .type = THREAD_WORK_ITER,
+            .iter = {
+                .func = permute_and_compress,
+                .arg = &args,
+                .count = num_local_buckets,
+            },
+        };
+        thread_work_push(&work);
+        thread_work_until_empty();
+        thread_wait(&work);
+        ret = args.ret;
         if (ret) {
-            handle_error_string("Error permuting bucket %lu\n", bucket);
+            handle_error_string("Error permuting buckets");
             goto exit;
         }
     }
@@ -1764,11 +1831,9 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
 
     /* Partition permuted data such that each enclave has its own partition of
      * element, e.g. enclave 0 has the lowest elements, then enclave 1, etc. */
-    unsigned char *partitioned_out =
-        arr + local_length * 2 * SIZEOF_ENCRYPTED_NODE;
     ret =
-        distributed_sample_partition(arr, partitioned_out, compress_len,
-                local_start, length);
+        distributed_sample_partition(arr, buf, compress_len, local_start,
+                length);
     if (ret) {
         handle_error_string("Error in distributed sample partitioning");
         goto exit;
@@ -1784,7 +1849,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Sort local partitions. */
-    ret = mergesort(partitioned_out, arr, src_local_length, src_local_start);
+    ret = mergesort(buf, arr, src_local_length, src_local_start);
     if (ret) {
         handle_error_string("Error in non-oblivious local sort");
         goto exit;
