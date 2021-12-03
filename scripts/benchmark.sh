@@ -39,7 +39,7 @@ for e in 32 16 8 4 2 1; do
             i=$(( i + 1 ))
         done
         hosts="${hosts%,}"
-        cmd_template="mpirun -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed $a"
+        cmd_template="mpiexec -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed $a"
 
         if [ "$a" = "bitonic" ]; then
             b=$BITONIC_CHUNK_SIZE
