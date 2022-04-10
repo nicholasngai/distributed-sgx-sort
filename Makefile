@@ -35,7 +35,7 @@ ENCLAVE_CONF = $(ENCLAVE_DIR)/$(APP_NAME).conf
 
 HOSTONLY_TARGET = hostonly
 
-CPPFLAGS = -I.
+CPPFLAGS = -I. -Ithird_party/liboblivious/include
 CFLAGS = -O3 -Wall -Wextra
 LDFLAGS =
 LDLIBS =
@@ -69,6 +69,11 @@ CPPFLAGS += -MMD
 
 %.d: $(SGX_EDGE);
 
+# Third-party deps.
+
+third_party/liboblivious/liboblivious.a third_party/liboblivious/liboblivious.so:
+	$(MAKE) -C third_party/liboblivious
+
 # Host.
 
 HOST_CPPFLAGS =
@@ -85,14 +90,14 @@ $(HOST_DIR)/%.o: CFLAGS += $(HOST_CFLAGS) $(HOST_OE_CFLAGS)
 
 $(HOST_TARGET): LDFLAGS += $(HOST_LDFLAGS)
 $(HOST_TARGET): LDLIBS += $(HOST_LDLIBS) $(HOST_OE_LDLIBS)
-$(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS)
+$(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) third_party/liboblivious/liboblivious.a
 
 # Enclave.
 
-ENCLAVE_CPPFLAGS = -I$(ENCLAVE_DIR)/third_party/liboblivious/include
+ENCLAVE_CPPFLAGS =
 ENCLAVE_CFLAGS =
 ENCLAVE_LDFLAGS =
-ENCLAVE_LDLIBS = -L$(ENCLAVE_DIR)/third_party/liboblivious -l:liboblivious.a
+ENCLAVE_LDLIBS =
 
 ENCLAVE_OE_CFLAGS = $(shell pkg-config oeenclave-$(C_COMPILER) --cflags)
 ENCLAVE_OE_LDLIBS = \
@@ -102,12 +107,9 @@ ENCLAVE_OE_LDLIBS = \
 $(ENCLAVE_DIR)/%.o: CPPFLAGS += $(ENCLAVE_CPPFLAGS)
 $(ENCLAVE_DIR)/%.o: CFLAGS += $(ENCLAVE_CFLAGS) $(ENCLAVE_OE_CFLAGS)
 
-$(ENCLAVE_DIR)/third_party/liboblivious/liboblivious.a:
-	$(MAKE) -C $(ENCLAVE_DIR)/third_party/liboblivious
-
 $(ENCLAVE_TARGET): LDFLAGS += $(ENCLAVE_LDFLAGS)
 $(ENCLAVE_TARGET): LDLIBS += $(ENCLAVE_LDLIBS) $(ENCLAVE_OE_LDLIBS)
-$(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) $(ENCLAVE_DIR)/third_party/liboblivious/liboblivious.a
+$(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) third_party/liboblivious/liboblivious.a
 
 $(ENCLAVE_TARGET).signed: $(ENCLAVE_TARGET) $(ENCLAVE_KEY) $(ENCLAVE_PUBKEY) $(ENCLAVE_CONF)
 	$(SGX_SIGN) sign -e $< -k $(ENCLAVE_KEY) -c $(ENCLAVE_CONF)
@@ -134,14 +136,14 @@ $(HOSTONLY_TARGET): CPPFLAGS += $(HOSTONLY_CPPFLAGS) $(HOST_CPPFLAGS) $(ENCLAVE_
 $(HOSTONLY_TARGET): CFLAGS += $(HOSTONLY_CFLAGS) $(HOST_CFLAGS)
 $(HOSTONLY_TARGET): LDFLAGS += $(HOSTONLY_LDFLAGS) $(HOST_LDFLAGS)
 $(HOSTONLY_TARGET): LDLIBS += $(HOSTONLY_LDLIBS) $(HOST_LDLIBS) $(ENCLAVE_LDLIBS)
-$(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) $(ENCLAVE_DIR)/third_party/liboblivious/liboblivious.a
+$(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 # Misc.
 
 .PHONY: clean
 clean:
-	$(MAKE) -C $(ENCLAVE_DIR)/third_party/liboblivious clean
+	$(MAKE) -C third_party/liboblivious clean
 	rm -f $(SGX_EDGE) \
 		$(COMMON_DEPS) $(COMMON_OBJS) \
 		$(HOST_TARGET) $(HOST_DEPS) $(HOST_OBJS) \
