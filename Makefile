@@ -40,6 +40,11 @@ CFLAGS = -O3 -Wall -Wextra
 LDFLAGS =
 LDLIBS =
 
+# all target.
+
+.PHONY: all
+all: $(HOST_TARGET) $(ENCLAVE_TARGET).signed
+
 # SGX edge.
 
 HOST_EDGE_HEADERS = $(HOST_DIR)/$(APP_NAME)_u.h $(HOST_DIR)/$(APP_NAME)_args.h
@@ -51,10 +56,6 @@ ENCLAVE_EDGE_OBJS = $(ENCLAVE_EDGE_SRC:.c=.o)
 SGX_EDGE = $(HOST_EDGE_HEADERS) $(HOST_EDGE_SRC) $(ENCLAVE_EDGE_HEADERS) $(ENCLAVE_EDGE_SRC)
 
 INCDIR = $(shell pkg-config oehost-$(C_COMPILER) --variable=includedir)
-
-.PHONY: all
-all: $(HOST_TARGET) $(ENCLAVE_TARGET).signed
-
 $(SGX_EDGE): $(APP_NAME).edl
 	$(SGX_EDGER8R) $< \
 		--untrusted-dir $(HOST_DIR) \
