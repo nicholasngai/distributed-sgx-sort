@@ -2,6 +2,7 @@
 #define DISTRIBUTED_SGX_SORT_BASELINES_COMMON_H
 
 #include <mpi.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include "host/error.h"
 
@@ -36,6 +37,14 @@ static inline int init_mpi(int *argc, char ***argv, int *world_rank, int *world_
 
 exit:
     return ret;
+}
+
+static inline bool is_pow2(size_t val) {
+    size_t i = 1;
+    while (i < val) {
+        i <<= 1;
+    }
+    return i == val;
 }
 
 #endif /* distributed-sgx-sort/baselines/common.h */

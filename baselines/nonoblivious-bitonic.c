@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <liboblivious/primitives.h>
 #include <mpi.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,14 +23,6 @@ static size_t total_length;
 static size_t local_length;
 
 static _Thread_local node_t *buffer;
-
-static bool is_pow2(size_t val) {
-    size_t i = 1;
-    while (i < val) {
-        i <<= 1;
-    }
-    return i == val;
-}
 
 /* Array index and world rank relationship helpers. */
 
