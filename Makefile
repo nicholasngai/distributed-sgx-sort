@@ -37,8 +37,8 @@ HOSTONLY_TARGET = hostonly
 
 CPPFLAGS = -I. -Ithird_party/liboblivious/include
 CFLAGS = -O3 -Wall -Wextra
-LDFLAGS =
-LDLIBS =
+LDFLAGS = -Lthird_party/liboblivious
+LDLIBS = -l:liboblivious.a
 
 # all target.
 
@@ -77,16 +77,16 @@ third_party/liboblivious/liboblivious.a third_party/liboblivious/liboblivious.so
 # Host.
 
 HOST_CPPFLAGS =
-HOST_CFLAGS = $(shell pkg-config mpi --cflags)
+HOST_CFLAGS = \
+	$(shell pkg-config mpi --cflags) \
+	$(shell pkg-config oehost-$(C_COMPILER) --cflags)
 HOST_LDFLAGS =
 HOST_LDLIBS = -lmbedcrypto \
-	$(shell pkg-config mpi --libs)
-
-HOST_OE_CFLAGS = $(shell pkg-config oehost-$(C_COMPILER) --cflags)
-HOST_OE_LDLIBS = $(shell pkg-config oehost-$(C_COMPILER) --libs)
+	$(shell pkg-config mpi --libs) \
+	$(shell pkg-config oehost-$(C_COMPILER) --libs)
 
 $(HOST_DIR)/%.o: CPPFLAGS += $(HOST_CPPFLAGS)
-$(HOST_DIR)/%.o: CFLAGS += $(HOST_CFLAGS) $(HOST_OE_CFLAGS)
+$(HOST_DIR)/%.o: CFLAGS += $(HOST_CFLAGS)
 
 $(HOST_TARGET): LDFLAGS += $(HOST_LDFLAGS)
 $(HOST_TARGET): LDLIBS += $(HOST_LDLIBS) $(HOST_OE_LDLIBS)
@@ -95,20 +95,18 @@ $(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) third_party/libobl
 # Enclave.
 
 ENCLAVE_CPPFLAGS =
-ENCLAVE_CFLAGS =
+ENCLAVE_CFLAGS = \
+	$(shell pkg-config oeenclave-$(C_COMPILER) --cflags)
 ENCLAVE_LDFLAGS =
-ENCLAVE_LDLIBS =
-
-ENCLAVE_OE_CFLAGS = $(shell pkg-config oeenclave-$(C_COMPILER) --cflags)
-ENCLAVE_OE_LDLIBS = \
+ENCLAVE_LDLIBS = \
 	$(shell pkg-config oeenclave-$(C_COMPILER) --libs) \
 	$(shell pkg-config oeenclave-$(C_COMPILER) --variable=mbedtlslibs)
 
 $(ENCLAVE_DIR)/%.o: CPPFLAGS += $(ENCLAVE_CPPFLAGS)
-$(ENCLAVE_DIR)/%.o: CFLAGS += $(ENCLAVE_CFLAGS) $(ENCLAVE_OE_CFLAGS)
+$(ENCLAVE_DIR)/%.o: CFLAGS += $(ENCLAVE_CFLAGS)
 
 $(ENCLAVE_TARGET): LDFLAGS += $(ENCLAVE_LDFLAGS)
-$(ENCLAVE_TARGET): LDLIBS += $(ENCLAVE_LDLIBS) $(ENCLAVE_OE_LDLIBS)
+$(ENCLAVE_TARGET): LDLIBS += $(ENCLAVE_LDLIBS)
 $(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) third_party/liboblivious/liboblivious.a
 
 $(ENCLAVE_TARGET).signed: $(ENCLAVE_TARGET) $(ENCLAVE_KEY) $(ENCLAVE_PUBKEY) $(ENCLAVE_CONF)
@@ -123,21 +121,21 @@ $(ENCLAVE_PUBKEY): $(ENCLAVE_KEY) $(ENCLAVE_CONF)
 # Common.
 
 $(COMMON_DIR)/%.o: CPPFLAGS += $(HOST_CPPFLAGS)
-$(COMMON_DIR)/%.o: CFLAGS += $(HOST_CFLAGS) $(HOST_OE_CFLAGS)
+$(COMMON_DIR)/%.o: CFLAGS += $(HOST_CFLAGS)
 
 # Host-only binary for profiling.
 
-HOSTONLY_CPPFLAGS = -DDISTRIBUTED_SGX_SORT_HOSTONLY
-HOSTONLY_CFLAGS = -Wno-error
-HOSTONLY_LDFLAGS =
-HOSTONLY_LDLIBS = -lmbedtls -lmbedx509
+HOSTONLY_CPPFLAGS = $(HOST_CPPFLAGS) -DDISTRIBUTED_SGX_SORT_HOSTONLY
+HOSTONLY_CFLAGS = $(HOST_CFLAGS) -Wno-error
+HOSTONLY_LDFLAGS = $(HOST_CFLAGS)
+HOSTONLY_LDLIBS = $(HOST_LDLIBS) -lmbedx509 -lmbedtls
 
-$(HOSTONLY_TARGET): CPPFLAGS += $(HOSTONLY_CPPFLAGS) $(HOST_CPPFLAGS) $(ENCLAVE_CPPFLAGS)
-$(HOSTONLY_TARGET): CFLAGS += $(HOSTONLY_CFLAGS) $(HOST_CFLAGS)
-$(HOSTONLY_TARGET): LDFLAGS += $(HOSTONLY_LDFLAGS) $(HOST_LDFLAGS)
-$(HOSTONLY_TARGET): LDLIBS += $(HOSTONLY_LDLIBS) $(HOST_LDLIBS) $(ENCLAVE_LDLIBS)
+$(HOSTONLY_TARGET): CPPFLAGS += $(HOSTONLY_CPPFLAGS)
+$(HOSTONLY_TARGET): CFLAGS += $(HOSTONLY_CFLAGS)
+$(HOSTONLY_TARGET): LDFLAGS += $(HOSTONLY_LDFLAGS)
+$(HOSTONLY_TARGET): LDLIBS += $(HOSTONLY_LDLIBS)
 $(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 # Misc.
 
