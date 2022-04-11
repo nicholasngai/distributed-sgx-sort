@@ -1,5 +1,5 @@
-#ifndef __DISTRIBUTED_SGX_SORT_ENCLAVE_MPI_TLS_H
-#define __DISTRIBUTED_SGX_SORT_ENCLAVE_MPI_TLS_H
+#ifndef DISTRIBUTED_SGX_SORT_ENCLAVE_MPI_TLS_H
+#define DISTRIBUTED_SGX_SORT_ENCLAVE_MPI_TLS_H
 
 #include <stddef.h>
 #include <mbedtls/entropy.h>

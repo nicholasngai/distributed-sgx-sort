@@ -1,5 +1,5 @@
-#ifndef __DISTRIBUTED_SGX_SORT_HOST_ERROR_H
-#define __DISTRIBUTED_SGX_SORT_HOST_ERROR_H
+#ifndef DISTRIBUTED_SGX_SORT_HOST_ERROR_H
+#define DISTRIBUTED_SGX_SORT_HOST_ERROR_H
 
 #define handle_mpi_error(ret, msg) \
     _handle_mpi_error(ret, msg, __FILE__, __LINE__)

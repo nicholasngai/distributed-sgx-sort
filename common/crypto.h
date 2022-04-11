@@ -1,5 +1,5 @@
-#ifndef __DISTRIBUTED_SGX_SORT_COMMON_CRYPTO_H
-#define __DISTRIBUTED_SGX_SORT_COMMON_CRYPTO_H
+#ifndef DISTRIBUTED_SGX_SORT_COMMON_CRYPTO_H
+#define DISTRIBUTED_SGX_SORT_COMMON_CRYPTO_H
 
 #include <stddef.h>
 #include <mbedtls/entropy.h>

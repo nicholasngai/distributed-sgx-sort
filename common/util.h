@@ -1,5 +1,5 @@
-#ifndef __DISTRIBUTED_SGX_SORT_COMMON_UTIL_H
-#define __DISTRIBUTED_SGX_SORT_COMMON_UTIL_H
+#ifndef DISTRIBUTED_SGX_SORT_COMMON_UTIL_H
+#define DISTRIBUTED_SGX_SORT_COMMON_UTIL_H
 
 #include <stddef.h>
 #include <limits.h>
