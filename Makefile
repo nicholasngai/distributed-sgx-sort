@@ -131,7 +131,7 @@ $(COMMON_DIR)/%.o: CFLAGS += $(HOST_CFLAGS)
 # Host-only binary for profiling.
 
 HOSTONLY_CPPFLAGS = $(HOST_CPPFLAGS) -DDISTRIBUTED_SGX_SORT_HOSTONLY
-HOSTONLY_CFLAGS = $(HOST_CFLAGS) -Wno-error
+HOSTONLY_CFLAGS = $(HOST_CFLAGS) -Wno-implicit-function-declaration -Wno-unused
 HOSTONLY_LDFLAGS = $(HOST_CFLAGS)
 HOSTONLY_LDLIBS = $(HOST_LDLIBS) -lmbedx509 -lmbedtls
 
