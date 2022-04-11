@@ -11,6 +11,7 @@ enclave/parallel.pem
 enclave/parallel.pub
 hostonly
 baselines/bitonic
+baselines/nonoblivious-bitonic
 *.d
 *.o
 benchmarks

@@ -37,7 +37,8 @@ HOSTONLY_TARGET = hostonly
 
 BASELINE_DIR = baselines
 BASELINE_TARGETS = \
-	$(BASELINE_DIR)/bitonic
+	$(BASELINE_DIR)/bitonic \
+	$(BASELINE_DIR)/nonoblivious-bitonic
 BASELINE_DEPS = $(BASELINE_TARGETS:=.d)
 
 CPPFLAGS = -I. -Ithird_party/liboblivious/include
@@ -156,6 +157,7 @@ $(BASELINE_TARGETS): CFLAGS += $(BASELINE_CFLAGS)
 $(BASELINE_TARGETS): LDFLAGS += $(BASELINE_LDFLAGS)
 $(BASELINE_TARGETS): LDLIBS += $(BASELINE_LDLIBS)
 $(BASELINE_DIR)/bitonic: $(BASELINE_DIR)/bitonic.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
+$(BASELINE_DIR)/nonoblivious-bitonic: $(BASELINE_DIR)/nonoblivious-bitonic.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
 
 # Misc.
 
