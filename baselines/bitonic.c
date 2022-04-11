@@ -129,12 +129,6 @@ static void swap(node_t *arr, size_t a, size_t b, bool descending) {
 
 static void swap_range(node_t *arr, size_t a_start, size_t b_start,
         size_t count, bool descending) {
-    // TODO Assumption: Only either a subset of range A is local, or a subset of
-    // range B is local. For local-remote swaps, the subset of the remote range
-    // correspondingw with the local range is entirely contained within a single
-    // node. This requires that both the number of elements and the number of
-    // nodes is a power of 2.
-
     size_t local_start = get_local_start(world_rank);
     size_t local_end = get_local_start(world_rank + 1);
     bool a_is_local = a_start < local_end && a_start + count > local_start;
