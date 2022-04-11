@@ -35,6 +35,11 @@ ENCLAVE_CONF = $(ENCLAVE_DIR)/$(APP_NAME).conf
 
 HOSTONLY_TARGET = hostonly
 
+BASELINE_DIR = baselines
+BASELINE_TARGETS = \
+	$(BASELINE_DIR)/bitonic
+BASELINE_DEPS = $(BASELINE_TARGETS:=.d)
+
 CPPFLAGS = -I. -Ithird_party/liboblivious/include
 CFLAGS = -O3 -Wall -Wextra
 LDFLAGS = -Lthird_party/liboblivious
@@ -137,6 +142,21 @@ $(HOSTONLY_TARGET): LDLIBS += $(HOSTONLY_LDLIBS)
 $(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
+# Baselines.
+
+BASELINE_CPPFLAGS = -I. -I$(ENCLAVE_DIR)/third_party/liboblivious/include
+BASELINE_CFLAGS = \
+	$(shell pkg-config mpi --cflags)
+BASELINE_LDFLAGS =
+BASELINE_LDLIBS = -lmbedcrypto \
+	$(shell pkg-config mpi --libs)
+
+$(BASELINE_TARGETS): CPPFLAGS += $(BASELINE_CPPFLAGS) -DDISTRIBUTED_SGX_SORT_HOSTONLY
+$(BASELINE_TARGETS): CFLAGS += $(BASELINE_CFLAGS)
+$(BASELINE_TARGETS): LDFLAGS += $(BASELINE_LDFLAGS)
+$(BASELINE_TARGETS): LDLIBS += $(BASELINE_LDLIBS)
+$(BASELINE_DIR)/bitonic: $(BASELINE_DIR)/bitonic.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
+
 # Misc.
 
 .PHONY: clean
@@ -147,6 +167,10 @@ clean:
 		$(HOST_TARGET) $(HOST_DEPS) $(HOST_OBJS) \
 		$(ENCLAVE_TARGET).signed $(ENCLAVE_TARGET) $(ENCLAVE_DEPS) $(ENCLAVE_OBJS) \
 		$(ENCLAVE_PUBKEY) $(ENCLAVE_KEY) \
-		$(HOSTONLY_TARGET)
+		$(HOSTONLY_TARGET) \
+		$(BASELINE_TARGETS) $(BASELINE_DEPS)
 
--include $(COMMON_DEPS) $(HOST_DEPS) $(ENCLAVE_DEPS)
+-include $(COMMON_DEPS)
+-include $(HOST_DEPS)
+-include $(ENCLAVE_DEPS)
+-include $(BASELINE_DEPS)

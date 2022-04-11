@@ -10,6 +10,7 @@ enclave/parallel_args.h
 enclave/parallel.pem
 enclave/parallel.pub
 hostonly
+baselines/bitonic
 *.d
 *.o
 benchmarks
