@@ -49,8 +49,12 @@ for e in 32 16 8 4 2 1; do
         for s in 256 4096 65536 1048576 16777216; do
             for t in 1 2 4 8; do
                 CACHE_ASSOCIATIVITY=$(( t * 2 ))
+                CACHE_SETS=$(( b * 2 / CACHE_ASSOCIATIVITY / BUCKET_SIZE ))
+                if [ "$CACHE_SETS" -eq 0 ]; then
+                    continue
+                fi
                 find . -name '*.[ch]' -print0 | xargs -0 sed -Ei "$(cat <<EOF
-s/^#define (CACHE_SETS) .*$/#define \1 $b/
+s/^#define (CACHE_SETS) .*$/#define \1 $CACHE_SETS/
 s/^#define (CACHE_ASSOCIATIVITY) .*$/#define \1 $CACHE_ASSOCIATIVITY/
 EOF
 )"
@@ -65,7 +69,7 @@ EOF
                 echo "Command: $cmd"
                 for i in {1..4}; do
                     $cmd
-                done | tee "$BENCHMARK_DIR/$a-enclaves$e-bucketsize$BUCKET_SIZE-cachesize$(( b * CACHE_ASSOCIATIVITY * BUCKET_SIZE / 2 ))-size$s-threads$t.txt"
+                done | tee "$BENCHMARK_DIR/$a-enclaves$e-bucketsize$BUCKET_SIZE-cachesize$b-size$s-threads$t.txt"
             done
         done
     done
