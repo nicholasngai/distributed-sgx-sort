@@ -12,6 +12,7 @@ enclave/parallel.pub
 hostonly
 baselines/bitonic
 baselines/nonoblivious-bitonic
+baselines/nonoblivious-quickselect
 *.d
 *.o
 benchmarks

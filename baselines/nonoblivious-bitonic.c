@@ -144,12 +144,6 @@ static void swap_range(node_t *arr, size_t a_start, size_t b_start,
 
 /* Bitonic sort. */
 
-static int comparator(const void *a_, const void *b_) {
-    const node_t *a = a_;
-    const node_t *b = b_;
-    return (a->key > b->key) - (a->key < b->key);
-}
-
 static void bitonic_merge(node_t *arr, size_t start, size_t length,
         bool descending) {
     switch (length) {
@@ -211,7 +205,7 @@ void bitonic_sort(node_t *arr, size_t start, size_t length,
                 bitonic_merge(arr, start, length, descending);
             } else {
                 /* Drop to nonoblivious quicksort. */
-                qsort(arr, length, sizeof(*arr), comparator);
+                qsort(arr, length, sizeof(*arr), node_comparator);
             }
             break;
         }
