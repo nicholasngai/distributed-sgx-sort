@@ -2,7 +2,7 @@
 
 ## Dependencies
 
-This project requires Ubuntu 18.04 LTS to run. The following libraries are
+This project requires Ubuntu 20.04 LTS to run. The following libraries are
 required:
 
 - [Open Enclave](https://github.com/openenclave/openenclave)
