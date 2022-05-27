@@ -28,7 +28,7 @@ for e in 32 16 8 4 2 1; do
     if "$AZ" && [ ! -z "$last_e" ]; then
         i=$(( last_e - 1 ))
         while [ "$i" -ge "$e" ]; do
-            az vm deallocate -g "enclave${i}_group" -n "enclave$i" --no-wait
+            az vm deallocate -g enclave_group -n "enclave$i" --no-wait
             i=$(( i - 1 ))
         done
     fi
@@ -83,7 +83,7 @@ done
 if "$AZ"; then
     i=$(( last_e - 1 ))
     while [ "$i" -ge "$e" ]; do
-        az vm deallocate -g "enclave${i}_group" -n "enclave$i" --no-wait
+        az vm deallocate -g enclave_group -n "enclave$i" --no-wait
         i=$(( i - 1 ))
     done
 fi

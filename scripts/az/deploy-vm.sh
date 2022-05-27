@@ -10,25 +10,19 @@ cd "$(dirname "$0")"
 
 . ./common.sh
 
-existing_groups="$(az group list -o tsv | cut -d "$(printf '\t')" -f 4)"
+# Create resource group.
+az group create -g "$GROUP" --location westus2
 
+existing_vms=$(az vm list -g "$GROUP" -o tsv | cut -d "$(printf '\t')" -f 16)
 i=0
 while [ "$i" -lt "$NUM_VMS" ]; do
     (
         vm="$(get_vm_name "$i")"
-        group="$(get_group_name "$i")"
-
-        # Create resource groups.
-        if ! echo "$existing_groups" | grep -q "$group"; then
-            az group create -g "$group" --location westus2
-        else
-            echo "Group $group already exists" >&2
-        fi
 
         # Create VM.
-        if ! az vm list -g "$group" -o tsv | cut -d "$(printf '\t')" -f 16 | grep -q "$vm"; then
+        if ! echo "$existing_vms" | grep -q "$vm"; then
             az vm create \
-                -g "$group" \
+                -g "$GROUP" \
                 -n "$vm" \
                 --size "$SIZE" \
                 --image "$IMAGE" \
