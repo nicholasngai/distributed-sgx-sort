@@ -43,8 +43,8 @@ for e in 32 16 8 4 2 1; do
     hosts="${hosts%,}"
     cmd_template="mpiexec -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed $a"
 
-    for b in 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192; do
-        echo "Cache sets: $b"
+    for b in 512 1024 2048 4096 8192 16384 32768 65536 131072 262144 524288 1048576 2097152 4194304; do
+        echo "Cache size: $b"
 
         for s in 256 4096 65536 1048576 16777216; do
             for t in 1 2 4 8; do
