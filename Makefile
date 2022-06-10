@@ -34,6 +34,7 @@ ENCLAVE_PUBKEY = $(ENCLAVE_KEY:.pem=.pub)
 ENCLAVE_CONF = $(ENCLAVE_DIR)/$(APP_NAME).conf
 
 HOSTONLY_TARGET = hostonly
+HOSTONLY_DEP = $(HOSTONLY_TARGET:=.d)
 
 BASELINE_DIR = baselines
 BASELINE_TARGETS = \
@@ -177,4 +178,5 @@ clean:
 -include $(COMMON_DEPS)
 -include $(HOST_DEPS)
 -include $(ENCLAVE_DEPS)
+-include $(HOSTONLY_DEP)
 -include $(BASELINE_DEPS)
