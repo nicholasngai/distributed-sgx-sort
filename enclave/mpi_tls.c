@@ -24,9 +24,9 @@
 
 /* Include simulation cert and key data if compiling in simulation mode or
  * hostonly mode. */
-#if defined(OE_SIMULATION) || defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
+#if defined(OE_SIMULATION) || defined(OE_SIMULATION_CERT) || defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
 #include "enclave/sim_cert.h"
-#endif /* OE_SIMULATION || DISTRIBUTED_SGX_SORT_HOSTONLY */
+#endif /* OE_SIMULATION || OE_SIMULATION_CERT || DISTRIBUTED_SGX_SORT_HOSTONLY */
 
 struct mpi_tls_frag_header {
     unsigned char checksum[32]; // TODO Checksum not yet implemented.
@@ -222,7 +222,7 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
     size_t privkey_buf_size;
     int ret = -1;
 
-#if !defined(OE_SIMULATION) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
+#if !defined(OE_SIMULATION) && !defined(OE_SIMULATION_CERT) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
     unsigned char *pubkey_buf;
     size_t pubkey_buf_size;
     oe_result_t result;
@@ -259,12 +259,12 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
         handle_oe_error(result, "oe_get_attestation_cert_buf_with_evidence_v2");
         goto exit_free_privkey_buf;
     }
-#else /* OE_SIMULATION || DISTRIBUTED_SGX_SORT_HOSTONLY */
+#else /* OE_SIMULATION || OE_SIMULATION_CERT || DISTRIBUTED_SGX_SORT_HOSTONLY */
     cert_buf = SIM_CERT;
     cert_buf_size = sizeof(SIM_CERT);
     privkey_buf = SIM_PRIVKEY;
     privkey_buf_size = sizeof(SIM_PRIVKEY);
-#endif /* !OE_SIMULATION && !DISTRIBUTED_SGX_SORT_HOSTONLY */
+#endif /* !OE_SIMULATION && !OE_SIMULATION_CERT && !DISTRIBUTED_SGX_SORT_HOSTONLY */
     ret = mbedtls_x509_crt_parse_der(cert, cert_buf, cert_buf_size);
     if (ret) {
         handle_mbedtls_error(ret, "mbedtls_x509_crt_parse_der");
@@ -277,14 +277,14 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
     }
 
 exit_free_cert_buf:
-#if !defined(OE_SIMULATION) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
+#if !defined(OE_SIMULATION) && !defined(OE_SIMULATION_CERT) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
     oe_free_attestation_certificate(cert_buf);
 exit_free_privkey_buf:
     oe_free_key(privkey_buf, privkey_buf_size, NULL, 0);
 exit_free_pubkey_buf:
     oe_free_key(pubkey_buf, pubkey_buf_size, NULL, 0);
 exit:
-#endif /* !OE_SIMULATION && !DISTRIBUTED_SGX_SORT_HOSTONLY */
+#endif /* !OE_SIMULATION && !OE_SIMULATION_CERT && !DISTRIBUTED_SGX_SORT_HOSTONLY */
     return ret;
 }
 
