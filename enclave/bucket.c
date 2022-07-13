@@ -91,7 +91,7 @@ int bucket_init(void) {
 
     /* Allocate buffer. */
     buffer =
-        malloc(BUCKET_SIZE * MAX(MERGE_SPLIT_REMOTE_CHUNK_BUCKETS, 2)
+        malloc(BUCKET_SIZE * MAX(MERGE_SPLIT_REMOTE_CHUNK_BUCKETS * 2, 2)
                 * sizeof(*buffer));
     if (!buffer) {
         perror("Error allocating buffer");
@@ -561,53 +561,54 @@ static int merge_split_chunk(void *arr_, size_t bucket1_idx, size_t
     /* If remote, send our local buckets then receive the remote buckets from
      * the other node. */
     if (!bucket1_local || !bucket2_local) {
-        /* Use buffer as the remote bucket buffer at offset values. */
+        /* Use the second half of buffer as the remote bucket buffer at offset
+         * values and the first half of the buffer as the sending buffer for
+         * local buckets. */
         if (bucket1_local) {
             for (size_t i = 0; i < chunk_buckets; i++) {
-                bucket2_buckets[i] = buffer + i * BUCKET_SIZE;
+                bucket2_buckets[i] =
+                    buffer + (i + chunk_buckets) * BUCKET_SIZE;
+                memcpy(buffer + i * BUCKET_SIZE, bucket1_buckets[i],
+                        sizeof(*buffer) * BUCKET_SIZE);
             }
         } else {
             for (size_t i = 0; i < chunk_buckets; i++) {
-                bucket1_buckets[i] = buffer + i * BUCKET_SIZE;
+                bucket1_buckets[i] =
+                    buffer + (i + chunk_buckets) * BUCKET_SIZE;
+                memcpy(buffer + i * BUCKET_SIZE, bucket2_buckets[i],
+                        sizeof(*buffer) * BUCKET_SIZE);
             }
         }
 
-        /* Post receives for remote buckets. */
-        mpi_tls_request_t requests[MERGE_SPLIT_REMOTE_CHUNK_BUCKETS];
-        for (size_t i = 0; i < chunk_buckets; i++) {
-            ret = mpi_tls_irecv_bytes(buffer + i * BUCKET_SIZE,
-                    sizeof(*buffer) * BUCKET_SIZE, nonlocal_rank,
-                    nonlocal_bucket_idx, &requests[i]);
-            if (ret) {
-                handle_error_string(
-                        "Error receiving remote bucket into %d from %d",
-                        world_rank, nonlocal_rank);
-                goto exit_free_bucket2_buckets;
-            }
+        /* Post receive for remote buckets. */
+        mpi_tls_request_t request;
+        ret = mpi_tls_irecv_bytes(buffer + chunk_buckets * BUCKET_SIZE,
+                sizeof(*buffer) * chunk_buckets * BUCKET_SIZE, nonlocal_rank,
+                nonlocal_bucket_idx, &request);
+        if (ret) {
+            handle_error_string(
+                    "Error receiving remote buckets into %d from %d",
+                    world_rank, nonlocal_rank);
+            goto exit_free_bucket2_buckets;
         }
 
         /* Send local buckets. */
-        for (size_t i = 0; i < chunk_buckets; i++) {
-            ret = mpi_tls_send_bytes(
-                    bucket1_local ? bucket1_buckets[i] : bucket2_buckets[i],
-                    sizeof(*bucket1_buckets[i]) * BUCKET_SIZE, nonlocal_rank,
-                    local_bucket_idx);
-            if (ret) {
-                handle_error_string("Error sending local bucket from %d to %d",
-                        world_rank, nonlocal_rank);
-                goto exit_free_bucket2_buckets;
-            }
+        ret = mpi_tls_send_bytes(buffer,
+                sizeof(*buffer) * chunk_buckets * BUCKET_SIZE, nonlocal_rank,
+                local_bucket_idx);
+        if (ret) {
+            handle_error_string("Error sending local buckets from %d to %d",
+                    world_rank, nonlocal_rank);
+            goto exit_free_bucket2_buckets;
         }
 
-        /* Wait for bucket receives. */
-        for (size_t i = 0; i < chunk_buckets; i++) {
-            ret = mpi_tls_wait(&requests[i], MPI_TLS_STATUS_IGNORE);
-            if (ret) {
-                handle_error_string(
-                        "Error waiting on receive for bucket into %d from %d",
-                        world_rank, nonlocal_rank);
-                goto exit_free_bucket2_buckets;
-            }
+        /* Wait for bucket receive. */
+        ret = mpi_tls_wait(&request, MPI_TLS_STATUS_IGNORE);
+        if (ret) {
+            handle_error_string(
+                    "Error waiting on receive for buckets into %d from %d",
+                    world_rank, nonlocal_rank);
+            goto exit_free_bucket2_buckets;
         }
     }
 
