@@ -562,15 +562,21 @@ int main(int argc, char **argv) {
             arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE);
             break;
         case SORT_BUCKET: {
+            /* The total number of buckets is the max of either double the
+             * number of buckets needed to hold all the elements or double the
+             * number of enclaves (since each enclaves needs at least two
+             * buckets. */
             size_t num_buckets =
                 MAX(next_pow2l(length) * 2 / BUCKET_SIZE, world_size * 2);
             size_t local_num_buckets =
                 num_buckets * (world_rank + 1) / world_size
                     - num_buckets * world_rank / world_size;
+            /* The bucket sort relies on having 2 local buffers, so we allocate
+             * double the size of a single buffer (a single buffer is
+             * local_num_buckets * BUCKET_SIZE * SIZEOF_ENCRYPTED_NODE). */
             arr =
-                malloc(
-                        local_num_buckets * BUCKET_SIZE * SIZEOF_ENCRYPTED_NODE
-                            * 4);
+                malloc(local_num_buckets * BUCKET_SIZE
+                        * SIZEOF_ENCRYPTED_NODE * 2);
             break;
         }
     }

@@ -1664,7 +1664,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     size_t local_start = get_local_bucket_start(world_rank) * BUCKET_SIZE;
     size_t local_length = num_local_buckets * BUCKET_SIZE;
 
-    unsigned char *buf = arr + local_length * 2 * SIZEOF_ENCRYPTED_NODE;
+    unsigned char *buf = arr + local_length * SIZEOF_ENCRYPTED_NODE;
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_start;
