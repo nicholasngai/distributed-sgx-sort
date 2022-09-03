@@ -683,12 +683,16 @@ int mpi_tls_send_bytes(const void *buf, size_t count, int dest, int tag) {
     struct mpi_tls_session *session = &sessions[dest];
     int ret = -1;
 
+    spinlock_lock(&session->lock);
+
     ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
         goto exit;
     }
     size_t max_payload_len = ret;
+
+    spinlock_unlock(&session->lock);
 
     /* Allocate bio. */
     struct mpi_tls_frag_header header;
@@ -748,6 +752,8 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
         tag = OCALL_MPI_ANY_TAG;
     }
 
+    spinlock_lock(&session->lock);
+
     ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
@@ -761,6 +767,8 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
         goto exit;
     }
     size_t max_record_len = max_payload_len + ret;
+
+    spinlock_unlock(&session->lock);
 
     /* Allocate bio. */
     struct mpi_tls_frag_header header; // TODO
@@ -810,12 +818,16 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
     const unsigned char *buf = buf_;
     int ret = -1;
 
+    spinlock_lock(&session->lock);
+
     ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
         goto exit;
     }
     size_t max_payload_len = ret;
+
+    spinlock_unlock(&session->lock);
 
     /* Allocate bio. */
     struct mpi_tls_frag_header header;
@@ -874,6 +886,8 @@ int mpi_tls_irecv_bytes(void *buf_, size_t count, int src, int tag,
     unsigned char *buf = buf_;
     int ret = -1;
 
+    spinlock_lock(&session->lock);
+
     ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
@@ -887,6 +901,8 @@ int mpi_tls_irecv_bytes(void *buf_, size_t count, int src, int tag,
         goto exit;
     }
     size_t max_record_len = max_payload_len + ret;
+
+    spinlock_unlock(&session->lock);
 
     if (src == MPI_TLS_ANY_SOURCE) {
         src = OCALL_MPI_ANY_SOURCE;
