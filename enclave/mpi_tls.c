@@ -680,9 +680,10 @@ exit:
 }
 
 int mpi_tls_send_bytes(const void *buf, size_t count, int dest, int tag) {
+    struct mpi_tls_session *session = &sessions[dest];
     int ret = -1;
 
-    ret = mbedtls_ssl_get_max_out_record_payload(&sessions[dest].ssl);
+    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
         goto exit;
@@ -703,8 +704,7 @@ int mpi_tls_send_bytes(const void *buf, size_t count, int dest, int tag) {
     /* Send message to bio. */
     size_t bio_used;
     ret =
-        send_to_bio(&sessions[dest], &header, buf, count, bio, bio_len,
-                &bio_used);
+        send_to_bio(session, &header, buf, count, bio, bio_len, &bio_used);
     if (ret) {
         handle_error_string("Error sending DTLS message to bio");
         goto exit_free_bio;
@@ -733,6 +733,8 @@ exit:
 
 int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
         mpi_tls_status_t *status) {
+    struct mpi_tls_session *session =
+        &sessions[src != OCALL_MPI_ANY_SOURCE ? src : world_rank == 0];
     int ret = -1;
 
     mpi_tls_status_t ignored_status;
@@ -746,16 +748,14 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
         tag = OCALL_MPI_ANY_TAG;
     }
 
-    ret = mbedtls_ssl_get_max_out_record_payload(
-            &sessions[src != OCALL_MPI_ANY_SOURCE ? src : world_rank == 0].ssl);
+    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
         goto exit;
     }
     size_t max_payload_len = ret;
 
-    ret = mbedtls_ssl_get_record_expansion(
-            &sessions[src != OCALL_MPI_ANY_SOURCE ? src : world_rank == 0].ssl);
+    ret = mbedtls_ssl_get_record_expansion(&session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_record_expansion");
         goto exit;
@@ -806,10 +806,11 @@ exit:
 
 int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
         mpi_tls_request_t *request) {
+    struct mpi_tls_session *session = &sessions[dest];
     const unsigned char *buf = buf_;
     int ret = -1;
 
-    ret = mbedtls_ssl_get_max_out_record_payload(&sessions[dest].ssl);
+    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
         goto exit;
@@ -832,7 +833,7 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
     /* Send message to bio. */
     size_t bio_used;
     ret =
-        send_to_bio(&sessions[dest], &header, buf, count, request->bio,
+        send_to_bio(session, &header, buf, count, request->bio,
                 request->bio_len, &bio_used);
     if (ret) {
         handle_error_string("Error sending DTLS message to bio");
@@ -868,19 +869,19 @@ exit_free_bio:
 
 int mpi_tls_irecv_bytes(void *buf_, size_t count, int src, int tag,
         mpi_tls_request_t *request) {
+    struct mpi_tls_session *session =
+        &sessions[src != OCALL_MPI_ANY_SOURCE ? src : world_rank == 0];
     unsigned char *buf = buf_;
     int ret = -1;
 
-    ret = mbedtls_ssl_get_max_out_record_payload(
-            &sessions[src != OCALL_MPI_ANY_SOURCE ? src : world_rank == 0].ssl);
+    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
         goto exit;
     }
     size_t max_payload_len = ret;
 
-    ret = mbedtls_ssl_get_record_expansion(
-            &sessions[src != OCALL_MPI_ANY_SOURCE ? src : world_rank == 0].ssl);
+    ret = mbedtls_ssl_get_record_expansion(&session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_record_expansion");
         goto exit;
