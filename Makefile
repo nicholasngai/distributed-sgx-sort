@@ -45,8 +45,8 @@ BASELINE_DEPS = $(BASELINE_TARGETS:=.d)
 
 CPPFLAGS = -I. -Ithird_party/liboblivious/include
 CFLAGS = -O3 -Wall -Wextra
-LDFLAGS = -Lthird_party/liboblivious
-LDLIBS = -l:liboblivious.a
+LDFLAGS =
+LDLIBS =
 
 # all target.
 
@@ -84,38 +84,40 @@ third_party/liboblivious/liboblivious.a third_party/liboblivious/liboblivious.so
 
 # Host.
 
-HOST_CPPFLAGS =
-HOST_CFLAGS = \
+HOST_CPPFLAGS = $(CPPFLAGS)
+HOST_CFLAGS = $(CFLAGS) \
+	$(CFLAGS) \
 	$(shell pkg-config mpi --cflags) \
 	$(shell pkg-config oehost-$(C_COMPILER) --cflags)
-HOST_LDFLAGS =
-HOST_LDLIBS = -lmbedcrypto \
+HOST_LDFLAGS = $(LDFLAGS)
+HOST_LDLIBS = $(LDLIBS) \
+	-lmbedcrypto \
 	$(shell pkg-config mpi --libs) \
 	$(shell pkg-config oehost-$(C_COMPILER) --libs)
 
-$(HOST_DIR)/%.o: CPPFLAGS += $(HOST_CPPFLAGS)
-$(HOST_DIR)/%.o: CFLAGS += $(HOST_CFLAGS)
+$(HOST_DIR)/%.o: $(HOST_DIR)/%.c
+	$(CC) $(HOST_CFLAGS) $(HOST_CPPFLAGS) -c -o $@ $<
 
-$(HOST_TARGET): LDFLAGS += $(HOST_LDFLAGS)
-$(HOST_TARGET): LDLIBS += $(HOST_LDLIBS) $(HOST_OE_LDLIBS)
 $(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) third_party/liboblivious/liboblivious.a
+	$(CC) $(HOST_LDFLAGS) $^ $(HOST_LDLIBS) -o $@
 
 # Enclave.
 
-ENCLAVE_CPPFLAGS =
-ENCLAVE_CFLAGS = \
+ENCLAVE_CPPFLAGS = $(CPPFLAGS)
+ENCLAVE_CFLAGS = $(CFLAGS) \
 	$(shell pkg-config oeenclave-$(C_COMPILER) --cflags)
-ENCLAVE_LDFLAGS =
-ENCLAVE_LDLIBS = \
+ENCLAVE_LDFLAGS = $(LDFLAGS) \
+	-Lthird_party/liboblivious
+ENCLAVE_LDLIBS = $(LDLIBS) \
+	-l:liboblivious.a \
 	$(shell pkg-config oeenclave-$(C_COMPILER) --libs) \
 	$(shell pkg-config oeenclave-$(C_COMPILER) --variable=mbedtlslibs)
 
-$(ENCLAVE_DIR)/%.o: CPPFLAGS += $(ENCLAVE_CPPFLAGS)
-$(ENCLAVE_DIR)/%.o: CFLAGS += $(ENCLAVE_CFLAGS)
+$(ENCLAVE_DIR)/%.o: $(ENCLAVE_DIR)/%.c
+	$(CC) $(ENCLAVE_CFLAGS) $(ENCLAVE_CPPFLAGS) -c -o $@ $<
 
-$(ENCLAVE_TARGET): LDFLAGS += $(ENCLAVE_LDFLAGS)
-$(ENCLAVE_TARGET): LDLIBS += $(ENCLAVE_LDLIBS)
 $(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) third_party/liboblivious/liboblivious.a
+	$(CC) $(ENCLAVE_LDFLAGS) $^ $(ENCLAVE_LDLIBS) -o $@
 
 $(ENCLAVE_TARGET).signed: $(ENCLAVE_TARGET) $(ENCLAVE_KEY) $(ENCLAVE_PUBKEY) $(ENCLAVE_CONF)
 	$(SGX_SIGN) sign -e $< -k $(ENCLAVE_KEY) -c $(ENCLAVE_CONF)
@@ -128,39 +130,35 @@ $(ENCLAVE_PUBKEY): $(ENCLAVE_KEY) $(ENCLAVE_CONF)
 
 # Common.
 
-$(COMMON_DIR)/%.o: CPPFLAGS += $(HOST_CPPFLAGS)
-$(COMMON_DIR)/%.o: CFLAGS += $(HOST_CFLAGS)
+$(COMMON_DIR)/%.o: $(COMMON_DIR)/%.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
 # Host-only binary for profiling.
 
 HOSTONLY_CPPFLAGS = $(HOST_CPPFLAGS) -DDISTRIBUTED_SGX_SORT_HOSTONLY
 HOSTONLY_CFLAGS = $(HOST_CFLAGS) -Wno-implicit-function-declaration -Wno-unused
-HOSTONLY_LDFLAGS = $(HOST_CFLAGS)
-HOSTONLY_LDLIBS = $(HOST_LDLIBS) -lmbedx509 -lmbedtls
+HOSTONLY_LDFLAGS = $(HOST_LDFLAGS) \
+	-Lthird_party/liboblivious
+HOSTONLY_LDLIBS = $(HOST_LDLIBS) \
+	-l:liboblivious.a \
+	-lmbedx509 \
+	-lmbedtls
 
-$(HOSTONLY_TARGET): CPPFLAGS += $(HOSTONLY_CPPFLAGS)
-$(HOSTONLY_TARGET): CFLAGS += $(HOSTONLY_CFLAGS)
-$(HOSTONLY_TARGET): LDFLAGS += $(HOSTONLY_LDFLAGS)
-$(HOSTONLY_TARGET): LDLIBS += $(HOSTONLY_LDLIBS)
 $(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@
+	$(CC) $(HOSTONLY_CFLAGS) $(HOSTONLY_CPPFLAGS) $(HOSTONLY_LDFLAGS) $^ $(HOSTONLY_LDLIBS) -o $@
 
 # Baselines.
 
-BASELINE_CPPFLAGS = -I. -I$(ENCLAVE_DIR)/third_party/liboblivious/include
-BASELINE_CFLAGS = \
+BASELINE_CPPFLAGS = $(CPPFLAGS)
+BASELINE_CFLAGS = $(CFLAGS) \
 	$(shell pkg-config mpi --cflags)
-BASELINE_LDFLAGS =
-BASELINE_LDLIBS = -lmbedcrypto \
+BASELINE_LDFLAGS = $(LDFLAGS)
+BASELINE_LDLIBS = $(LDLIBS) \
+	-lmbedcrypto \
 	$(shell pkg-config mpi --libs)
 
-$(BASELINE_TARGETS): CPPFLAGS += $(BASELINE_CPPFLAGS) -DDISTRIBUTED_SGX_SORT_HOSTONLY
-$(BASELINE_TARGETS): CFLAGS += $(BASELINE_CFLAGS)
-$(BASELINE_TARGETS): LDFLAGS += $(BASELINE_LDFLAGS)
-$(BASELINE_TARGETS): LDLIBS += $(BASELINE_LDLIBS)
-$(BASELINE_DIR)/bitonic: $(BASELINE_DIR)/bitonic.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
-$(BASELINE_DIR)/nonoblivious-bitonic: $(BASELINE_DIR)/nonoblivious-bitonic.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
-$(BASELINE_DIR)/nonoblivious-quickselect: $(BASELINE_DIR)/nonoblivious-quickselect.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
+$(BASELINE_DIR)/%: $(BASELINE_DIR)/%.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
+	$(CC) $(BASELINE_CFLAGS) $(BASELINE_CPPFLAGS) $(BASELINE_LDFLAGS) $^ $(BASELINE_LDLIBS) -o $@
 
 # Misc.
 
