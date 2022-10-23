@@ -403,7 +403,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
         sessions[i].out_bio_len = requests[i].out_bio_len;
     }
 
-    /* Handshake with all nodes. Reepatedly loop until all handshakes are
+    /* Handshake with all elems. Reepatedly loop until all handshakes are
      * finished. */
 
     bool all_init_finished;

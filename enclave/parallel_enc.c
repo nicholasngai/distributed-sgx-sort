@@ -3,8 +3,8 @@
 #include <liboblivious/primitives.h>
 #include "common/crypto.h"
 #include "common/defs.h"
+#include "common/elem_t.h"
 #include "common/error.h"
-#include "common/node_t.h"
 #include "enclave/bitonic.h"
 #include "enclave/bucket.h"
 #include "enclave/mpi_tls.h"

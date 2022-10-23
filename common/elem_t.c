@@ -1,10 +1,10 @@
-#include "node_t.h"
+#include "elem_t.h"
 #include <stdlib.h>
 #include "common/error.h"
 
 /* Node encryption and decryption. */
 
-int node_encrypt(const void *key, const node_t *node, void *dst_, size_t idx) {
+int elem_encrypt(const void *key, const elem_t *elem, void *dst_, size_t idx) {
     int ret;
     unsigned char *dst = dst_;
 
@@ -15,7 +15,7 @@ int node_encrypt(const void *key, const node_t *node, void *dst_, size_t idx) {
         handle_error_string("Error generating random IV");
         goto exit;
     }
-    ret = aad_encrypt(key, node, sizeof(*node), &idx, sizeof(idx), dst,
+    ret = aad_encrypt(key, elem, sizeof(*elem), &idx, sizeof(idx), dst,
             dst + IV_LEN + TAG_LEN, dst + IV_LEN);
     if (ret < 0) {
         handle_error_string("Error in encryption");
@@ -28,14 +28,14 @@ exit:
     return ret;
 }
 
-int node_decrypt(const void *key, node_t *node, const void *src_, size_t idx) {
+int elem_decrypt(const void *key, elem_t *elem, const void *src_, size_t idx) {
     int ret;
     const unsigned char *src = src_;
 
     /* The IV is the first 12 bytes. The tag is the next 16 bytes. The
      * ciphertext is the remaining 128 bytes. */
-    ret = aad_decrypt(key, src + IV_LEN + TAG_LEN, sizeof(*node), &idx,
-            sizeof(idx), src, src + IV_LEN, node);
+    ret = aad_decrypt(key, src + IV_LEN + TAG_LEN, sizeof(*elem), &idx,
+            sizeof(idx), src, src + IV_LEN, elem);
     if (ret < 0) {
         handle_error_string("Error in decryption");
         goto exit;

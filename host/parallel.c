@@ -10,8 +10,8 @@
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 #include "common/crypto.h"
 #include "common/defs.h"
+#include "common/elem_t.h"
 #include "common/error.h"
-#include "common/node_t.h"
 #include "common/ocalls.h"
 #include "common/util.h"
 #include "enclave/bucket.h"
@@ -595,16 +595,16 @@ int main(int argc, char **argv) {
     }
     srand(world_rank + 1);
     for (size_t i = local_start; i < local_start + local_length; i++) {
-        /* Initialize node. */
-        node_t node;
-        memset(&node, '\0', sizeof(node));
-        node.key = rand();
+        /* Initialize elem. */
+        elem_t elem;
+        memset(&elem, '\0', sizeof(elem));
+        elem.key = rand();
 
         /* Encrypt to array. */
         unsigned char *start = arr + (i - local_start) * SIZEOF_ENCRYPTED_NODE;
-        ret = node_encrypt(key, &node, start, i);
+        ret = elem_encrypt(key, &elem, start, i);
         if (ret < 0) {
-            handle_error_string("Error encrypting node in host");
+            handle_error_string("Error encrypting elem in host");
         }
     }
     rand_free();
@@ -670,35 +670,35 @@ int main(int argc, char **argv) {
     for (int rank = 0; rank < world_size; rank++) {
         if (rank == world_rank) {
             for (size_t i = local_start; i < local_start + local_length; i++) {
-                /* Decrypt node. */
-                node_t node;
+                /* Decrypt elem. */
+                elem_t elem;
                 unsigned char *start = arr + (i - local_start) * SIZEOF_ENCRYPTED_NODE;
-                ret = node_decrypt(key, &node, start, i);
+                ret = elem_decrypt(key, &elem, start, i);
                 if (ret < 0) {
-                    handle_error_string("Error decrypting node in host");
+                    handle_error_string("Error decrypting elem in host");
                 }
-                //printf("%d: %lu\n", world_rank, node.key);
+                //printf("%d: %lu\n", world_rank, elem.key);
                 if (i == local_start) {
-                   first_key = node.key;
-                } else if (prev_key > node.key) {
+                   first_key = elem.key;
+                } else if (prev_key > elem.key) {
                     printf("Not sorted correctly!\n");
                     break;
                 }
-                prev_key = node.key;
+                prev_key = elem.key;
             }
         }
         MPI_Barrier(MPI_COMM_WORLD);
     }
 
     if (world_rank < world_size - 1) {
-        /* Send largest value to next node. prev_key now contains the last item
+        /* Send largest value to next elem. prev_key now contains the last item
          * in the array. */
         MPI_Send(&prev_key, 1, MPI_UNSIGNED_LONG_LONG, world_rank + 1, 0,
                 MPI_COMM_WORLD);
     }
 
     if (world_rank > 0) {
-        /* Receive previous node's largest value and compare. */
+        /* Receive previous elem's largest value and compare. */
         MPI_Recv(&prev_key, 1, MPI_UNSIGNED_LONG_LONG, world_rank - 1, 0,
                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         if (prev_key > first_key) {

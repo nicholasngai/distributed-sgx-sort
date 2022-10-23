@@ -10,8 +10,8 @@
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
 #include "common/defs.h"
+#include "common/elem_t.h"
 #include "common/error.h"
-#include "common/node_t.h"
 #include "common/util.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
@@ -30,7 +30,7 @@ static size_t total_length;
 static unsigned char key[16];
 
 /* Thread-local buffer used for generic operations. */
-static _Thread_local node_t *buffer;
+static _Thread_local elem_t *buffer;
 
 /* Cache used to store decrypted buckets in enclave memory. */
 struct eviction {
@@ -39,7 +39,7 @@ struct eviction {
     struct eviction *prev;
     struct eviction *next;
 };
-static node_t *cache;
+static elem_t *cache;
 static struct {
     spinlock_t lock;
     struct eviction *evictions;
@@ -92,8 +92,8 @@ int bucket_init(void) {
 
     /* Attempt to allocate buffer first by test-and-setting the pointer, which
      * should be unset (AKA NULL) if not yet allocated. */
-    node_t *temp = NULL;
-    if (__atomic_compare_exchange_n(&cache, &temp, (node_t *) 0x1, false,
+    elem_t *temp = NULL;
+    if (__atomic_compare_exchange_n(&cache, &temp, (elem_t *) 0x1, false,
                 __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
         cache =
             malloc(BUCKET_SIZE * CACHE_SETS * CACHE_ASSOCIATIVITY
@@ -114,7 +114,7 @@ exit:
 
 void bucket_free(void) {
     /* Attempt to free buffer. */
-    node_t *temp = cache;
+    elem_t *temp = cache;
     if (buffer) {
         if (__atomic_compare_exchange_n(&cache, &temp, NULL, false,
                     __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
@@ -142,13 +142,13 @@ static int evict_bucket(void *arr_, size_t buffer_idx, size_t bucket_idx) {
     size_t local_bucket_start = get_local_bucket_start(world_rank);
 
     for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        ret = node_encrypt(key, &cache[buffer_idx * BUCKET_SIZE + i],
+        ret = elem_encrypt(key, &cache[buffer_idx * BUCKET_SIZE + i],
                 arr
                     + ((bucket_idx - local_bucket_start) * BUCKET_SIZE + i)
                         * SIZEOF_ENCRYPTED_NODE,
                 bucket_idx * BUCKET_SIZE + i);
         if (ret) {
-            handle_error_string("Error encrypting node %lu",
+            handle_error_string("Error encrypting elem %lu",
                     bucket_idx * BUCKET_SIZE + i);
             goto exit;
         }
@@ -163,7 +163,7 @@ exit:
 }
 
 /* Loads the bucket ARR[BUCKET_IDX - LOCAL_BUCKET_START], assuming that ARR is
- * an array of encrypted nodes such that each BUCKET_SIZE nodes i one bucket.
+ * an array of encrypted elems such that each BUCKET_SIZE elems i one bucket.
  * Buckets are decrypted as if ARR[0] is encrypted using START_IDX.
  *
  * The buffer is a BUCKET_ASSOCIATIVTY-way set associative cache indexed using
@@ -171,7 +171,7 @@ exit:
  * is meant to reduce the overhead of accessing buckets as much as possible, but
  * it means that a small buffer size will lead to non-ideal multithreading
  * behaviors, since all threads share the same buffer. */
-static node_t *load_bucket(void *arr_, size_t bucket_idx) {
+static elem_t *load_bucket(void *arr_, size_t bucket_idx) {
     unsigned char *arr = arr_;
 
     size_t local_bucket_start = get_local_bucket_start(world_rank);
@@ -298,16 +298,16 @@ static node_t *load_bucket(void *arr_, size_t bucket_idx) {
     __atomic_add_fetch(&cache_misses, 1, __ATOMIC_RELAXED);
 #endif /* DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER */
 
-    /* If missed, decrypt the nodes from host memory and then return the pointer
+    /* If missed, decrypt the elems from host memory and then return the pointer
      * to the buffer. */
     for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        int ret = node_decrypt(key, &cache[cache_idx * BUCKET_SIZE + i],
+        int ret = elem_decrypt(key, &cache[cache_idx * BUCKET_SIZE + i],
                 arr
                     + ((bucket_idx - local_bucket_start) * BUCKET_SIZE + i)
                         * SIZEOF_ENCRYPTED_NODE,
                 bucket_idx * BUCKET_SIZE + i);
         if (ret) {
-            handle_error_string("Error decrypting node %lu",
+            handle_error_string("Error decrypting elem %lu",
                     bucket_idx * BUCKET_SIZE + i);
             goto exit;
         }
@@ -319,7 +319,7 @@ exit:
     return NULL;
 }
 
-static void free_bucket(node_t *bucket) {
+static void free_bucket(elem_t *bucket) {
     size_t cache_idx = (uintptr_t) (bucket - cache) / BUCKET_SIZE;
     size_t set_idx = cache_idx / CACHE_ASSOCIATIVITY;
     size_t line_idx = cache_idx % CACHE_ASSOCIATIVITY;
@@ -363,7 +363,7 @@ struct assign_random_id_args {
     size_t length;
     size_t src_start_idx;
     size_t result_start_idx;
-    node_t *dummy_node;
+    elem_t *dummy_elem;
     int ret;
 };
 static void assign_random_id(void *args_, size_t i) {
@@ -372,38 +372,38 @@ static void assign_random_id(void *args_, size_t i) {
     unsigned char *out = args->out;
     int ret;
 
-    node_t *node;
+    elem_t *elem;
     if (i % 2 == 0 && i < args->length * 2) {
-        /* Decrypt index i / 2 as node. */
-        node_t real_node;
-        ret = node_decrypt(key, &real_node, arr + i / 2 * SIZEOF_ENCRYPTED_NODE,
+        /* Decrypt index i / 2 as elem. */
+        elem_t real_elem;
+        ret = elem_decrypt(key, &real_elem, arr + i / 2 * SIZEOF_ENCRYPTED_NODE,
                 i / 2 + args->src_start_idx);
         if (ret) {
-            handle_error_string("Error decrypting node %lu",
+            handle_error_string("Error decrypting elem %lu",
                     i + args->src_start_idx);
             goto exit;
         }
 
-        /* Assign ORP ID and initialize node. */
-        ret = rand_read(&real_node.orp_id, sizeof(real_node.orp_id));
+        /* Assign ORP ID and initialize elem. */
+        ret = rand_read(&real_elem.orp_id, sizeof(real_elem.orp_id));
         if (ret) {
-            handle_error_string("Error assigning random ID to node %lu",
+            handle_error_string("Error assigning random ID to elem %lu",
                     i + args->result_start_idx);
             goto exit;
         }
-        real_node.is_dummy = false;
+        real_elem.is_dummy = false;
 
-        node = &real_node;
+        elem = &real_elem;
     } else {
-        /* Use dummy node. */
-        node = args->dummy_node;
+        /* Use dummy elem. */
+        elem = args->dummy_elem;
     }
 
     /* Encrypt to index i. */
-    ret = node_encrypt(key, node, out + i * SIZEOF_ENCRYPTED_NODE,
+    ret = elem_encrypt(key, elem, out + i * SIZEOF_ENCRYPTED_NODE,
             i + args->result_start_idx);
     if (ret) {
-        handle_error_string("Error encrypting node %lu",
+        handle_error_string("Error encrypting elem %lu",
                 i + args->result_start_idx);
         goto exit;
     }
@@ -416,7 +416,7 @@ exit:
     }
 }
 
-/* Assigns random ORP IDs to the encrypted nodes, whose first element is
+/* Assigns random ORP IDs to the encrypted elems, whose first element is
  * encrypted with index SRC_START_IDX, in ARR and distributes them evenly over
  * the 2 * LENGTH elements in OUT, re-encrypting them according to
  * RESULT_START_IDX. Thus, ARR is assumed to be at least
@@ -427,9 +427,9 @@ static int assign_random_ids_and_spread(const void *arr, void *out,
         size_t length, size_t src_start_idx, size_t result_start_idx) {
     int ret;
 
-    node_t dummy_node;
-    memset(&dummy_node, '\0', sizeof(dummy_node));
-    dummy_node.is_dummy = true;
+    elem_t dummy_elem;
+    memset(&dummy_elem, '\0', sizeof(dummy_elem));
+    dummy_elem.is_dummy = true;
 
     struct assign_random_id_args args = {
         .arr = arr,
@@ -437,7 +437,7 @@ static int assign_random_ids_and_spread(const void *arr, void *out,
         .length = length,
         .src_start_idx = src_start_idx,
         .result_start_idx = result_start_idx,
-        .dummy_node = &dummy_node,
+        .dummy_elem = &dummy_elem,
         .ret = 0,
     };
     struct thread_work work = {
@@ -463,34 +463,34 @@ exit:
 
 /* Compare elements by the BIT_IDX bit of the ORP ID, then by dummy element
  * (real elements first). */
-static int merge_split_comparator(const node_t *a, const node_t *b,
+static int merge_split_comparator(const elem_t *a, const elem_t *b,
         size_t bit_idx) {
-    /* Compare and obliviously swap if the BIT_IDX bit of ORP ID of node A is
-     * 1 and that of node B is 0 or if the ORP IDs are the same, but node A is a
-     * dummy and node B is real. */
+    /* Compare and obliviously swap if the BIT_IDX bit of ORP ID of elem A is
+     * 1 and that of elem B is 0 or if the ORP IDs are the same, but elem A is a
+     * dummy and elem B is real. */
     char bit_a = (a->orp_id >> bit_idx) & 1;
     char bit_b = (b->orp_id >> bit_idx) & 1;
     return (bit_a << 1) - (bit_b << 1) + a->is_dummy - b->is_dummy;
 }
 
 struct merge_split_swapper_aux {
-    node_t *bucket1;
-    node_t *bucket2;
+    elem_t *bucket1;
+    elem_t *bucket2;
     size_t bit_idx;
 };
 static void merge_split_swapper(size_t a, size_t b, void *aux_) {
     struct merge_split_swapper_aux *aux = aux_;
-    node_t *node_a =
+    elem_t *elem_a =
         &(a < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[a % BUCKET_SIZE];
-    node_t *node_b =
+    elem_t *elem_b =
         &(b < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[b % BUCKET_SIZE];
-    int comp = merge_split_comparator(node_a, node_b, aux->bit_idx);
-    o_memswap(node_a, node_b, sizeof(*node_a), comp > 0);
+    int comp = merge_split_comparator(elem_a, elem_b, aux->bit_idx);
+    o_memswap(elem_a, elem_b, sizeof(*elem_a), comp > 0);
 }
 
 /* Merge BUCKET1 and BUCKET2 and split such that BUCKET1 contains all elements
  * corresponding with bit 0 and BUCKET2 contains all elements corresponding with
- * bit 1, with the bit given by the bit in BIT_IDX of the nodes' ORP IDs. Note
+ * bit 1, with the bit given by the bit in BIT_IDX of the elems' ORP IDs. Note
  * that this is a modified version of the merge-split algorithm from the paper,
  * since the elements are swapped in-place rather than being swapped between
  * different buckets on different layers. */
@@ -513,8 +513,8 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     int nonlocal_bucket_idx = bucket1_local ? bucket2_idx : bucket1_idx;
     int nonlocal_rank = bucket1_local ? bucket2_rank : bucket1_rank;
 
-    /* Load bucket 1 nodes if local. */
-    node_t *bucket1;
+    /* Load bucket 1 elems if local. */
+    elem_t *bucket1;
     if (bucket1_local) {
         bucket1 = load_bucket(arr, bucket1_idx);
         if (!bucket1) {
@@ -524,8 +524,8 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
         }
     }
 
-    /* Load bucket 2 nodes if local. */
-    node_t *bucket2;
+    /* Load bucket 2 elems if local. */
+    elem_t *bucket2;
     if (bucket2_local) {
         bucket2 = load_bucket(arr, bucket2_idx);
         if (!bucket2) {
@@ -555,7 +555,7 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     }
 
     /* If remote, send the current count and then our local buckets. Then,
-     * receive the sent count and remote buckets from the other node. */
+     * receive the sent count and remote buckets from the other elem. */
     if (!bucket1_local || !bucket2_local) {
         /* Post receive for count. */
         mpi_tls_request_t count_request;
@@ -631,14 +631,14 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
 
     /* Assign dummy elements. */
     for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        /* If count1 > 0 and the node is a dummy element, set BIT_IDX bit of ORP
+        /* If count1 > 0 and the elem is a dummy element, set BIT_IDX bit of ORP
          * ID and decrement count1. Else, clear BIT_IDX bit of ORP ID. */
         bucket1[i].orp_id &= ~(bucket1[i].is_dummy << bit_idx);
         bucket1[i].orp_id |= ((bool) count1 & bucket1[i].is_dummy) << bit_idx;
         count1 -= (bool) count1 & bucket1[i].is_dummy;
     }
     for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        /* If count1 > 0 and the node is a dummy element, set BIT_IDX bit of ORP
+        /* If count1 > 0 and the elem is a dummy element, set BIT_IDX bit of ORP
          * ID and decrement count1. Else, clear BIT_IDX bit of ORP ID. */
         bucket2[i].orp_id &= ~(bucket2[i].is_dummy << bit_idx);
         bucket2[i].orp_id |= ((bool) count1 & bucket2[i].is_dummy) << bit_idx;
@@ -726,8 +726,8 @@ exit:
 /* Compares elements by their ORP ID. */
 static int permute_comparator(const void *a_, const void *b_,
         void *aux UNUSED) {
-    const node_t *a = a_;
-    const node_t *b = b_;
+    const elem_t *a = a_;
+    const elem_t *b = b_;
     return (a > b) - (a < b);
 }
 
@@ -735,8 +735,8 @@ static int permute_comparator(const void *a_, const void *b_,
  * beginning of the bucket) by sorting according to all bits of the ORP ID. This
  * is valid because the bin assignment used the lower bits of the ORP ID,
  * leaving the upper bits free for comparison and permutation within the bin.
- * The nodes are then written sequentially to ARR[*COMPRESS_IDX], and
- * *COMPRESS_IDX is incremented. The nodes receive new random ORP IDs. The first
+ * The elems are then written sequentially to ARR[*COMPRESS_IDX], and
+ * *COMPRESS_IDX is incremented. The elems receive new random ORP IDs. The first
  * element is assumed to have START_IDX for the purposes of decryption. */
 struct permute_and_compress_args {
     const void *arr;
@@ -751,20 +751,20 @@ static void permute_and_compress(void *args_, size_t bucket_idx) {
     unsigned char *out = args->out;
     int ret;
 
-    /* Decrypt nodes from bucket to buffer. */
+    /* Decrypt elems from bucket to buffer. */
     for (size_t i = 0; i < BUCKET_SIZE; i++) {
         size_t i_idx = bucket_idx * BUCKET_SIZE + i + args->start_idx;
 
-        ret = node_decrypt(key, buffer + i,
+        ret = elem_decrypt(key, buffer + i,
                 arr + (bucket_idx * BUCKET_SIZE + i) * SIZEOF_ENCRYPTED_NODE,
                 i_idx);
         if (ret) {
-            handle_error_string("Error decrypting node %lu", i_idx);
+            handle_error_string("Error decrypting elem %lu", i_idx);
             goto exit;
         }
     }
 
-    /* Scan for first dummy node. */
+    /* Scan for first dummy elem. */
     size_t real_len = BUCKET_SIZE;
     for (size_t i = 0; i < BUCKET_SIZE; i++) {
         if (buffer[i].is_dummy) {
@@ -775,7 +775,7 @@ static void permute_and_compress(void *args_, size_t bucket_idx) {
 
     o_sort(buffer, real_len, sizeof(*buffer), permute_comparator, NULL);
 
-    /* Assign random ORP IDs and encrypt nodes from buffer to compressed
+    /* Assign random ORP IDs and encrypt elems from buffer to compressed
      * array. */
     for (size_t i = 0; i < real_len; i++) {
         /* Fetch the next index to encrypt. */
@@ -791,11 +791,11 @@ static void permute_and_compress(void *args_, size_t bucket_idx) {
         }
 
         /* Encrypt. */
-        ret = node_encrypt(key, buffer + i,
+        ret = elem_encrypt(key, buffer + i,
                 out + out_idx * SIZEOF_ENCRYPTED_NODE,
                 out_idx + args->start_idx);
         if (ret) {
-            handle_error_string("Error encrypting node");
+            handle_error_string("Error encrypting elem");
             goto exit;
         }
     }
@@ -812,8 +812,8 @@ exit:
  * always be run (it must be oblivious whether the comparison result is based on
  * the key or on the ORP ID), since we leak info on duplicate keys otherwise. */
 static int mergesort_comparator(const void *a_, const void *b_) {
-    const node_t *a = a_;
-    const node_t *b = b_;
+    const elem_t *a = a_;
+    const elem_t *b = b_;
     int comp_key = (a->key > b->key) - (a->key < b->key);
     int comp_orp_id = (a->orp_id > b->orp_id) - (a->orp_id < b->orp_id);
     return (comp_key << 1) + comp_orp_id;
@@ -842,13 +842,13 @@ static void mergesort_first_pass(void *args_, size_t run_idx) {
     size_t run_start = run_idx * BUF_SIZE;
     size_t run_length = MIN(args->length - run_start, BUF_SIZE);
 
-    /* Decrypt nodes. */
+    /* Decrypt elems. */
     for (size_t j = 0; j < run_length; j++) {
-        ret = node_decrypt(key, &buffer[j],
+        ret = elem_decrypt(key, &buffer[j],
                 arr + (run_start + j) * SIZEOF_ENCRYPTED_NODE,
                 run_start + j + args->start_idx);
         if (ret) {
-            handle_error_string("Error decrypting node %lu",
+            handle_error_string("Error decrypting elem %lu",
                     run_start + j + args->start_idx);
             goto exit;
         }
@@ -857,13 +857,13 @@ static void mergesort_first_pass(void *args_, size_t run_idx) {
     /* Sort using libc quicksort. */
     qsort(buffer, run_length, sizeof(*buffer), mergesort_comparator);
 
-    /* Encrypt nodes. */
+    /* Encrypt elems. */
     for (size_t j = 0; j < run_length; j++) {
-        ret = node_encrypt(key, &buffer[j],
+        ret = elem_encrypt(key, &buffer[j],
                 arr + (run_start + j) * SIZEOF_ENCRYPTED_NODE,
                 run_start + j + args->start_idx);
         if (ret) {
-            handle_error_string("Error encrypting node %lu",
+            handle_error_string("Error encrypting elem %lu",
                     run_start + j + args->start_idx);
             goto exit;
         }
@@ -912,13 +912,13 @@ static void mergesort_pass(void *args_, size_t run_idx) {
     /* Read in the first (smallest) element from run j into
      * buffer[j]. The runs start at element i. */
     for (size_t j = 0; j < num_runs; j++) {
-        ret = node_decrypt(key, &buffer[j],
+        ret = elem_decrypt(key, &buffer[j],
                 args->input
                     + (run_start + j * args->run_length)
                         * SIZEOF_ENCRYPTED_NODE,
                 run_start + j * args->run_length + args->start_idx);
         if (ret) {
-            handle_error_string("Error decrypting node %lu",
+            handle_error_string("Error decrypting elem %lu",
                     run_start + j * args->run_length + args->start_idx);
             goto exit_free_merge_indices;
         }
@@ -926,12 +926,12 @@ static void mergesort_pass(void *args_, size_t run_idx) {
 
     /* Merge the runs in the buffer and encrypt to the output array.
      * Nodes for which we have reach the end of the array are marked as
-     * a dummy element, so we continue until all nodes in buffer are
-     * dummy nodes. */
+     * a dummy element, so we continue until all elems in buffer are
+     * dummy elems. */
     size_t output_idx = 0;
     bool all_dummy;
     do {
-        /* Scan for lowest node. */
+        /* Scan for lowest elem. */
         // TODO Use a heap?
         size_t lowest_run;
         all_dummy = true;
@@ -947,13 +947,13 @@ static void mergesort_pass(void *args_, size_t run_idx) {
             all_dummy = false;
         }
 
-        /* Break out of loop if all nodes were dummy. */
+        /* Break out of loop if all elems were dummy. */
         if (all_dummy) {
             continue;
         }
 
-        /* Encrypt lowest node to output. */
-        ret = node_encrypt(key, &buffer[lowest_run],
+        /* Encrypt lowest elem to output. */
+        ret = elem_encrypt(key, &buffer[lowest_run],
                 args->output + (run_start + output_idx) * SIZEOF_ENCRYPTED_NODE,
                 run_start + output_idx + args->start_idx);
         merge_indices[lowest_run]++;
@@ -963,13 +963,13 @@ static void mergesort_pass(void *args_, size_t run_idx) {
         if (merge_indices[lowest_run] >= args->run_length
                 || run_start + lowest_run * args->run_length
                     + merge_indices[lowest_run] >= args->length) {
-            /* Reached the end, so mark the node as dummy so that we
+            /* Reached the end, so mark the elem as dummy so that we
              * ignore it. */
             buffer[lowest_run].is_dummy = true;
         } else {
-            /* Not yet reached the end, so read the next node in the
+            /* Not yet reached the end, so read the next elem in the
              * input run. */
-            ret = node_decrypt(key, &buffer[lowest_run],
+            ret = elem_decrypt(key, &buffer[lowest_run],
                     args->input
                         + (run_start + lowest_run * args->run_length +
                                 merge_indices[lowest_run])
@@ -977,7 +977,7 @@ static void mergesort_pass(void *args_, size_t run_idx) {
                     run_start + lowest_run * args->run_length
                         + merge_indices[lowest_run] + args->start_idx);
             if (ret) {
-                handle_error_string("Error decrypting node %lu",
+                handle_error_string("Error decrypting elem %lu",
                         run_start + lowest_run * args->run_length
                             + merge_indices[lowest_run] + args->start_idx);
                 goto exit_free_merge_indices;
@@ -996,7 +996,7 @@ exit:
 }
 
 /* Non-oblivious sort. Based on an external mergesort algorithm since decrypting
- * nodes from host memory is expensive. */
+ * elems from host memory is expensive. */
 static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
     unsigned char *arr = arr_;
     unsigned char *out = out_;
@@ -1081,7 +1081,7 @@ struct sample {
     uint64_t orp_id;
 };
 
-static int node_sample_comparator(const node_t *a, const struct sample *b) {
+static int elem_sample_comparator(const elem_t *a, const struct sample *b) {
     int comp_key = (a->key > b->key) - (a->key < b->key);
     int comp_orp_id = (a->orp_id > b->orp_id) - (a->orp_id < b->orp_id);
     return (comp_key << 1) + comp_orp_id;
@@ -1097,7 +1097,7 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         goto exit;
     }
 
-    /* Get the next master by choosing the lowest node with a non-empty
+    /* Get the next master by choosing the lowest elem with a non-empty
      * slice. */
     bool ready = true;
     bool not_ready = false;
@@ -1141,23 +1141,23 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     }
 
     /* Get pivot. */
-    node_t pivot_node;
+    elem_t pivot_elem;
     struct sample pivot;
     if (world_rank == master_rank) {
-        /* Use first node as pivot. This is a random selection since this
+        /* Use first elem as pivot. This is a random selection since this
          * samplesort should happen after ORP. */
         ret =
-            node_decrypt(key, &pivot_node, arr + left * SIZEOF_ENCRYPTED_NODE,
+            elem_decrypt(key, &pivot_elem, arr + left * SIZEOF_ENCRYPTED_NODE,
                     left + local_start);
         if (ret) {
-            handle_error_string("Error decrypting node %lu",
+            handle_error_string("Error decrypting elem %lu",
                     left + local_start);
             goto exit;
         }
-        pivot.key = pivot_node.key;
-        pivot.orp_id = pivot_node.orp_id;
+        pivot.key = pivot_elem.key;
+        pivot.orp_id = pivot_elem.orp_id;
 
-        /* Send pivot to all other nodes. */
+        /* Send pivot to all other elems. */
         for (int i = 0; i < world_size; i++) {
             if (i != world_rank) {
                 ret = mpi_tls_send_bytes(&pivot, sizeof(pivot), i, 0);
@@ -1182,8 +1182,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
 
     /* Partition data based on pivot. */
     // TODO It's possible to do this in-place.
-    node_t left_node;
-    node_t right_node;
+    elem_t left_elem;
+    elem_t right_elem;
     size_t partition_left = left + (world_rank == master_rank);
     size_t partition_right = right;
     enum {
@@ -1195,17 +1195,17 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         case PARTITION_SCAN_LEFT:
             /* Scan left for elements greater than the pivot. */
             ret =
-                node_decrypt(key, &left_node,
+                elem_decrypt(key, &left_elem,
                     arr + partition_left * SIZEOF_ENCRYPTED_NODE,
                     partition_left + local_start);
             if (ret) {
-                handle_error_string("Error decrypting node %lu",
+                handle_error_string("Error decrypting elem %lu",
                         partition_left + local_start);
                 goto exit;
             }
 
             /* If found, start scanning right. */
-            if (node_sample_comparator(&left_node, &pivot) > 0) {
+            if (elem_sample_comparator(&left_elem, &pivot) > 0) {
                 partition_state = PARTITION_SCAN_RIGHT;
             } else {
                 partition_left++;
@@ -1216,32 +1216,32 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         case PARTITION_SCAN_RIGHT:
             /* Scan right for elements less than the pivot. */
             ret =
-                node_decrypt(key, &right_node,
+                elem_decrypt(key, &right_elem,
                     arr + (partition_right - 1) * SIZEOF_ENCRYPTED_NODE,
                     partition_right - 1 + local_start);
             if (ret) {
-                handle_error_string("Error decrypting node %lu",
+                handle_error_string("Error decrypting elem %lu",
                         partition_right - 1 + local_start);
                 goto exit;
             }
 
             /* If found, swap and start scanning left. */
-            if (node_sample_comparator(&right_node, &pivot) < 0) {
+            if (elem_sample_comparator(&right_elem, &pivot) < 0) {
                 ret =
-                    node_encrypt(key, &left_node,
+                    elem_encrypt(key, &left_elem,
                             arr + (partition_right - 1) * SIZEOF_ENCRYPTED_NODE,
                             partition_right - 1 + local_start);
                 if (ret) {
-                    handle_error_string("Error encrypting node %lu",
+                    handle_error_string("Error encrypting elem %lu",
                             partition_right - 1 + local_start);
                     goto exit;
                 }
                 ret =
-                    node_encrypt(key, &right_node,
+                    elem_encrypt(key, &right_elem,
                             arr + partition_left * SIZEOF_ENCRYPTED_NODE,
                             partition_left + local_start);
                 if (ret) {
-                    handle_error_string("Error encrypting node %lu",
+                    handle_error_string("Error encrypting elem %lu",
                             partition_left + local_start);
                     goto exit;
                 }
@@ -1260,29 +1260,29 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     /* Finish partitioning by swapping the pivot into the center, if we are the
      * master. */
     if (world_rank == master_rank) {
-        node_t node;
-        ret = node_decrypt(key, &node,
+        elem_t elem;
+        ret = elem_decrypt(key, &elem,
                 arr + (partition_right - 1) * SIZEOF_ENCRYPTED_NODE,
                 partition_right - 1 + local_start);
         if (ret) {
-            handle_error_string("Error decrypting node %lu",
+            handle_error_string("Error decrypting elem %lu",
                     partition_right - 1 + local_start);
             goto exit;
         }
         ret =
-            node_encrypt(key, &node, arr + left * SIZEOF_ENCRYPTED_NODE,
+            elem_encrypt(key, &elem, arr + left * SIZEOF_ENCRYPTED_NODE,
                     left + local_start);
         if (ret) {
-            handle_error_string("Error encrypting node %lu",
+            handle_error_string("Error encrypting elem %lu",
                     left + local_start);
             goto exit;
         }
         ret =
-            node_encrypt(key, &pivot_node,
+            elem_encrypt(key, &pivot_elem,
                     arr + (partition_right - 1) * SIZEOF_ENCRYPTED_NODE,
                     partition_right - 1 + local_start);
         if (ret) {
-            handle_error_string("Error encrypting node %lu",
+            handle_error_string("Error encrypting elem %lu",
                     partition_right - 1 + local_start);
             goto exit;
         }
@@ -1450,7 +1450,7 @@ static int distributed_sample_partition(void *arr_, void *out_,
      * should already be partitioned. */
 
     /* Allocate buffer for decrypted partitions. */
-    node_t (*partition_buf)[SAMPLE_PARTITION_BUF_SIZE] =
+    elem_t (*partition_buf)[SAMPLE_PARTITION_BUF_SIZE] =
         malloc(world_size * sizeof(*partition_buf));
     if (!partition_buf) {
         perror("malloc partition send buffer");
@@ -1462,23 +1462,23 @@ static int distributed_sample_partition(void *arr_, void *out_,
     size_t num_received =
         sample_idxs[world_rank] - sample_scan_idxs[world_rank];
     for (size_t i = 0; i < num_received; i++) {
-        node_t node;
+        elem_t elem;
         ret =
-            node_decrypt(key, &node,
+            elem_decrypt(key, &elem,
                     arr
                         + (sample_scan_idxs[world_rank] + i)
                             * SIZEOF_ENCRYPTED_NODE,
                     sample_scan_idxs[world_rank] + i + local_start);
         if (ret) {
-            handle_error_string("Error decrypting node %lu",
+            handle_error_string("Error decrypting elem %lu",
                     sample_scan_idxs[world_rank] + i + local_start);
             goto exit_free_buf;
         }
         ret =
-            node_encrypt(key, &node, out + i * SIZEOF_ENCRYPTED_NODE,
+            elem_encrypt(key, &elem, out + i * SIZEOF_ENCRYPTED_NODE,
                     i + src_local_start);
         if (ret) {
-            handle_error_string("Error encrypting node %lu",
+            handle_error_string("Error encrypting elem %lu",
                     i + src_local_start);
             goto exit_free_buf;
         }
@@ -1489,12 +1489,12 @@ static int distributed_sample_partition(void *arr_, void *out_,
      * for REQUESTS[WORLD_RANK], which is our receive request. */
     for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
-            size_t nodes_to_recv =
+            size_t elems_to_recv =
                 MIN(src_local_length - num_received, SAMPLE_PARTITION_BUF_SIZE);
-            if (nodes_to_recv > 0) {
+            if (elems_to_recv > 0) {
                 ret =
                     mpi_tls_irecv_bytes(&partition_buf[i],
-                            nodes_to_recv * sizeof(*partition_buf[i]),
+                            elems_to_recv * sizeof(*partition_buf[i]),
                             MPI_TLS_ANY_SOURCE, 0, &requests[requests_len]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
@@ -1505,29 +1505,29 @@ static int distributed_sample_partition(void *arr_, void *out_,
             }
         } else {
             if (sample_scan_idxs[i] < sample_idxs[i]) {
-                /* Decrypt nodes. */
-                size_t nodes_to_send =
+                /* Decrypt elems. */
+                size_t elems_to_send =
                     MIN(sample_idxs[i] - sample_scan_idxs[i],
                             SAMPLE_PARTITION_BUF_SIZE);
-                for (size_t j = 0; j < nodes_to_send; j++) {
+                for (size_t j = 0; j < elems_to_send; j++) {
                     ret =
-                        node_decrypt(key, &partition_buf[i][j],
+                        elem_decrypt(key, &partition_buf[i][j],
                                 arr
                                     + (sample_scan_idxs[i] + j)
                                         * SIZEOF_ENCRYPTED_NODE,
                                 sample_scan_idxs[i] + j + local_start);
                     if (ret) {
-                        handle_error_string("Error decrypting node %lu",
+                        handle_error_string("Error decrypting elem %lu",
                                 sample_scan_idxs[i] + j);
                         goto exit_free_buf;
                     }
                 }
-                sample_scan_idxs[i] += nodes_to_send;
+                sample_scan_idxs[i] += elems_to_send;
 
                 /* Asynchronously send to enclave. */
                 ret =
                     mpi_tls_isend_bytes(&partition_buf[i],
-                            nodes_to_send * sizeof(*partition_buf[i]), i, 0,
+                            elems_to_send * sizeof(*partition_buf[i]), i, 0,
                             &requests[requests_len]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
@@ -1557,24 +1557,24 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 status.count / sizeof(*partition_buf[world_rank]);
             for (size_t i = 0; i < req_num_received; i++) {
                 ret =
-                    node_encrypt(key, &partition_buf[world_rank][i],
+                    elem_encrypt(key, &partition_buf[world_rank][i],
                             out + (num_received + i) * SIZEOF_ENCRYPTED_NODE,
                             num_received + i + src_local_start);
                 if (ret) {
-                    handle_error_string("Error encrypting node %lu",
+                    handle_error_string("Error encrypting elem %lu",
                             num_received + src_local_start);
                     goto exit_free_buf;
                 }
             }
             num_received += req_num_received;
 
-            size_t nodes_to_recv =
+            size_t elems_to_recv =
                 MIN(src_local_length - num_received, SAMPLE_PARTITION_BUF_SIZE);
-            keep_rank = nodes_to_recv > 0;
+            keep_rank = elems_to_recv > 0;
             if (keep_rank) {
                 ret =
                     mpi_tls_irecv_bytes(&partition_buf[world_rank],
-                            nodes_to_recv * sizeof(*partition_buf[world_rank]),
+                            elems_to_recv * sizeof(*partition_buf[world_rank]),
                             MPI_TLS_ANY_SOURCE, 0, &requests[index]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
@@ -1588,32 +1588,32 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 sample_idxs[request_rank] - sample_scan_idxs[request_rank] > 0;
 
             if (keep_rank) {
-                /* Decrypt nodes. */
-                size_t nodes_to_send =
+                /* Decrypt elems. */
+                size_t elems_to_send =
                     MIN(sample_idxs[request_rank]
                                 - sample_scan_idxs[request_rank],
                             SAMPLE_PARTITION_BUF_SIZE);
-                for (size_t i = 0; i < nodes_to_send; i++) {
+                for (size_t i = 0; i < elems_to_send; i++) {
                     ret =
-                        node_decrypt(key, &partition_buf[request_rank][i],
+                        elem_decrypt(key, &partition_buf[request_rank][i],
                                 arr +
                                     (sample_scan_idxs[request_rank] + i)
                                         * SIZEOF_ENCRYPTED_NODE,
                                 sample_scan_idxs[request_rank]
                                     + i + local_start);
                     if (ret) {
-                        handle_error_string("Error decrypting node %lu",
+                        handle_error_string("Error decrypting elem %lu",
                                 sample_scan_idxs[request_rank] + i
                                     + local_start);
                         goto exit_free_buf;
                     }
                 }
-                sample_scan_idxs[request_rank] += nodes_to_send;
+                sample_scan_idxs[request_rank] += elems_to_send;
 
                 /* Asynchronously send to enclave. */
                 ret =
                     mpi_tls_isend_bytes(&partition_buf[request_rank],
-                            nodes_to_send
+                            elems_to_send
                                 * sizeof(*partition_buf[request_rank]),
                             request_rank, 0, &requests[index]);
                 if (ret) {
@@ -1679,7 +1679,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     ret = assign_random_ids_and_spread(arr, buf, src_local_length,
             src_local_start, local_start);
     if (ret) {
-        handle_error_string("Error assigning random IDs to nodes");
+        handle_error_string("Error assigning random IDs to elems");
         ret = errno;
         goto exit;
     }
@@ -1791,7 +1791,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Permute each bucket and concatenate them back together by compressing all
-     * real nodes together. We also assign new ORP IDs so that all elements have
+     * real elems together. We also assign new ORP IDs so that all elements have
      * a unique tuple of (key, ORP ID), even if they have duplicate keys. */
     size_t compress_len = 0;
     {

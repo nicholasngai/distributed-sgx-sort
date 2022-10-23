@@ -3,8 +3,8 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <liboblivious/primitives.h>
+#include "common/elem_t.h"
 #include "common/error.h"
-#include "common/node_t.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
 #include "enclave/threading.h"
@@ -13,8 +13,8 @@
 
 static size_t total_length;
 
-static _Thread_local node_t *local_buffer;
-static _Thread_local node_t *remote_buffer;
+static _Thread_local elem_t *local_buffer;
+static _Thread_local elem_t *remote_buffer;
 
 static unsigned char key[16];
 
@@ -66,15 +66,15 @@ static size_t get_local_start(int rank) {
 
 /* Decrypted sorting. */
 
-static void decrypted_swap(node_t *a, node_t *b, bool descending) {
+static void decrypted_swap(elem_t *a, elem_t *b, bool descending) {
     bool cond = (a->key > b->key) != descending;
     o_memswap(a, b, sizeof(*a), cond);
 }
 
-static void decrypted_sort(node_t *arr, size_t length, bool descending);
-static void decrypted_merge(node_t *arr, size_t length, bool descending);
+static void decrypted_sort(elem_t *arr, size_t length, bool descending);
+static void decrypted_merge(elem_t *arr, size_t length, bool descending);
 
-static void decrypted_sort(node_t *arr, size_t length, bool descending) {
+static void decrypted_sort(elem_t *arr, size_t length, bool descending) {
     switch (length) {
         case 0:
         case 1:
@@ -99,7 +99,7 @@ static void decrypted_sort(node_t *arr, size_t length, bool descending) {
     }
 }
 
-static void decrypted_merge(node_t *arr, size_t length, bool descending) {
+static void decrypted_merge(elem_t *arr, size_t length, bool descending) {
     switch (length) {
         case 0:
         case 1:
@@ -124,24 +124,24 @@ static void decrypted_merge(node_t *arr, size_t length, bool descending) {
     }
 }
 
-/* Decrypts an entire range of nodes for the array ARR starting at START and
+/* Decrypts an entire range of elems for the array ARR starting at START and
  * ending at START + LENGTH and sorts them obliviously according to DESCENDING
  * at once, entirely within enclave memory. LENGTH must be less than or equal to
- * SWAP_CHUNK_SIZE, since the local_buffer is used to hold decrypted nodes. The
+ * SWAP_CHUNK_SIZE, since the local_buffer is used to hold decrypted elems. The
  * entire chunk must reside in local memory. */
 static void decrypt_and_sort(void *arr, size_t start, size_t length,
         bool descending) {
     size_t local_start = get_local_start(world_rank);
     int ret;
 
-    /* Decrypt nodes to enclave buffer. */
+    /* Decrypt elems to enclave buffer. */
     for (size_t i = 0; i < length; i++) {
-        unsigned char *node_addr =
+        unsigned char *elem_addr =
             (unsigned char *) arr
                 + (start - local_start + i) * SIZEOF_ENCRYPTED_NODE;
-        ret = node_decrypt(key, &local_buffer[i], node_addr, start + i);
+        ret = elem_decrypt(key, &local_buffer[i], elem_addr, start + i);
         if (ret) {
-            handle_error_string("Error decrypting node");
+            handle_error_string("Error decrypting elem");
             return;
         }
     }
@@ -149,14 +149,14 @@ static void decrypt_and_sort(void *arr, size_t start, size_t length,
     /* Decrypted swap. */
     decrypted_sort(local_buffer, length, descending);
 
-    /* Encrypt nodes to host memory. */
+    /* Encrypt elems to host memory. */
     for (size_t i = 0; i < length; i++) {
-        unsigned char *node_addr =
+        unsigned char *elem_addr =
             (unsigned char *) arr
                 + (start - local_start + i) * SIZEOF_ENCRYPTED_NODE;
-        ret = node_encrypt(key, &local_buffer[i], node_addr, start + i);
+        ret = elem_encrypt(key, &local_buffer[i], elem_addr, start + i);
         if (ret) {
-            handle_error_string("Error encrypting node");
+            handle_error_string("Error encrypting elem");
             return;
         }
     }
@@ -179,33 +179,33 @@ static void swap_local_range(void *arr, size_t a, size_t b, size_t count,
             (unsigned char *) arr
                 + (b_index - local_start) * SIZEOF_ENCRYPTED_NODE;
 
-        /* Decrypt both nodes. */
-        node_t node_a;
-        node_t node_b;
-        ret = node_decrypt(key, &node_a, a_addr, a_index);
+        /* Decrypt both elems. */
+        elem_t elem_a;
+        elem_t elem_b;
+        ret = elem_decrypt(key, &elem_a, a_addr, a_index);
         if (ret) {
-            handle_error_string("Error decrypting node");
+            handle_error_string("Error decrypting elem");
             return;
         }
-        ret = node_decrypt(key, &node_b, b_addr, b_index);
+        ret = elem_decrypt(key, &elem_b, b_addr, b_index);
         if (ret) {
-            handle_error_string("Error decrypting node");
+            handle_error_string("Error decrypting elem");
             return;
         }
 
         /* Oblivious comparison and swap. */
-        bool cond = (node_a.key > node_b.key) != descending;
-        o_memswap(&node_a, &node_b, sizeof(node_a), cond);
+        bool cond = (elem_a.key > elem_b.key) != descending;
+        o_memswap(&elem_a, &elem_b, sizeof(elem_a), cond);
 
-        /* Encrypt both nodes using the same layout as above. */
-        ret = node_encrypt(key, &node_a, a_addr, a_index);
+        /* Encrypt both elems using the same layout as above. */
+        ret = elem_encrypt(key, &elem_a, a_addr, a_index);
         if (ret) {
-            handle_error_string("Error encrypting node");
+            handle_error_string("Error encrypting elem");
             return;
         }
-        ret = node_encrypt(key, &node_b, b_addr, b_index);
+        ret = elem_encrypt(key, &elem_b, b_addr, b_index);
         if (ret) {
-            handle_error_string("Error encrypting node");
+            handle_error_string("Error encrypting elem");
             return;
         }
     }
@@ -217,45 +217,45 @@ static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
     int remote_rank = get_index_address(remote_idx);
     int ret;
 
-    /* Swap nodes in maximum chunk sizes of SWAP_CHUNK_SIZE and iterate until no
+    /* Swap elems in maximum chunk sizes of SWAP_CHUNK_SIZE and iterate until no
      * count is remaining. */
     while (count) {
-        size_t nodes_to_swap = MIN(count, SWAP_CHUNK_SIZE);
+        size_t elems_to_swap = MIN(count, SWAP_CHUNK_SIZE);
 
-        /* Decrypt local nodes. */
-        for (size_t i = 0; i < nodes_to_swap; i++) {
+        /* Decrypt local elems. */
+        for (size_t i = 0; i < elems_to_swap; i++) {
             unsigned char *local_addr =
                 (unsigned char *) arr +
                     (local_idx - local_start + i) * SIZEOF_ENCRYPTED_NODE;
-            ret = node_decrypt(key, &local_buffer[i], local_addr, local_idx + i);
+            ret = elem_decrypt(key, &local_buffer[i], local_addr, local_idx + i);
             if (ret) {
-                handle_error_string("Error decrypting node");
+                handle_error_string("Error decrypting elem");
                 return;
             }
         }
 
-        /* Post receive for remote nodes to encrypted buffer. */
+        /* Post receive for remote elems to encrypted buffer. */
         mpi_tls_request_t request;
         ret = mpi_tls_irecv_bytes(remote_buffer,
-                nodes_to_swap * sizeof(*remote_buffer), remote_rank, local_idx,
+                elems_to_swap * sizeof(*remote_buffer), remote_rank, local_idx,
                 &request);
         if (ret) {
-            handle_error_string("Error receiving node bytes");
+            handle_error_string("Error receiving elem bytes");
             return;
         }
 
-        /* Send local nodes to the remote. */
+        /* Send local elems to the remote. */
         ret = mpi_tls_send_bytes(local_buffer,
-                nodes_to_swap * sizeof(*local_buffer), remote_rank, remote_idx);
+                elems_to_swap * sizeof(*local_buffer), remote_rank, remote_idx);
         if (ret) {
-            handle_error_string("Error sending node bytes");
+            handle_error_string("Error sending elem bytes");
             return;
         }
 
-        /* Wait for received nodes to come in. */
+        /* Wait for received elems to come in. */
         ret = mpi_tls_wait(&request, MPI_TLS_STATUS_IGNORE);
         if (ret) {
-            handle_error_string("Error waiting on receive for node bytes");
+            handle_error_string("Error waiting on receive for elem bytes");
             return;
         }
 
@@ -264,7 +264,7 @@ static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
          * then we swap if the local element is lower. Likewise, if the local index
          * is higher, than we swap if the local element is higher. If descending,
          * everything is reversed. */
-        for (size_t i = 0; i < nodes_to_swap; i++) {
+        for (size_t i = 0; i < elems_to_swap; i++) {
             bool cond =
                 (local_idx < remote_idx)
                     == (local_buffer[i].key > remote_buffer[i].key);
@@ -273,23 +273,23 @@ static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
                     cond);
         }
 
-        /* Encrypt the local nodes (some of which are the same as before) back to
+        /* Encrypt the local elems (some of which are the same as before) back to
          * memory. */
-        for (size_t i = 0; i < nodes_to_swap; i++) {
+        for (size_t i = 0; i < elems_to_swap; i++) {
             void *local_addr =
                 (unsigned char *) arr +
                     (local_idx - local_start + i) * SIZEOF_ENCRYPTED_NODE;
-            ret = node_encrypt(key, &local_buffer[i], local_addr, local_idx + i);
+            ret = elem_encrypt(key, &local_buffer[i], local_addr, local_idx + i);
             if (ret) {
-                handle_error_string("Error encrypting node");
+                handle_error_string("Error encrypting elem");
                 return;
             }
         }
 
         /* Bump pointers, decrement count, and continue. */
-        local_idx += nodes_to_swap;
-        remote_idx += nodes_to_swap;
-        count -= nodes_to_swap;
+        local_idx += elems_to_swap;
+        remote_idx += elems_to_swap;
+        count -= elems_to_swap;
     }
 }
 
@@ -311,8 +311,8 @@ static void swap_range(void *arr, size_t a_start, size_t b_start,
     // TODO Assumption: Only either a subset of range A is local, or a subset of
     // range B is local. For local-remote swaps, the subset of the remote range
     // correspondingw with the local range is entirely contained within a single
-    // node. This requires that both the number of elements and the number of
-    // nodes is a power of 2.
+    // elem. This requires that both the number of elements and the number of
+    // elems is a power of 2.
 
     size_t local_start = get_local_start(world_rank);
     size_t local_end = get_local_start(world_rank + 1);
@@ -459,7 +459,7 @@ void sort_single(void *arr, size_t start, size_t length,
             } else {
                 /* Sort both. */
 
-                /* If the length is small enough, decrypt all nodes at once and
+                /* If the length is small enough, decrypt all elems at once and
                  * sort them obliviously. */
                 // The following commented code replacing the if condition
                 // generalizes to sizes not a power of 2 but is much slower.

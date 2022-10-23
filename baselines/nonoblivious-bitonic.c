@@ -7,8 +7,8 @@
 #include <string.h>
 #include <time.h>
 #include "baselines/common.h"
+#include "common/elem_t.h"
 #include "common/error.h"
-#include "common/node_t.h"
 #include "host/error.h"
 
 #define SWAP_CHUNK_SIZE 4096
@@ -22,7 +22,7 @@ static int world_size;
 static size_t total_length;
 static size_t local_length;
 
-static _Thread_local node_t *buffer;
+static _Thread_local elem_t *buffer;
 
 /* Array index and world rank relationship helpers. */
 
@@ -36,7 +36,7 @@ static size_t get_local_start(int rank) {
 
 /* Swapping. */
 
-static void swap_local_range(node_t *arr, size_t a, size_t b, size_t count,
+static void swap_local_range(elem_t *arr, size_t a, size_t b, size_t count,
         bool descending) {
     size_t local_start = get_local_start(world_rank);
     for (size_t i = 0; i < count; i++) {
@@ -48,40 +48,40 @@ static void swap_local_range(node_t *arr, size_t a, size_t b, size_t count,
     }
 }
 
-static void swap_remote_range(node_t *arr, size_t local_idx, size_t remote_idx,
+static void swap_remote_range(elem_t *arr, size_t local_idx, size_t remote_idx,
         size_t count, bool descending) {
     size_t local_start = get_local_start(world_rank);
     int remote_rank = get_index_address(remote_idx);
     int ret;
 
-    /* Swap nodes in maximum chunk sizes of SWAP_CHUNK_SIZE and iterate until
+    /* Swap elems in maximum chunk sizes of SWAP_CHUNK_SIZE and iterate until
      * no count is remaining. */
     while (count) {
-        size_t nodes_to_swap = MIN(count, SWAP_CHUNK_SIZE);
+        size_t elems_to_swap = MIN(count, SWAP_CHUNK_SIZE);
 
-        /* Post receive for remote nodes to encrypted buffer. */
+        /* Post receive for remote elems to encrypted buffer. */
         MPI_Request request;
-        ret = MPI_Irecv(buffer, nodes_to_swap * sizeof(*buffer),
+        ret = MPI_Irecv(buffer, elems_to_swap * sizeof(*buffer),
                 MPI_UNSIGNED_CHAR, remote_rank, local_idx, MPI_COMM_WORLD,
                 &request);
         if (ret) {
-            handle_error_string("Error receiving node bytes");
+            handle_error_string("Error receiving elem bytes");
             return;
         }
 
-        /* Send local nodes to the remote. */
+        /* Send local elems to the remote. */
         ret = MPI_Send(arr + local_idx - local_start,
-                nodes_to_swap * sizeof(*arr), MPI_UNSIGNED_CHAR, remote_rank,
+                elems_to_swap * sizeof(*arr), MPI_UNSIGNED_CHAR, remote_rank,
                 remote_idx, MPI_COMM_WORLD);
         if (ret) {
-            handle_error_string("Error sending node bytes");
+            handle_error_string("Error sending elem bytes");
             return;
         }
 
-        /* Wait for received nodes to come in. */
+        /* Wait for received elems to come in. */
         ret = MPI_Wait(&request, MPI_STATUS_IGNORE);
         if (ret) {
-            handle_error_string("Error waiting on receive for node bytes");
+            handle_error_string("Error waiting on receive for elem bytes");
             return;
         }
 
@@ -90,7 +90,7 @@ static void swap_remote_range(node_t *arr, size_t local_idx, size_t remote_idx,
          * lower, then we swap if the local element is lower. Likewise, if the
          * local index is higher, than we swap if the local element is higher.
          * If descending, everything is reversed. */
-        for (size_t i = 0; i < nodes_to_swap; i++) {
+        for (size_t i = 0; i < elems_to_swap; i++) {
             if (((local_idx < remote_idx)
                         == (arr[i + local_idx - local_start].key
                             > buffer[i].key))
@@ -101,13 +101,13 @@ static void swap_remote_range(node_t *arr, size_t local_idx, size_t remote_idx,
         }
 
         /* Bump pointers, decrement count, and continue. */
-        local_idx += nodes_to_swap;
-        remote_idx += nodes_to_swap;
-        count -= nodes_to_swap;
+        local_idx += elems_to_swap;
+        remote_idx += elems_to_swap;
+        count -= elems_to_swap;
     }
 }
 
-static void swap(node_t *arr, size_t a, size_t b, bool descending) {
+static void swap(elem_t *arr, size_t a, size_t b, bool descending) {
     int a_rank = get_index_address(a);
     int b_rank = get_index_address(b);
 
@@ -120,7 +120,7 @@ static void swap(node_t *arr, size_t a, size_t b, bool descending) {
     }
 }
 
-static void swap_range(node_t *arr, size_t a_start, size_t b_start,
+static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
         size_t count, bool descending) {
     size_t local_start = get_local_start(world_rank);
     size_t local_end = get_local_start(world_rank + 1);
@@ -144,7 +144,7 @@ static void swap_range(node_t *arr, size_t a_start, size_t b_start,
 
 /* Bitonic sort. */
 
-static void bitonic_merge(node_t *arr, size_t start, size_t length,
+static void bitonic_merge(elem_t *arr, size_t start, size_t length,
         bool descending) {
     switch (length) {
         case 0:
@@ -178,7 +178,7 @@ static void bitonic_merge(node_t *arr, size_t start, size_t length,
     }
 }
 
-void bitonic_sort(node_t *arr, size_t start, size_t length,
+void bitonic_sort(elem_t *arr, size_t start, size_t length,
         bool descending) {
     switch (length) {
         case 0:
@@ -205,7 +205,7 @@ void bitonic_sort(node_t *arr, size_t start, size_t length,
                 bitonic_merge(arr, start, length, descending);
             } else {
                 /* Drop to nonoblivious quicksort. */
-                qsort(arr, length, sizeof(*arr), node_comparator);
+                qsort(arr, length, sizeof(*arr), elem_comparator);
             }
             break;
         }
@@ -237,7 +237,7 @@ int main(int argc, char **argv) {
     local_length = length / world_size;
 
     /* Allocate array. */
-    node_t *arr = calloc(local_length, sizeof(node_t));
+    elem_t *arr = calloc(local_length, sizeof(elem_t));
     if (!arr) {
         perror("alloc array");
         ret = errno;
