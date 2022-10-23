@@ -62,5 +62,6 @@ enclave {
         public void ecall_start_work(void);
         public int ecall_bitonic_sort(unsigned char *arr, size_t total_length, size_t local_length);
         public int ecall_bucket_sort(unsigned char *arr, size_t total_length, size_t local_length);
+        public int ecall_opaque_sort(unsigned char *arr, size_t total_length, size_t local_length);
     };
 };
