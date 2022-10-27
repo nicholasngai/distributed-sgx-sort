@@ -171,7 +171,7 @@ exit:
 #define CHUNK_SIZE 4096
 
 static int transpose(void *arr_, void *out_, size_t local_length,
-        size_t local_start) {
+        size_t local_start, bool reverse) {
     unsigned char *arr = arr_;
     unsigned char *out = out_;
     size_t offsets[world_size];
@@ -192,16 +192,20 @@ static int transpose(void *arr_, void *out_, size_t local_length,
         if (rank == world_rank) {
             /* Decrypt elements that will end up in our own output and encrypt
              * them to their new locations. */
-            size_t elems_to_decrypt = CEIL_DIV(local_length - rank, world_size);
+            size_t elems_to_decrypt = local_length / world_size;
             for (size_t i = 0; i < elems_to_decrypt; i++) {
                 elem_t elem;
+                size_t decrypt_offset =
+                    !reverse
+                        ? rank + i * world_size
+                        : rank * local_length / world_size + i;
                 ret =
                     elem_decrypt(key, &elem,
-                            arr + (rank + i * world_size) * SIZEOF_ENCRYPTED_NODE,
-                            (rank + i * world_size) + local_start);
+                            arr + decrypt_offset * SIZEOF_ENCRYPTED_NODE,
+                            decrypt_offset + local_start);
                 if (ret) {
                     handle_error_string("Error decrypting elem %lu",
-                            (rank + i * world_size) + local_start);
+                            decrypt_offset + local_start);
                     goto exit_free_bufs;
                 }
                 ret =
@@ -228,19 +232,23 @@ static int transpose(void *arr_, void *out_, size_t local_length,
         } else {
             /* Decrypt elements with stride of world_size. */
             size_t elems_to_decrypt =
-                MIN(CEIL_DIV(local_length - rank, world_size), CHUNK_SIZE);
+                MIN(local_length / world_size, CHUNK_SIZE);
             for (size_t i = 0; i < elems_to_decrypt; i++) {
+                size_t decrypt_offset =
+                    !reverse
+                        ? rank + i * world_size
+                        : rank * local_length / world_size + i;
                 ret =
                     elem_decrypt(key, &bufs[rank][i],
-                            arr + (rank + i * world_size) * SIZEOF_ENCRYPTED_NODE,
-                            (rank + i * world_size) + local_start);
+                            arr + decrypt_offset * SIZEOF_ENCRYPTED_NODE,
+                            decrypt_offset + local_start);
                 if (ret) {
                     handle_error_string("Error decrypting elem %lu",
-                            (rank + i * world_size) + local_start);
+                            decrypt_offset + local_start);
                     goto exit_free_bufs;
                 }
             }
-            offsets[rank] = rank + elems_to_decrypt * world_size;
+            offsets[rank] = elems_to_decrypt;
 
             /* Post send request. */
             ret =
@@ -306,23 +314,27 @@ static int transpose(void *arr_, void *out_, size_t local_length,
                 requests_len--;
             }
         } else {
-            if (offsets[rank] < local_length) {
+            if (offsets[rank] < local_length / world_size) {
                 /* Decrypt elements with stride of world_size. */
                 size_t elems_to_decrypt =
                         MIN(CEIL_DIV(local_length - offsets[rank], world_size),
                                 CHUNK_SIZE);
                 for (size_t i = 0; i < elems_to_decrypt; i++) {
+                    size_t decrypt_offset =
+                        !reverse
+                            ? offsets[rank] + i * world_size
+                            : rank * local_length / world_size + offsets[rank] + i;
                     ret =
                         elem_decrypt(key, &bufs[rank][i],
-                                arr + (offsets[rank] + i * world_size) * SIZEOF_ENCRYPTED_NODE,
-                                (offsets[rank] + i * world_size) + local_start);
+                                arr + decrypt_offset * SIZEOF_ENCRYPTED_NODE,
+                                decrypt_offset + local_start);
                     if (ret) {
                         handle_error_string("Error decrypting elem %lu",
                                 (offsets[rank] + i * world_size));
                         goto exit_free_bufs;
                     }
                 }
-                offsets[rank] += elems_to_decrypt * world_size;
+                offsets[rank] += elems_to_decrypt;
 
                 /* Post another send request. */
                 ret =
@@ -555,7 +567,7 @@ int opaque_sort(void *arr_, size_t length) {
     }
 
     /* Step 2: Transpose. */
-    ret = transpose(arr, buf, local_length, local_start);
+    ret = transpose(arr, buf, local_length, local_start, false);
     if (ret) {
         handle_error_string("Error in transpose (step 2)");
         goto exit_free_rand;
@@ -569,9 +581,9 @@ int opaque_sort(void *arr_, size_t length) {
     }
 
     /* Step 4: Transpose. */
-    ret = transpose(buf, arr, local_length, local_start);
+    ret = transpose(buf, arr, local_length, local_start, true);
     if (ret) {
-        handle_error_string("Error in transpose (step 4)");
+        handle_error_string("Error in reverse transpose (step 4)");
         goto exit_free_rand;
     }
 
