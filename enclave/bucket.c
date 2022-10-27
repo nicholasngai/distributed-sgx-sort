@@ -461,31 +461,28 @@ exit:
     return ret;
 }
 
-/* Compare elements by the BIT_IDX bit of the ORP ID, then by dummy element
- * (real elements first). */
-static int merge_split_comparator(const elem_t *a, const elem_t *b,
-        size_t bit_idx) {
-    /* Compare and obliviously swap if the BIT_IDX bit of ORP ID of elem A is
-     * 1 and that of elem B is 0 or if the ORP IDs are the same, but elem A is a
-     * dummy and elem B is real. */
-    char bit_a = (a->orp_id >> bit_idx) & 1;
-    char bit_b = (b->orp_id >> bit_idx) & 1;
-    return (bit_a << 1) - (bit_b << 1) + a->is_dummy - b->is_dummy;
-}
-
-struct merge_split_swapper_aux {
+struct merge_split_ocompact_aux {
     elem_t *bucket1;
     elem_t *bucket2;
     size_t bit_idx;
 };
-static void merge_split_swapper(size_t a, size_t b, void *aux_) {
-    struct merge_split_swapper_aux *aux = aux_;
+
+static bool merge_split_is_marked(size_t index, void *aux_) {
+    /* The element is marked if the BIT_IDX'th bit of the ORP ID of the element
+     * is set to 0. */
+    struct merge_split_ocompact_aux *aux = aux_;
+    elem_t *elem =
+        &(index < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[index % BUCKET_SIZE];
+    return !((elem->orp_id >> aux->bit_idx) & 1);
+}
+
+static void merge_split_swapper(size_t a, size_t b, bool should_swap, void *aux_) {
+    struct merge_split_ocompact_aux *aux = aux_;
     elem_t *elem_a =
         &(a < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[a % BUCKET_SIZE];
     elem_t *elem_b =
         &(b < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[b % BUCKET_SIZE];
-    int comp = merge_split_comparator(elem_a, elem_b, aux->bit_idx);
-    o_memswap(elem_a, elem_b, sizeof(*elem_a), comp > 0);
+    o_memswap(elem_a, elem_b, sizeof(*elem_a), should_swap);
 }
 
 /* Merge BUCKET1 and BUCKET2 and split such that BUCKET1 contains all elements
@@ -646,12 +643,12 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     }
 
     /* Oblivious bitonic sort elements according to BIT_IDX bit of ORP id. */
-    struct merge_split_swapper_aux aux = {
+    struct merge_split_ocompact_aux aux = {
         .bucket1 = bucket1,
         .bucket2 = bucket2,
         .bit_idx = bit_idx,
     };
-    o_sort_generate_swaps(BUCKET_SIZE * 2, merge_split_swapper, &aux);
+    o_compact_generate_swaps(BUCKET_SIZE * 2, merge_split_is_marked, merge_split_swapper, &aux);
 
     /* Free bucket 1 if local. */
     if (bucket1_local) {
