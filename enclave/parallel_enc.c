@@ -8,6 +8,7 @@
 #include "enclave/bitonic.h"
 #include "enclave/bucket.h"
 #include "enclave/mpi_tls.h"
+#include "enclave/opaque.h"
 #include "enclave/threading.h"
 
 enum sort_t {
@@ -172,6 +173,43 @@ int ecall_bucket_sort(unsigned char *arr, size_t total_length,
 
 exit_free_sort:
     bucket_free();
+exit_free_mpi_tls:
+    mpi_tls_free();
+exit_free_entropy:
+    entropy_initted = false;
+    entropy_free();
+exit:
+    return ret;
+}
+
+int ecall_opaque_sort(unsigned char *arr, size_t total_length,
+        size_t local_length UNUSED) {
+    int ret;
+
+    sort_type = SORT_BUCKET;
+
+    /* Initialize entropy. */
+    ret = entropy_init();
+    if (ret) {
+        handle_error_string("Error initializing entropy");
+        goto exit;
+    }
+
+    __atomic_store_n(&entropy_initted, true, __ATOMIC_RELEASE);
+
+    /* Initialize TLS over MPI. */
+    if (mpi_tls_init((size_t) world_rank, (size_t) world_size, &entropy_ctx)) {
+        handle_error_string("Error initializing TLS over MPI");
+        goto exit_free_entropy;
+    }
+
+    /* Sort. */
+    ret = opaque_sort(arr, total_length);
+    if (ret) {
+        handle_error_string("Error in Opaque sort");
+        goto exit_free_mpi_tls;
+    }
+
 exit_free_mpi_tls:
     mpi_tls_free();
 exit_free_entropy:

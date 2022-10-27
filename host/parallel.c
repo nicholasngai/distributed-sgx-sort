@@ -23,6 +23,7 @@
 enum sort_type {
     SORT_BITONIC,
     SORT_BUCKET,
+    SORT_OPAQUE,
 };
 
 enum ocall_mpi_request_type {
@@ -436,10 +437,10 @@ int main(int argc, char **argv) {
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     if (argc < 4) {
-        printf("usage: %s enclave_image {bitonic|bucket} array_size [num_threads]\n", argv[0]);
+        printf("usage: %s enclave_image {bitonic|bucket|opaque} array_size [num_threads]\n", argv[0]);
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (argc < 3) {
-        printf("usage: %s {bitonic|bucket} array_size [num_threads]\n", argv[0]);
+        printf("usage: %s {bitonic|bucket|opaque} array_size [num_threads]\n", argv[0]);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         return 0;
     }
@@ -454,6 +455,8 @@ int main(int argc, char **argv) {
         sort_type = SORT_BITONIC;
     } else if (strcmp(SORT_TYPE_STR, "bucket") == 0) {
         sort_type = SORT_BUCKET;
+    } else if (strcmp(SORT_TYPE_STR, "opaque") == 0) {
+        sort_type = SORT_OPAQUE;
     } else {
         printf("Invalid sort type\n");
         return ret;
@@ -486,6 +489,11 @@ int main(int argc, char **argv) {
             return ret;
         }
         num_threads = n;
+
+        if (sort_type == SORT_OPAQUE && n > 1) {
+            printf("Opaque sort does not support more than 1 thread\n");
+            return ret;
+        }
     }
 
     pthread_t threads[num_threads - 1];
@@ -578,6 +586,9 @@ int main(int argc, char **argv) {
                 malloc(local_num_buckets * BUCKET_SIZE
                         * SIZEOF_ENCRYPTED_NODE * 2);
             break;
+        case SORT_OPAQUE:
+            arr = malloc(local_length * 2 * SIZEOF_ENCRYPTED_NODE);
+            break;
         }
     }
     if (!arr) {
@@ -627,6 +638,9 @@ int main(int argc, char **argv) {
         case SORT_BUCKET:
             result = ecall_bucket_sort(enclave, &ret, arr, length, local_length);
             break;
+        case SORT_OPAQUE:
+            result = ecall_opaque_sort(enclave, &ret, arr, length, local_length);
+            break;
     }
     if (result != OE_OK) {
         goto exit_free_arr;
@@ -638,6 +652,9 @@ int main(int argc, char **argv) {
             break;
         case SORT_BUCKET:
             ret = ecall_bucket_sort(arr, length, local_length);
+            break;
+        case SORT_OPAQUE:
+            ret = ecall_opaque_sort(arr, length, local_length);
             break;
     }
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
