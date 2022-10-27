@@ -566,6 +566,10 @@ int opaque_sort(void *arr_, size_t length) {
         goto exit_free_rand;
     }
 
+    if (world_size == 1) {
+        goto exit_free_rand;
+    }
+
     /* Step 2: Transpose. */
     ret = transpose(arr, buf, local_length, local_start, false);
     if (ret) {
