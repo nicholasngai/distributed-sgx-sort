@@ -132,7 +132,7 @@ $(ENCLAVE_PUBKEY): $(ENCLAVE_KEY) $(ENCLAVE_CONF)
 # Common.
 
 $(COMMON_DIR)/%.o: $(COMMON_DIR)/%.c
-	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
+	$(CC) $(HOST_CFLAGS) $(HOST_CPPFLAGS) -c -o $@ $<
 
 # Host-only binary for profiling.
 
