@@ -275,8 +275,15 @@ int ocall_mpi_wait(unsigned char *buf, size_t count,
         ocall_mpi_request_t *request, ocall_mpi_status_t *status) {
     int ret;
 
+    MPI_Request mpi_request;
+    if (*request == OCALL_MPI_REQUEST_NULL) {
+        mpi_request = MPI_REQUEST_NULL;
+    } else {
+        mpi_request = (*request)->mpi_request;
+    }
+
     MPI_Status mpi_status;
-    ret = MPI_Wait(&(*request)->mpi_request, &mpi_status);
+    ret = MPI_Wait(&mpi_request, &mpi_status);
     if (ret) {
         handle_mpi_error(ret, "MPI_Wait");
         goto exit_free_request;
@@ -315,7 +322,11 @@ int ocall_mpi_waitany(unsigned char *buf, size_t bufcount, size_t count,
 
     MPI_Request mpi_requests[count];
     for (size_t i = 0; i < count; i++) {
-        mpi_requests[i] = requests[i]->mpi_request;
+        if (requests[i] == OCALL_MPI_REQUEST_NULL) {
+            mpi_requests[i] = MPI_REQUEST_NULL;
+        } else {
+            mpi_requests[i] = requests[i]->mpi_request;
+        }
     }
 
     MPI_Status mpi_status;
@@ -324,6 +335,11 @@ int ocall_mpi_waitany(unsigned char *buf, size_t bufcount, size_t count,
     if (ret) {
         handle_mpi_error(ret, "MPI_Waitany");
         goto exit_free_request;
+    }
+    if (mpi_index == MPI_UNDEFINED) {
+        ret = -1;
+        handle_error_string("All null requests passed to ocall_mpi_waitany");
+        goto exit;
     }
     *index = mpi_index;
 
@@ -351,6 +367,7 @@ int ocall_mpi_waitany(unsigned char *buf, size_t bufcount, size_t count,
 exit_free_request:
     free(requests[*index]->buf);
     free(requests[*index]);
+exit:
     return ret;
 }
 

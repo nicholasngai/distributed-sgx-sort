@@ -1432,7 +1432,6 @@ static int distributed_sample_partition(void *arr_, void *out_,
     size_t sample_idxs[world_size];
     size_t sample_scan_idxs[world_size];
     mpi_tls_request_t requests[world_size];
-    int request_ranks[world_size];
     size_t requests_len = 0;
     ret =
         distributed_quickselect(arr, local_length, local_start, sample_targets,
@@ -1500,7 +1499,6 @@ static int distributed_sample_partition(void *arr_, void *out_,
                     handle_error_string("Error receiving partitioned data");
                     goto exit_free_buf;
                 }
-                request_ranks[requests_len] = i;
                 requests_len++;
             }
         } else {
@@ -1534,7 +1532,6 @@ static int distributed_sample_partition(void *arr_, void *out_,
                     goto exit_free_buf;
                 }
 
-                request_ranks[requests_len] = i;
                 requests_len++;
             }
         }
@@ -1544,14 +1541,13 @@ static int distributed_sample_partition(void *arr_, void *out_,
     while (requests_len) {
         size_t index;
         mpi_tls_status_t status;
-        ret = mpi_tls_waitany(requests_len, requests, &index, &status);
+        ret = mpi_tls_waitany(world_size, requests, &index, &status);
         if (ret) {
             handle_error_string("Error waiting on partition requests");
             goto exit_free_buf;
         }
-        int request_rank = request_ranks[index];
         bool keep_rank;
-        if (request_rank == world_rank) {
+        if (index == (size_t) world_rank) {
             /* Receive request completed. */
             size_t req_num_received =
                 status.count / sizeof(*partition_buf[world_rank]);
@@ -1585,37 +1581,37 @@ static int distributed_sample_partition(void *arr_, void *out_,
             /* Send request completed. */
 
             keep_rank =
-                sample_idxs[request_rank] - sample_scan_idxs[request_rank] > 0;
+                sample_idxs[index] - sample_scan_idxs[index] > 0;
 
             if (keep_rank) {
                 /* Decrypt elems. */
                 size_t elems_to_send =
-                    MIN(sample_idxs[request_rank]
-                                - sample_scan_idxs[request_rank],
+                    MIN(sample_idxs[index]
+                                - sample_scan_idxs[index],
                             SAMPLE_PARTITION_BUF_SIZE);
                 for (size_t i = 0; i < elems_to_send; i++) {
                     ret =
-                        elem_decrypt(key, &partition_buf[request_rank][i],
+                        elem_decrypt(key, &partition_buf[index][i],
                                 arr +
-                                    (sample_scan_idxs[request_rank] + i)
+                                    (sample_scan_idxs[index] + i)
                                         * SIZEOF_ENCRYPTED_NODE,
-                                sample_scan_idxs[request_rank]
+                                sample_scan_idxs[index]
                                     + i + local_start);
                     if (ret) {
                         handle_error_string("Error decrypting elem %lu",
-                                sample_scan_idxs[request_rank] + i
+                                sample_scan_idxs[index] + i
                                     + local_start);
                         goto exit_free_buf;
                     }
                 }
-                sample_scan_idxs[request_rank] += elems_to_send;
+                sample_scan_idxs[index] += elems_to_send;
 
                 /* Asynchronously send to enclave. */
                 ret =
-                    mpi_tls_isend_bytes(&partition_buf[request_rank],
+                    mpi_tls_isend_bytes(&partition_buf[index],
                             elems_to_send
-                                * sizeof(*partition_buf[request_rank]),
-                            request_rank, 0, &requests[index]);
+                                * sizeof(*partition_buf[index]),
+                            index, 0, &requests[index]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
                     goto exit_free_buf;
@@ -1625,10 +1621,7 @@ static int distributed_sample_partition(void *arr_, void *out_,
 
         if (!keep_rank) {
             /* Remove the request from the array. */
-            memmove(&requests[index], &requests[index + 1],
-                    (requests_len - (index + 1)) * sizeof(*requests));
-            memmove(&request_ranks[index], &request_ranks[index + 1],
-                    (requests_len - (index + 1)) * sizeof(*request_ranks));
+            requests[index].type = MPI_TLS_NULL;
             requests_len--;
         }
     }
