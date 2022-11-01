@@ -575,7 +575,8 @@ int main(int argc, char **argv) {
              * number of enclaves (since each enclaves needs at least two
              * buckets. */
             size_t num_buckets =
-                MAX(next_pow2l(length) * 2 / BUCKET_SIZE, world_size * 2);
+                MAX(next_pow2l(length) * 2 / BUCKET_SIZE,
+                        (size_t) world_size * 2);
             size_t local_num_buckets =
                 num_buckets * (world_rank + 1) / world_size
                     - num_buckets * world_rank / world_size;

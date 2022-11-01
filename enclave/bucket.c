@@ -55,13 +55,15 @@ unsigned int cache_counter;
 
 static int get_bucket_rank(size_t bucket) {
     size_t num_buckets =
-        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size * 2);
+        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE,
+                (size_t) world_size * 2);
     return bucket * world_size / num_buckets;
 }
 
 static size_t get_local_bucket_start(int rank) {
     size_t num_buckets =
-        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size * 2);
+        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE,
+                (size_t) world_size * 2);
     return (rank * num_buckets + world_size - 1) / world_size;
 }
 
