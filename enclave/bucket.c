@@ -720,6 +720,103 @@ exit:
     }
 }
 
+/* Run merge-split as part of a butterfly network. This is modified from the
+ * paper, since all merge-split operations will be constrained to the same
+ * buckets of memory. */
+static int bucket_route(void *arr) {
+    size_t num_buckets = get_local_bucket_start(world_size);
+    size_t local_bucket_start = get_local_bucket_start(world_rank);
+    size_t num_local_buckets =
+        get_local_bucket_start(world_rank + 1) - local_bucket_start;
+    int ret;
+
+    /* Merge the first log2(BUF_SIZE) levels going by chunks of BUF_SIZE, since
+     * all BUF_SIZE buckets in a given chunk can be kept in the cache. For
+     * example, instead of merging 0-1, 2-3, 4-5, 6-7, 0-2, 1-3, 4-6, 5-7, we
+     * might do 0-1, 2-3, 0-2, 1-3 with a BUF_SIZE of 4. */
+    size_t num_chunked_buckets = MIN(CACHE_BUCKETS, num_buckets);
+    size_t num_chunked_levels = log2li(num_chunked_buckets);
+    for (size_t chunk_start = 0; chunk_start < num_local_buckets;
+            chunk_start += CACHE_BUCKETS) {
+        for (size_t bit_idx = 0; bit_idx < num_chunked_levels; bit_idx++) {
+            size_t bucket_stride = 2u << bit_idx;
+
+            /* Create iterative task for merge split. */
+            struct merge_split_idx_args args = {
+                .arr = arr,
+                .bit_idx = bit_idx,
+                .bucket_stride = bucket_stride,
+                .bucket_offset = chunk_start,
+                .num_buckets = num_chunked_buckets,
+            };
+            struct thread_work work = {
+                .type = THREAD_WORK_ITER,
+                .iter = {
+                    .func = merge_split_idx,
+                    .arg = &args,
+                    .count = num_chunked_buckets / 2,
+                },
+            };
+            thread_work_push(&work);
+
+            thread_work_until_empty();
+
+            /* Get work from others. */
+            thread_wait(&work);
+            ret = args.ret;
+            if (ret) {
+                handle_error_string("Error in merge split range at level %lu",
+                        bit_idx);
+                goto exit;
+            }
+        }
+    }
+
+    /* Merge split remaining levels, when chunks of BUF_SIZE buckets can't all
+     * be kept in the cache. */
+    for (size_t bit_idx = num_chunked_levels; 2u << bit_idx <= num_buckets;
+            bit_idx++) {
+        size_t bucket_stride = 2u << bit_idx;
+
+        /* Create iterative task for merge split. */
+        struct merge_split_idx_args args = {
+            .arr = arr,
+            .bit_idx = bit_idx,
+            .bucket_stride = bucket_stride,
+            .bucket_offset = 0,
+            .num_buckets = num_buckets,
+        };
+        struct thread_work work = {
+            .type = THREAD_WORK_ITER,
+            .iter = {
+                .func = merge_split_idx,
+                .arg = &args,
+                .count = num_buckets / 2,
+            },
+        };
+        thread_work_push(&work);
+
+        thread_work_until_empty();
+
+        /* Get work from others. */
+        thread_wait(&work);
+        ret = args.ret;
+        if (ret) {
+            handle_error_string("Error in merge split range at level %lu",
+                    bit_idx);
+            goto exit;
+        }
+    }
+    ret = evict_buckets(arr);
+    if (ret) {
+        handle_error_string("Error evicting buckets");
+        goto exit;
+    }
+
+exit:
+    return ret;
+}
+
 /* Compares elements first by sorting real elements before dummy elements, and
  * then by their ORP ID. */
 static int permute_comparator(const void *a_, const void *b_,
@@ -1654,10 +1751,9 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     size_t src_local_start = total_length * world_rank / world_size;
     size_t src_local_length =
         total_length * (world_rank + 1) / world_size - src_local_start;
-    size_t num_buckets = get_local_bucket_start(world_size);
+    size_t local_bucket_start = get_local_bucket_start(world_rank);
     size_t num_local_buckets =
-        (get_local_bucket_start(world_rank + 1)
-            - get_local_bucket_start(world_rank));
+        get_local_bucket_start(world_rank + 1) - local_bucket_start;
     size_t local_start = get_local_bucket_start(world_rank) * BUCKET_SIZE;
     size_t local_length = num_local_buckets * BUCKET_SIZE;
 
@@ -1690,91 +1786,10 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
-    /* Run merge-split as part of a butterfly network. This is modified from
-     * the paper, since all merge-split operations will be constrained to the
-     * same buckets of memory. */
-
-    /* Merge the first log2(BUF_SIZE) levels going by chunks of BUF_SIZE, since
-     * all BUF_SIZE buckets in a given chunk can be kept in the cache. For
-     * example, instead of merging 0-1, 2-3, 4-5, 6-7, 0-2, 1-3, 4-6, 5-7, we
-     * might do 0-1, 2-3, 0-2, 1-3 with a BUF_SIZE of 4. */
-    size_t num_chunked_buckets = MIN(CACHE_BUCKETS, num_buckets);
-    size_t num_chunked_levels = log2li(num_chunked_buckets);
-    for (size_t chunk_start = 0; chunk_start < num_buckets;
-            chunk_start += CACHE_BUCKETS) {
-        for (size_t bit_idx = 0; bit_idx < num_chunked_levels; bit_idx++) {
-            size_t bucket_stride = 2u << bit_idx;
-
-            /* Create iterative task for merge split. */
-            struct merge_split_idx_args args = {
-                .arr = buf,
-                .bit_idx = bit_idx,
-                .bucket_stride = bucket_stride,
-                .bucket_offset = chunk_start,
-                .num_buckets = num_chunked_buckets,
-            };
-            struct thread_work work = {
-                .type = THREAD_WORK_ITER,
-                .iter = {
-                    .func = merge_split_idx,
-                    .arg = &args,
-                    .count = num_chunked_buckets / 2,
-                },
-            };
-            thread_work_push(&work);
-
-            thread_work_until_empty();
-
-            /* Get work from others. */
-            thread_wait(&work);
-            ret = args.ret;
-            if (ret) {
-                handle_error_string("Error in merge split range at level %lu",
-                        bit_idx);
-                goto exit;
-
-            }
-        }
-    }
-
-    /* Merge split remaining levels, when chunks of BUF_SIZE buckets can't all
-     * be kept in the cache. */
-    for (size_t bit_idx = num_chunked_levels; 2u << bit_idx <= num_buckets;
-            bit_idx++) {
-        size_t bucket_stride = 2u << bit_idx;
-
-        /* Create iterative task for merge split. */
-        struct merge_split_idx_args args = {
-            .arr = buf,
-            .bit_idx = bit_idx,
-            .bucket_stride = bucket_stride,
-            .bucket_offset = 0,
-            .num_buckets = num_buckets,
-        };
-        struct thread_work work = {
-            .type = THREAD_WORK_ITER,
-            .iter = {
-                .func = merge_split_idx,
-                .arg = &args,
-                .count = num_buckets / 2,
-            },
-        };
-        thread_work_push(&work);
-
-        thread_work_until_empty();
-
-        /* Get work from others. */
-        thread_wait(&work);
-        ret = args.ret;
-        if (ret) {
-            handle_error_string("Error in merge split range at level %lu",
-                    bit_idx);
-            goto exit;
-        }
-    }
-    ret = evict_buckets(buf);
+    ret = bucket_route(buf);
     if (ret) {
-        handle_error_string("Error evicting buckets");
+        handle_error_string(
+                "Error routing elements through butterfly network");
         goto exit;
     }
 
