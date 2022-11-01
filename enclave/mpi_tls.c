@@ -961,6 +961,7 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
     unsigned char *wait_bio;
     size_t wait_bio_len;
     switch (request->type) {
+    case MPI_TLS_NULL:
     case MPI_TLS_SEND:
         wait_bio = NULL;
         wait_bio_len = 0;
@@ -971,10 +972,16 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
         break;
     }
 
+    ocall_mpi_request_t mpi_request;
+    if (request->type == MPI_TLS_NULL) {
+        mpi_request = OCALL_MPI_REQUEST_NULL;
+    } else {
+        mpi_request = request->mpi_request;
+    }
+
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result =
-        ocall_mpi_wait(&ret, wait_bio, wait_bio_len, &request->mpi_request,
-                status);
+        ocall_mpi_wait(&ret, wait_bio, wait_bio_len, &mpi_request, status);
     if (result != OE_OK) {
         handle_oe_error(result, "ocall_mpi_wait");
         ret = result;
@@ -982,7 +989,7 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ret =
-        ocall_mpi_wait(wait_bio, wait_bio_len, &request->mpi_request, status);
+        ocall_mpi_wait(wait_bio, wait_bio_len, &mpi_request, status);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error waiting on request");
@@ -990,6 +997,7 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
     }
 
     switch (request->type) {
+    case MPI_TLS_NULL:
     case MPI_TLS_SEND:
         break;
 
@@ -1027,6 +1035,7 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
     size_t wait_bio_len = 0;
     for (size_t i = 0; i < count; i++) {
         switch (requests[i].type) {
+        case MPI_TLS_NULL:
         case MPI_TLS_SEND:
             break;
         case MPI_TLS_RECV:
@@ -1040,7 +1049,12 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
 
     ocall_mpi_request_t mpi_requests[count];
     for (size_t i = 0; i < count; i++) {
-        mpi_requests[i] = requests[i].mpi_request;
+        if (requests[i].type == MPI_TLS_NULL) {
+            mpi_requests[i] = OCALL_MPI_REQUEST_NULL;
+        } else {
+            mpi_requests[i] = requests[i].mpi_request;
+        }
+
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
@@ -1063,6 +1077,7 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
     }
 
     switch (requests[*index].type) {
+    case MPI_TLS_NULL:
     case MPI_TLS_SEND:
         break;
 

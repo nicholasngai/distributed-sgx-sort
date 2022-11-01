@@ -12,4 +12,6 @@ typedef struct ocall_mpi_status {
 
 typedef struct ocall_mpi_request * ocall_mpi_request_t;
 
+#define OCALL_MPI_REQUEST_NULL ((ocall_mpi_request_t) 0)
+
 #endif /* distributed-sgx-sort/common/ocalls.h */

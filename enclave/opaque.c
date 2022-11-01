@@ -176,7 +176,6 @@ static int transpose(void *arr_, void *out_, size_t local_length,
     unsigned char *out = out_;
     size_t offsets[world_size];
     mpi_tls_request_t requests[world_size];
-    int request_ranks[world_size];
     size_t requests_len = world_size;
     int ret;
 
@@ -228,7 +227,6 @@ static int transpose(void *arr_, void *out_, size_t local_length,
                 handle_error_string("Error posting receive into %d", rank);
                 goto exit_free_bufs;
             }
-            request_ranks[rank] = rank;
         } else {
             /* Decrypt elements with stride of world_size. */
             size_t elems_to_decrypt =
@@ -260,7 +258,6 @@ static int transpose(void *arr_, void *out_, size_t local_length,
                         world_rank, rank);
                 goto exit_free_bufs;
             }
-            request_ranks[rank] = rank;
         }
     }
 
@@ -269,90 +266,82 @@ static int transpose(void *arr_, void *out_, size_t local_length,
         /* Wait for a request. */
         size_t index;
         mpi_tls_status_t status;
-        ret = mpi_tls_waitany(requests_len, requests, &index, &status);
+        ret = mpi_tls_waitany(world_size, requests, &index, &status);
         if (ret) {
             handle_error_string("Error waiting for requests");
             goto exit_free_bufs;
         }
 
-        int rank = request_ranks[index];
-
-        if (rank == world_rank) {
+        if (index == (size_t) world_rank) {
             /* Receive request. */
 
             /* Write received data out to the buffer. */
-            size_t num_received_elems = status.count / sizeof(*bufs[rank]);
+            size_t num_received_elems = status.count / sizeof(*bufs[index]);
             for (size_t i = 0; i < num_received_elems; i++) {
                 ret =
-                    elem_encrypt(key, &bufs[rank][i],
-                            out + (offsets[rank] + i) * SIZEOF_ENCRYPTED_NODE,
-                            offsets[rank] + i + local_start);
+                    elem_encrypt(key, &bufs[index][i],
+                            out + (offsets[index] + i) * SIZEOF_ENCRYPTED_NODE,
+                            offsets[index] + i + local_start);
                 if (ret) {
                     handle_error_string("Error encrypting elem %lu",
-                            offsets[rank] + i + local_start);
+                            offsets[index] + i + local_start);
                     goto exit_free_bufs;
                 }
             }
-            offsets[rank] += num_received_elems;
+            offsets[index] += num_received_elems;
 
-            if (offsets[rank] < local_length) {
+            if (offsets[index] < local_length) {
                 /* Post another receive request. */
                 ret =
-                    mpi_tls_irecv_bytes(bufs[rank],
-                            CHUNK_SIZE * sizeof(*bufs[rank]),
+                    mpi_tls_irecv_bytes(bufs[index],
+                            CHUNK_SIZE * sizeof(*bufs[index]),
                             MPI_TLS_ANY_SOURCE, 0, &requests[index]);
                 if (ret) {
-                    handle_error_string("Error posting receive into %d", rank);
+                    handle_error_string("Error posting receive into %d",
+                            (int) index);
                     goto exit_free_bufs;
                 }
             } else {
                 /* Remove request. */
-                memmove(requests + index, requests + index + 1,
-                        (requests_len - index - 1) * sizeof(*requests));
-                memmove(request_ranks + index, request_ranks + index + 1,
-                        (requests_len - index - 1) * sizeof(*request_ranks));
+                requests[index].type = MPI_TLS_NULL;
                 requests_len--;
             }
         } else {
-            if (offsets[rank] < local_length / world_size) {
+            if (offsets[index] < local_length / world_size) {
                 /* Decrypt elements with stride of world_size. */
                 size_t elems_to_decrypt =
-                        MIN(CEIL_DIV(local_length - offsets[rank], world_size),
+                        MIN(CEIL_DIV(local_length - offsets[index], world_size),
                                 CHUNK_SIZE);
                 for (size_t i = 0; i < elems_to_decrypt; i++) {
                     size_t decrypt_offset =
                         !reverse
-                            ? offsets[rank] + i * world_size
-                            : rank * local_length / world_size + offsets[rank] + i;
+                            ? offsets[index] + i * world_size
+                            : index * local_length / world_size + offsets[index] + i;
                     ret =
-                        elem_decrypt(key, &bufs[rank][i],
+                        elem_decrypt(key, &bufs[index][i],
                                 arr + decrypt_offset * SIZEOF_ENCRYPTED_NODE,
                                 decrypt_offset + local_start);
                     if (ret) {
                         handle_error_string("Error decrypting elem %lu",
-                                (offsets[rank] + i * world_size));
+                                (offsets[index] + i * world_size));
                         goto exit_free_bufs;
                     }
                 }
-                offsets[rank] += elems_to_decrypt;
+                offsets[index] += elems_to_decrypt;
 
                 /* Post another send request. */
                 ret =
-                    mpi_tls_isend_bytes(bufs[rank],
-                            elems_to_decrypt * sizeof(*bufs[rank]), rank, 0,
+                    mpi_tls_isend_bytes(bufs[index],
+                            elems_to_decrypt * sizeof(*bufs[index]), index, 0,
                             &requests[index]);
                 if (ret) {
                     handle_error_string("Error posting send from %d to %d",
-                            world_rank, rank);
+                            world_rank, (int) index);
                     goto exit_free_bufs;
                 }
-                request_ranks[rank] = rank;
             } else {
                 /* Remove request. */
-                memmove(requests + index, requests + index + 1,
-                        (requests_len - index - 1) * sizeof(*requests));
-                memmove(request_ranks + index, request_ranks + index + 1,
-                        (requests_len - index - 1) * sizeof(*request_ranks));
+                requests[index].type = MPI_TLS_NULL;
                 requests_len--;
             }
         }

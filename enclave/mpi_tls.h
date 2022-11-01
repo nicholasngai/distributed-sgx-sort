@@ -6,6 +6,7 @@
 #include "common/ocalls.h"
 
 enum mpi_tls_request_type {
+    MPI_TLS_NULL,
     MPI_TLS_SEND,
     MPI_TLS_RECV,
 };
@@ -31,7 +32,7 @@ int mpi_tls_init(size_t world_rank, size_t world_size,
 void mpi_tls_free(void);
 int mpi_tls_send_bytes(const void *buf, size_t count, int dest, int tag);
 int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
-        ocall_mpi_status_t *status);
+        mpi_tls_status_t *status);
 int mpi_tls_isend_bytes(const void *buf, size_t count, int dest, int tag,
         mpi_tls_request_t *request);
 int mpi_tls_irecv_bytes(void *buf, size_t count, int src, int tag,
