@@ -720,19 +720,20 @@ exit:
     }
 }
 
-/* Compares elements by their ORP ID. */
+/* Compares elements first by sorting real elements before dummy elements, and
+ * then by their ORP ID. */
 static int permute_comparator(const void *a_, const void *b_,
         void *aux UNUSED) {
     const elem_t *a = a_;
     const elem_t *b = b_;
-    return (a > b) - (a < b);
+    return (a->is_dummy - b->is_dummy) * 2
+        + ((a->orp_id > b->orp_id) - (a->orp_id < b->orp_id));
 }
 
-/* Permutes the real elements in the bucket (which are guaranteed to be at the
- * beginning of the bucket) by sorting according to all bits of the ORP ID. This
- * is valid because the bin assignment used the lower bits of the ORP ID,
- * leaving the upper bits free for comparison and permutation within the bin.
- * The elems are then written sequentially to ARR[*COMPRESS_IDX], and
+/* Permutes the real elements in the bucket by sorting according to all bits of
+ * the ORP ID. This is valid because the bin assignment used the lower bits of
+ * the ORP ID, leaving the upper bits free for comparison and permutation within
+ * the bin.  The elems are then written sequentially to ARR[*COMPRESS_IDX], and
  * *COMPRESS_IDX is incremented. The elems receive new random ORP IDs. The first
  * element is assumed to have START_IDX for the purposes of decryption. */
 struct permute_and_compress_args {
@@ -761,20 +762,19 @@ static void permute_and_compress(void *args_, size_t bucket_idx) {
         }
     }
 
-    /* Scan for first dummy elem. */
-    size_t real_len = BUCKET_SIZE;
-    for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        if (buffer[i].is_dummy) {
-            real_len = i;
-            break;
-        }
-    }
-
-    o_sort(buffer, real_len, sizeof(*buffer), permute_comparator, NULL);
+    o_sort(buffer, BUCKET_SIZE, sizeof(*buffer), permute_comparator, NULL);
 
     /* Assign random ORP IDs and encrypt elems from buffer to compressed
      * array. */
-    for (size_t i = 0; i < real_len; i++) {
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        /* If this is a dummy element, break out of the loop. All real elements
+         * are sorted before the dummy elements at this point. This
+         * non-oblivious comparison is fine since it's fine to leak how many
+         * elements end up in each bucket. */
+        if (buffer[i].is_dummy) {
+            break;
+        }
+
         /* Fetch the next index to encrypt. */
         size_t out_idx =
             __atomic_fetch_add(args->compress_idx, 1, __ATOMIC_RELAXED);
