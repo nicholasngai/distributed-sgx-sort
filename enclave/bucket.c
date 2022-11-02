@@ -53,13 +53,6 @@ static struct {
 } cache_meta[CACHE_SETS];
 unsigned int cache_counter;
 
-static int get_bucket_rank(size_t bucket) {
-    size_t num_buckets =
-        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE,
-                (size_t) world_size * 2);
-    return bucket * world_size / num_buckets;
-}
-
 static size_t get_local_bucket_start(int rank) {
     size_t num_buckets =
         MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE,
@@ -497,130 +490,32 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
         size_t bit_idx) {
     int ret = -1;
     unsigned char *arr = arr_;
-    int bucket1_rank = get_bucket_rank(bucket1_idx);
-    int bucket2_rank = get_bucket_rank(bucket2_idx);
-    bool bucket1_local = bucket1_rank == world_rank;
-    bool bucket2_local = bucket2_rank == world_rank;
 
-    /* If both buckets are remote, ignore this merge-split. */
-    if (!bucket1_local && !bucket2_local) {
-        ret = 0;
+    /* Load bucket 1 elems. */
+    elem_t *bucket1 = load_bucket(arr, bucket1_idx);
+    if (!bucket1) {
+        handle_error_string("Error loading bucket %lu", bucket1_idx);
+        ret = -1;
         goto exit;
     }
 
-    int local_bucket_idx = bucket1_local ? bucket1_idx : bucket2_idx;
-    int nonlocal_bucket_idx = bucket1_local ? bucket2_idx : bucket1_idx;
-    int nonlocal_rank = bucket1_local ? bucket2_rank : bucket1_rank;
-
-    /* Load bucket 1 elems if local. */
-    elem_t *bucket1;
-    if (bucket1_local) {
-        bucket1 = load_bucket(arr, bucket1_idx);
-        if (!bucket1) {
-            handle_error_string("Error loading bucket %lu", bucket1_idx);
-            ret = -1;
-            goto exit;
-        }
+    /* Load bucket 2 elems. */
+    elem_t *bucket2 = load_bucket(arr, bucket2_idx);
+    if (!bucket2) {
+        handle_error_string("Error loading bucket %lu", bucket2_idx);
+        ret = -1;
+        goto exit;
     }
 
-    /* Load bucket 2 elems if local. */
-    elem_t *bucket2;
-    if (bucket2_local) {
-        bucket2 = load_bucket(arr, bucket2_idx);
-        if (!bucket2) {
-            handle_error_string("Error loading bucket %lu", bucket2_idx);
-            ret = -1;
-            goto exit;
-        }
-    }
-
-    /* The number of elements with corresponding bit 1. */
+    /* Count number of elements with corresponding bit 1. */
     size_t count1 = 0;
-
-    /* Count number of elements with corresponding bit 1 for local buckets. */
-    if (bucket1_local) {
-        for (size_t i = 0; i < BUCKET_SIZE; i++) {
-            /* Obliviously increment count. */
-            count1 +=
-                ((bucket1[i].orp_id >> bit_idx) & 1) & !bucket1[i].is_dummy;
-        }
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        /* Obliviously increment count. */
+        count1 += ((bucket1[i].orp_id >> bit_idx) & 1) & !bucket1[i].is_dummy;
     }
-    if (bucket2_local) {
-        for (size_t i = 0; i < BUCKET_SIZE; i++) {
-            /* Obliviously increment count. */
-            count1 +=
-                ((bucket2[i].orp_id >> bit_idx) & 1) & !bucket2[i].is_dummy;
-        }
-    }
-
-    /* If remote, send the current count and then our local buckets. Then,
-     * receive the sent count and remote buckets from the other elem. */
-    if (!bucket1_local || !bucket2_local) {
-        /* Post receive for count. */
-        mpi_tls_request_t count_request;
-        size_t remote_count1;
-        ret = mpi_tls_irecv_bytes(&remote_count1, sizeof(remote_count1),
-                nonlocal_rank, nonlocal_bucket_idx, &count_request);
-        if (ret) {
-            handle_error_string("Error receiving count1 into %d from %d",
-                    world_rank, nonlocal_rank);
-            goto exit;
-        }
-
-        /* Post receive for remote bucket. */
-        mpi_tls_request_t bucket_request;
-        ret = mpi_tls_irecv_bytes(buffer, sizeof(*buffer) * BUCKET_SIZE,
-                nonlocal_rank, nonlocal_bucket_idx, &bucket_request);
-        if (ret) {
-            handle_error_string("Error receiving remote bucket into %d from %d",
-                    world_rank, nonlocal_rank);
-            goto exit;
-        }
-        if (bucket1_local) {
-            bucket2 = buffer;
-        } else {
-            bucket1 = buffer;
-        }
-
-        /* Send count. */
-        ret = mpi_tls_send_bytes(&count1, sizeof(count1), nonlocal_rank,
-                local_bucket_idx);
-        if (ret) {
-            handle_error_string("Error sending count1 from %d to %d",
-                    world_rank, nonlocal_rank);
-            goto exit;
-        }
-
-        /* Send local bucket. */
-        ret = mpi_tls_send_bytes(
-                bucket1_local ? bucket1 : bucket2,
-                sizeof(*bucket1) * BUCKET_SIZE, nonlocal_rank,
-                local_bucket_idx);
-        if (ret) {
-            handle_error_string("Error sending local bucket from %d to %d",
-                    world_rank, nonlocal_rank);
-            goto exit;
-        }
-
-        /* Wait for count and bucket to come in. */
-        ret = mpi_tls_wait(&count_request, MPI_TLS_STATUS_IGNORE);
-        if (ret) {
-            handle_error_string(
-                    "Error waiting on receive for count1 into %d from %d",
-                    world_rank, nonlocal_rank);
-            goto exit;
-        }
-        ret = mpi_tls_wait(&bucket_request, MPI_TLS_STATUS_IGNORE);
-        if (ret) {
-            handle_error_string(
-                    "Error waiting on receive for bucket into %d from %d",
-                    world_rank, nonlocal_rank);
-            goto exit;
-        }
-
-        /* Add the received remote count to the local count to arrive at the
-         * total for both buckets. */
-        count1 += remote_count1;
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        /* Obliviously increment count. */
+        count1 += ((bucket2[i].orp_id >> bit_idx) & 1) & !bucket2[i].is_dummy;
     }
 
     /* There are count1 elements with bit 1, so we need to assign BUCKET_SIZE -
@@ -652,15 +547,9 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     };
     o_compact_generate_swaps(BUCKET_SIZE * 2, merge_split_is_marked, merge_split_swapper, &aux);
 
-    /* Free bucket 1 if local. */
-    if (bucket1_local) {
-        free_bucket(bucket1);
-    }
-
-    /* Free bucket 2 if local. */
-    if (bucket2_local) {
-        free_bucket(bucket2);
-    }
+    /* Free buckets. */
+    free_bucket(bucket1);
+    free_bucket(bucket2);
 
     ret = 0;
 
@@ -722,11 +611,12 @@ exit:
     }
 }
 
-/* Run merge-split as part of a butterfly network. This is modified from the
- * paper, since all merge-split operations will be constrained to the same
- * buckets of memory. */
-static int bucket_route(void *arr) {
-    size_t num_buckets = get_local_bucket_start(world_size);
+/* Run merge-split as part of a butterfly network, routing within a given
+ * enclave based on ORP_ID[START_BIT_IDX:START_BIT_IDX + NUM_LEVELS - 1].
+ * This is modified from the paper, since all merge-split operations will be
+ * constrained to the same buckets of memory. */
+static int local_bucket_route(void *arr, size_t num_levels,
+        size_t start_bit_idx) {
     size_t local_bucket_start = get_local_bucket_start(world_rank);
     size_t num_local_buckets =
         get_local_bucket_start(world_rank + 1) - local_bucket_start;
@@ -736,8 +626,8 @@ static int bucket_route(void *arr) {
      * all BUF_SIZE buckets in a given chunk can be kept in the cache. For
      * example, instead of merging 0-1, 2-3, 4-5, 6-7, 0-2, 1-3, 4-6, 5-7, we
      * might do 0-1, 2-3, 0-2, 1-3 with a BUF_SIZE of 4. */
-    size_t num_chunked_buckets = MIN(CACHE_BUCKETS, num_buckets);
-    size_t num_chunked_levels = log2li(num_chunked_buckets);
+    size_t num_chunked_buckets = MIN(CACHE_BUCKETS, num_local_buckets);
+    size_t num_chunked_levels = MIN(num_levels, log2li(num_chunked_buckets));
     for (size_t chunk_start = 0; chunk_start < num_local_buckets;
             chunk_start += CACHE_BUCKETS) {
         for (size_t bit_idx = 0; bit_idx < num_chunked_levels; bit_idx++) {
@@ -746,9 +636,9 @@ static int bucket_route(void *arr) {
             /* Create iterative task for merge split. */
             struct merge_split_idx_args args = {
                 .arr = arr,
-                .bit_idx = bit_idx,
+                .bit_idx = start_bit_idx + bit_idx,
                 .bucket_stride = bucket_stride,
-                .bucket_offset = chunk_start,
+                .bucket_offset = local_bucket_start + chunk_start,
                 .num_buckets = num_chunked_buckets,
             };
             struct thread_work work = {
@@ -776,24 +666,23 @@ static int bucket_route(void *arr) {
 
     /* Merge split remaining levels, when chunks of BUF_SIZE buckets can't all
      * be kept in the cache. */
-    for (size_t bit_idx = num_chunked_levels; 2u << bit_idx <= num_buckets;
-            bit_idx++) {
+    for (size_t bit_idx = num_chunked_levels; bit_idx < num_levels; bit_idx++) {
         size_t bucket_stride = 2u << bit_idx;
 
         /* Create iterative task for merge split. */
         struct merge_split_idx_args args = {
             .arr = arr,
-            .bit_idx = bit_idx,
+            .bit_idx = start_bit_idx + bit_idx,
             .bucket_stride = bucket_stride,
-            .bucket_offset = 0,
-            .num_buckets = num_buckets,
+            .bucket_offset = local_bucket_start,
+            .num_buckets = num_local_buckets,
         };
         struct thread_work work = {
             .type = THREAD_WORK_ITER,
             .iter = {
                 .func = merge_split_idx,
                 .arg = &args,
-                .count = num_buckets / 2,
+                .count = num_local_buckets / 2,
             },
         };
         thread_work_push(&work);
@@ -815,6 +704,239 @@ static int bucket_route(void *arr) {
         goto exit;
     }
 
+exit:
+    return ret;
+}
+
+struct distributed_bucket_route_is_marked_aux {
+    size_t start_bit_idx;
+    size_t bit_length;
+};
+static bool distributed_bucket_route_is_marked(const void *elem_, void *aux_) {
+    const elem_t *elem = elem_;
+    struct distributed_bucket_route_is_marked_aux *aux = aux_;
+    size_t elem_bits =
+        ((elem->orp_id >> aux->start_bit_idx) & ((1lu << aux->bit_length) - 1));
+    return elem_bits == (uint64_t) world_rank;
+}
+
+/* Distribute and receive elements from buckets in ARR to buckets in OUT.
+ *
+ * If the number of local buckets per enclave N exceeeds the number of enclaves
+ * E, each bucket i is sent to enclave i % E.
+ *
+ * If the number of enclaves E exceeds the number of local buckets N, each
+ * bucket i is sent to enclaves i * E / N through (i + 1) * E / N - 1, and the
+ * receiving enclave k obliviously filters the elements according to
+ * ORP_ID[START_BIT_IDX:START_BIT_IDX + log2li(E / N)] == k % (E / N).
+ *
+ * This can be generalized as the following: For each bucket i, send the bucket
+ * to enclaves i * MAX(E / N, 1) % E through
+ * i * MAX(E / N, 1) % E + MAX(E / N, 1) - 1. */
+static int distributed_bucket_route(void *arr, void *out_,
+        size_t start_bit_idx) {
+    unsigned char *out = out_;
+    size_t local_bucket_start = get_local_bucket_start(world_rank);
+    size_t num_local_buckets =
+        get_local_bucket_start(world_rank + 1) - local_bucket_start;
+    size_t local_start = local_bucket_start * BUCKET_SIZE;
+    int ret;
+
+    size_t enclaves_per_bucket = MAX(world_size / num_local_buckets, 1);
+    mpi_tls_request_t requests[world_size];
+    size_t request_idxs[world_size];
+
+    if (world_size == 1) {
+        ret = 0;
+        goto exit;
+    }
+
+    elem_t *buf = malloc(BUCKET_SIZE * 2 * sizeof(*buf));
+    if (!buf) {
+        handle_error_string("Error allocating buffer");
+        ret = errno;
+        goto exit;
+    }
+
+    /* Send and receive buckets according to the rules above. Note that we are
+     * iterating by enclave instead of by bucket. */
+    size_t recv_count = 0;
+    for (int rank = 0; rank < world_size; rank++) {
+        if (rank == world_rank) {
+            /* Copy our own bucket to the output if there is only one enclave
+             * per bucket, and copy it to the buffer otherwise. */
+            request_idxs[rank] = 0;
+            for (size_t i = rank / MAX(world_size / num_local_buckets, 1);
+                    i < num_local_buckets; i += world_size) {
+                elem_t *bucket =
+                    load_bucket(arr, i + local_bucket_start);
+                if (!bucket) {
+                    handle_error_string("Error loading bucket %lu",
+                            i + local_bucket_start);
+                    goto exit_free_buf;
+                }
+
+                if (enclaves_per_bucket == 1) {
+                    for (size_t j = 0; j < BUCKET_SIZE; j++) {
+                        ret =
+                            elem_encrypt(key, &buf[i],
+                                    out + (request_idxs[rank] * BUCKET_SIZE + j) * SIZEOF_ENCRYPTED_NODE,
+                                    request_idxs[rank] * BUCKET_SIZE + j + local_start);
+                        if (ret) {
+                            handle_error_string("Error encrypting elem %lu",
+                                    request_idxs[rank] * BUCKET_SIZE + j);
+                            free_bucket(bucket);
+                            goto exit_free_buf;
+                        }
+                    }
+                    request_idxs[rank]++;
+                } else {
+                    /* If there is more than one enclave per bucket, the for
+                     * loop will only run once, so this block of code will only
+                     * be run once. */
+                    memcpy(buf, bucket, BUCKET_SIZE * sizeof(*buf));
+                    recv_count = 1;
+                }
+
+                free_bucket(bucket);
+            }
+
+            /* Post a receive request for the current bucket. */
+            ret =
+                mpi_tls_irecv_bytes(recv_count == 0 ? buf : buf + BUCKET_SIZE,
+                        BUCKET_SIZE * sizeof(*buf), MPI_TLS_ANY_SOURCE, 0,
+                        &requests[rank]);
+            if (ret) {
+                handle_error_string("Error posting receive into %d", rank);
+                goto exit_free_buf;
+            }
+        } else {
+            /* Post a send request to the remote rank containing the first
+             * bucket. */
+            request_idxs[rank] = rank / MAX(world_size / num_local_buckets, 1);
+            elem_t *bucket =
+                load_bucket(arr, request_idxs[rank] + local_bucket_start);
+            if (!bucket) {
+                handle_error_string("Error loading bucket %lu",
+                        request_idxs[rank] + local_bucket_start);
+                ret = -1;
+                goto exit_free_buf;
+            }
+
+            ret = mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
+                    rank, 0, &requests[rank]);
+            if (ret) {
+                handle_error_string("Error sending bucket %lu to %d from %d",
+                        request_idxs[rank] + local_bucket_start, rank,
+                        world_rank);
+                free_bucket(bucket);
+                goto exit_free_buf;
+            }
+
+            free_bucket(bucket);
+        }
+    }
+
+    size_t num_requests = world_size;
+    while (num_requests) {
+        size_t index;
+        mpi_tls_status_t status;
+        ret =
+            mpi_tls_waitany(world_size, requests, &index,
+                    &status);
+        if (ret) {
+            handle_error_string("Error waiting on requests");
+            goto exit_free_buf;
+        }
+
+        if (index == (size_t) world_rank) {
+            /* This was the receive request. */
+
+            /* If each bucket is sent to more than one enclave and this isn't
+             * the first bucket received, Use o-compact to obliviously filter
+             * the elements destined for us to the beginning. */
+            if (recv_count > 0) {
+                struct distributed_bucket_route_is_marked_aux aux = {
+                    .start_bit_idx = start_bit_idx,
+                    .bit_length = log2li(world_size),
+                };
+                o_compact(buf, BUCKET_SIZE * 2, sizeof(*buf),
+                        distributed_bucket_route_is_marked, &aux);
+            }
+
+            recv_count++;
+            if (recv_count == enclaves_per_bucket) {
+                /* All elements for the current receiving buckets have been
+                 * received. Write it out. */
+                for (size_t i = 0; i < BUCKET_SIZE; i++) {
+                    ret =
+                        elem_encrypt(key, &buf[i],
+                                out + (request_idxs[index] * BUCKET_SIZE + i) * SIZEOF_ENCRYPTED_NODE,
+                                request_idxs[index] * BUCKET_SIZE + i + local_start);
+                    if (ret) {
+                        handle_error_string("Error encrypting elem %lu",
+                                request_idxs[index] * BUCKET_SIZE + i);
+                        goto exit_free_buf;
+                    }
+                }
+                recv_count = 0;
+                request_idxs[index]++;
+            }
+
+            if (request_idxs[index] < num_local_buckets) {
+                /* Post receive for the next bucket. */
+                ret =
+                    mpi_tls_irecv_bytes(
+                            recv_count == 0 ? buf : buf + BUCKET_SIZE,
+                            BUCKET_SIZE * sizeof(*buf), MPI_TLS_ANY_SOURCE, 0,
+                            &requests[index]);
+                if (ret) {
+                    handle_error_string( "Error posting receive into %d",
+                            (int) index);
+                    goto exit_free_buf;
+                }
+            } else {
+                /* Nullify the receiving request. */
+                requests[index].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        } else {
+            /* This was a send request. */
+
+            request_idxs[index] += world_size;
+
+            if (request_idxs[index] < num_local_buckets) {
+                elem_t *bucket =
+                    load_bucket(arr, request_idxs[index] + local_bucket_start);
+                if (!bucket) {
+                    handle_error_string("Error loading bucket %lu",
+                            request_idxs[index] + local_bucket_start);
+                    goto exit;
+                }
+
+                ret =
+                    mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
+                            index, 0, &requests[index]);
+                if (ret) {
+                    handle_error_string(
+                            "Error sending bucket %lu from %d to %d",
+                            request_idxs[index] + local_bucket_start,
+                            world_rank, (int) index);
+                    free_bucket(bucket);
+                    goto exit_free_buf;
+                }
+
+                free_bucket(bucket);
+            } else {
+                /* Nullify the sending request. */
+                requests[index].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        }
+    }
+
+exit_free_buf:
+    free(buf);
 exit:
     return ret;
 }
@@ -1749,7 +1871,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     size_t local_bucket_start = get_local_bucket_start(world_rank);
     size_t num_local_buckets =
         get_local_bucket_start(world_rank + 1) - local_bucket_start;
-    size_t local_start = get_local_bucket_start(world_rank) * BUCKET_SIZE;
+    size_t local_start = local_bucket_start * BUCKET_SIZE;
     size_t local_length = num_local_buckets * BUCKET_SIZE;
 
     unsigned char *buf = arr + local_length * SIZEOF_ENCRYPTED_NODE;
@@ -1781,10 +1903,29 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
-    ret = bucket_route(buf);
+    size_t local_levels1 = MIN(log2li(world_size), log2li(num_local_buckets));
+    ret = local_bucket_route(buf, local_levels1, 0);
     if (ret) {
-        handle_error_string(
-                "Error routing elements through butterfly network");
+        handle_error_string("Error routing elements through butterfly network");
+        goto exit;
+    }
+
+    ret = distributed_bucket_route(buf, arr, local_levels1);
+    if (ret) {
+        handle_error_string("Error distributing elements in butterfly network");
+        goto exit;
+    }
+
+    size_t distributed_levels =
+        (size_t) world_size > num_local_buckets
+            ? log2li(world_rank / num_local_buckets)
+            : 0;
+    size_t local_levels2 = log2li(num_local_buckets);
+    ret =
+        local_bucket_route(buf, local_levels2,
+                local_levels1 + distributed_levels);
+    if (ret) {
+        handle_error_string("Error routing elements through butterfly network");
         goto exit;
     }
 
