@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 BENCHMARK_DIR=benchmarks
 BITONIC_CHUNK_SIZE=4096
 BUCKET_SIZE=512
+BUCKET_CACHE_SIZE=524288
 
 if [ ! -z "${AZ+x}" ]; then
     export AZDCAP_DEBUG_LOG_LEVEL=0
@@ -41,26 +42,26 @@ for e in 32 16 8 4 2 1; do
         hosts="${hosts%,}"
         cmd_template="mpiexec -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed $a"
 
-        if [ "$a" = "bitonic" ]; then
-            b=$BITONIC_CHUNK_SIZE
-        elif [ "$a" = "bucket" ]; then
-            b=$BUCKET_SIZE
-        else
-            echo 'Invalid algorithm' >&2
-            exit -1
-        fi
-
         warm_up="$cmd_template 256"
         echo "Warming up: $warm_up"
         $warm_up
 
         for s in 256 4096 65536 1048576 16777216; do
             for t in 1 2 4 8; do
+                if [ "$a" = 'bitonic' ]; then
+                    output_filename="$BENCHMARK_DIR/$a-enclaves$e-chunked$BITONIC_CHUNK_SIZE-size$s-threads$t.txt"
+                elif [ "$a" = 'bucket' ]; then
+                    output_filename="$BENCHMARK_DIR/$a-enclaves$e-bucketsize$BUCKET_SIZE-cachesize$BUCKET_CACHE_SIZE-size$s-threads$t.txt"
+                else
+                    echo 'Invalid algorithm' >&2
+                    exit -1
+                fi
+
                 cmd="$cmd_template $s $t"
                 echo "Command: $cmd"
                 for i in {1..4}; do
                     $cmd
-                done | tee "$BENCHMARK_DIR/$a-enclaves$e-chunked$b-size$s-threads$t.txt"
+                done | tee "$output_filename"
             done
         done
     done
