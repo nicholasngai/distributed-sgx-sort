@@ -1650,7 +1650,7 @@ static int distributed_sample_partition(void *arr_, void *out_,
     size_t sample_idxs[world_size];
     size_t sample_scan_idxs[world_size];
     mpi_tls_request_t requests[world_size];
-    size_t requests_len = 0;
+    size_t requests_len = world_size;
     ret =
         distributed_quickselect(arr, local_length, local_start, sample_targets,
                 samples, sample_idxs, world_size - 1);
@@ -1712,12 +1712,14 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 ret =
                     mpi_tls_irecv_bytes(&partition_buf[i],
                             elems_to_recv * sizeof(*partition_buf[i]),
-                            MPI_TLS_ANY_SOURCE, 0, &requests[requests_len]);
+                            MPI_TLS_ANY_SOURCE, 0, &requests[i]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
                     goto exit_free_buf;
                 }
-                requests_len++;
+            } else {
+                requests[i].type = MPI_TLS_NULL;
+                requests_len--;
             }
         } else {
             if (sample_scan_idxs[i] < sample_idxs[i]) {
@@ -1744,13 +1746,14 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 ret =
                     mpi_tls_isend_bytes(&partition_buf[i],
                             elems_to_send * sizeof(*partition_buf[i]), i, 0,
-                            &requests[requests_len]);
+                            &requests[i]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
                     goto exit_free_buf;
                 }
-
-                requests_len++;
+            } else {
+                requests[i].type = MPI_TLS_NULL;
+                requests_len--;
             }
         }
     }

@@ -65,7 +65,7 @@ EOF
                 echo "Command: $cmd"
                 for i in {1..4}; do
                     $cmd
-                done | tee "$BENCHMARK_DIR/$a-enclaves$e-bucketsize$b-cachesize512-size$s-threads$t.txt"
+                done | tee "$BENCHMARK_DIR/$a-enclaves$e-bucketsize$b-cachesize1024-size$s-threads$t.txt"
             done
         done
     done
