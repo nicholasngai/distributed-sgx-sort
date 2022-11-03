@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 . ./common.sh
 
 # Create resource group.
-az group create -g "$GROUP" --location westus2
+az group create -g "$GROUP" --location "$LOCATION"
 
 existing_vms=$(az vm list -g "$GROUP" -o tsv | cut -d "$(printf '\t')" -f 16)
 i=0
