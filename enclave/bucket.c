@@ -25,6 +25,10 @@
 
 #define SAMPLE_PARTITION_BUF_SIZE 512
 
+#define BUCKET_DISTRIBUTE_MPI_TAG 1
+#define SAMPLE_PARTITION_MPI_TAG 2
+#define QUICKSELECT_MPI_TAG 3
+
 static size_t total_length;
 
 static unsigned char key[16];
@@ -895,7 +899,7 @@ static int distributed_bucket_route(void *arr, void *out_) {
             }
 
             ret = mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
-                    rank, 0, &requests[rank]);
+                    rank, BUCKET_DISTRIBUTE_MPI_TAG, &requests[rank]);
             if (ret) {
                 handle_error_string("Error sending bucket %lu to %d from %d",
                         request_idxs[rank] + local_bucket_start, rank,
@@ -912,7 +916,8 @@ static int distributed_bucket_route(void *arr, void *out_) {
     /* Post a receive request for the current bucket. */
     ret =
         mpi_tls_irecv_bytes(buf, BUCKET_SIZE * sizeof(*buf),
-                MPI_TLS_ANY_SOURCE, 0, &requests[world_rank]);
+                MPI_TLS_ANY_SOURCE, BUCKET_DISTRIBUTE_MPI_TAG,
+                &requests[world_rank]);
     if (ret) {
         handle_error_string("Error posting receive into %d", world_rank);
         goto exit_free_buf;
@@ -949,7 +954,8 @@ static int distributed_bucket_route(void *arr, void *out_) {
                 /* Post receive for the next bucket. */
                 ret =
                     mpi_tls_irecv_bytes(buf, BUCKET_SIZE * sizeof(*buf),
-                            MPI_TLS_ANY_SOURCE, 0, &requests[index]);
+                            MPI_TLS_ANY_SOURCE, BUCKET_DISTRIBUTE_MPI_TAG,
+                            &requests[index]);
                 if (ret) {
                     handle_error_string("Error posting receive into %d",
                             (int) index);
@@ -976,7 +982,7 @@ static int distributed_bucket_route(void *arr, void *out_) {
 
                 ret =
                     mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
-                            index, 0, &requests[index]);
+                            index, BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string(
                             "Error sending bucket %lu from %d to %d",
@@ -1383,7 +1389,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     for (int i = 0; i < world_size; i++) {
         if (i != world_rank) {
             bool *flag = left < right ? &ready : &not_ready;
-            ret = mpi_tls_send_bytes(flag, sizeof(*flag), i, 0);
+            ret =
+                mpi_tls_send_bytes(flag, sizeof(*flag), i, QUICKSELECT_MPI_TAG);
             if (ret) {
                 handle_error_string("Error sending ready flag to %d from %d",
                         i, world_rank);
@@ -1395,8 +1402,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         bool is_ready;
         if (i != world_rank) {
             ret =
-                mpi_tls_recv_bytes(&is_ready, sizeof(is_ready), i, 0,
-                        MPI_TLS_STATUS_IGNORE);
+                mpi_tls_recv_bytes(&is_ready, sizeof(is_ready), i,
+                        QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
             if (ret) {
                 handle_error_string(
                         "Error receiving ready flag from %d into %d", i,
@@ -1438,7 +1445,9 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         /* Send pivot to all other elems. */
         for (int i = 0; i < world_size; i++) {
             if (i != world_rank) {
-                ret = mpi_tls_send_bytes(&pivot, sizeof(pivot), i, 0);
+                ret =
+                    mpi_tls_send_bytes(&pivot, sizeof(pivot), i,
+                            QUICKSELECT_MPI_TAG);
                 if (ret) {
                     handle_error_string("Error sending pivot to %d from %d", i,
                             world_rank);
@@ -1449,8 +1458,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     } else {
         /* Receive pivot from master. */
         ret =
-            mpi_tls_recv_bytes(&pivot, sizeof(pivot), master_rank, 0,
-                    MPI_TLS_STATUS_IGNORE);
+            mpi_tls_recv_bytes(&pivot, sizeof(pivot), master_rank,
+                    QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string("Error receiving pivot into %d from %d",
                     world_rank, master_rank);
@@ -1578,8 +1587,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
                 size_t remote_partition_right;
                 ret =
                     mpi_tls_recv_bytes(&remote_partition_right,
-                            sizeof(remote_partition_right), i, 0,
-                            MPI_TLS_STATUS_IGNORE);
+                            sizeof(remote_partition_right), i,
+                            QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
                 if (ret) {
                     handle_error_string(
                             "Error receiving partition size from %d into %d",
@@ -1592,7 +1601,9 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
 
         for (int i = 0; i < world_size; i++) {
             if (i != world_rank) {
-                ret = mpi_tls_send_bytes(&cur_pivot, sizeof(cur_pivot), i, 0);
+                ret =
+                    mpi_tls_send_bytes(&cur_pivot, sizeof(cur_pivot), i,
+                            QUICKSELECT_MPI_TAG);
                 if (ret) {
                     handle_error_string(
                             "Error sending current pivot to %d from %d", i,
@@ -1604,7 +1615,7 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     } else {
         ret =
             mpi_tls_send_bytes(&partition_right, sizeof(partition_right),
-                    master_rank, 0);
+                    master_rank, QUICKSELECT_MPI_TAG);
         if (ret) {
             handle_error_string(
                     "Error sending partition size from %d to %d",
@@ -1613,8 +1624,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         }
 
         ret =
-            mpi_tls_recv_bytes(&cur_pivot, sizeof(cur_pivot), master_rank, 0,
-                    MPI_TLS_STATUS_IGNORE);
+            mpi_tls_recv_bytes(&cur_pivot, sizeof(cur_pivot), master_rank,
+                    QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string(
                     "Error receiving current pivot into %d from %d",
@@ -1772,7 +1783,8 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 ret =
                     mpi_tls_irecv_bytes(&partition_buf[i],
                             elems_to_recv * sizeof(*partition_buf[i]),
-                            MPI_TLS_ANY_SOURCE, 0, &requests[i]);
+                            MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
+                            &requests[i]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
                     goto exit_free_buf;
@@ -1805,8 +1817,8 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 /* Asynchronously send to enclave. */
                 ret =
                     mpi_tls_isend_bytes(&partition_buf[i],
-                            elems_to_send * sizeof(*partition_buf[i]), i, 0,
-                            &requests[i]);
+                            elems_to_send * sizeof(*partition_buf[i]), i,
+                            SAMPLE_PARTITION_MPI_TAG, &requests[i]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
                     goto exit_free_buf;
@@ -1852,7 +1864,8 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 ret =
                     mpi_tls_irecv_bytes(&partition_buf[world_rank],
                             elems_to_recv * sizeof(*partition_buf[world_rank]),
-                            MPI_TLS_ANY_SOURCE, 0, &requests[index]);
+                            MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
+                            &requests[index]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
                     goto exit_free_buf;
@@ -1892,7 +1905,7 @@ static int distributed_sample_partition(void *arr_, void *out_,
                     mpi_tls_isend_bytes(&partition_buf[index],
                             elems_to_send
                                 * sizeof(*partition_buf[index]),
-                            index, 0, &requests[index]);
+                            index, SAMPLE_PARTITION_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
                     goto exit_free_buf;
