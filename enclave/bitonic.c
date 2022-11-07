@@ -609,7 +609,7 @@ static void root_work_function(void *args_) {
     thread_release_all();
 }
 
-void bitonic_sort_threaded(void *arr, size_t length, size_t num_threads) {
+void bitonic_sort(void *arr, size_t length, size_t num_threads) {
     total_length = length;
 
     /* Start work for this thread. */
@@ -632,8 +632,4 @@ void bitonic_sort_threaded(void *arr, size_t length, size_t num_threads) {
      * threads. */
     while (__atomic_load_n(&num_threads_working, __ATOMIC_ACQUIRE)) {}
     thread_unrelease_all();
-}
-
-void bitonic_sort_single(void *arr, size_t length) {
-    sort_single(arr, 0, length, false);
 }

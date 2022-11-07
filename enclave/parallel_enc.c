@@ -119,7 +119,7 @@ int ecall_bitonic_sort(unsigned char *arr, size_t total_length,
     }
 
     /* Sort. */
-    bitonic_sort_threaded(arr, total_length, total_num_threads);
+    bitonic_sort(arr, total_length, total_num_threads);
 
     /* Free sort. */
     bitonic_free();
