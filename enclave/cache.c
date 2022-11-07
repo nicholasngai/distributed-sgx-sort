@@ -19,7 +19,9 @@ struct cache_line {
     bool valid;
     size_t cache_idx;
     spinlock_t lock;
-    condvar_t released;
+    bool is_loaded;
+    condvar_t loaded;
+    unsigned int num_writers;
     unsigned int acquired;
     elem_t elems[CACHE_LINESIZE];
 };
@@ -144,20 +146,23 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
         if (cache_set->lines[i].valid
                 && cache_set->lines[i].cache_idx == cache_idx) {
             line_idx = i;
-            while (cache_set->lines[i].lock.locked) {
-                condvar_wait(&cache_set->lines[i].released, &cache_set->lock);
+            while (!cache_set->lines[i].is_loaded) {
+                condvar_wait(&cache_set->lines[i].loaded, &cache_set->lock);
             }
             break;
         }
 
         /* Skip other locked or waited-for lines. */
-        if (cache_set->lines[i].lock.locked
-                || cache_set->lines[i].released.head) {
+        if (cache_set->lines[i].num_writers
+                || cache_set->lines[i].loaded.head
+                || cache_set->lines[i].lock.locked) {
             continue;
         }
 
-        /* If current line is locked, prioritize non-locked line. */
-        if (cache_set->lines[line_idx].lock.locked) {
+        /* If current line is occupied or locked, prioritize non-locked line. */
+        if (cache_set->lines[line_idx].num_writers
+                || cache_set->lines[line_idx].loaded.head
+                || cache_set->lines[line_idx].lock.locked) {
             line_idx = i;
             continue;
         }
@@ -197,8 +202,10 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
     }
     cache_line->valid = true;
     cache_line->cache_idx = cache_idx;
+    cache_line->is_loaded = false;
     cache_line->acquired =
         __atomic_fetch_add(&cache_counter, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&cache_line->num_writers, 1, __ATOMIC_ACQUIRE);
     spinlock_lock(&cache_line->lock);
     spinlock_unlock(&cache_set->lock);
 
@@ -209,6 +216,9 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
 #ifdef DISTRIBUTED_SGX_SORT_CACHE_COUNTER
             __atomic_add_fetch(&cache_hits, 1, __ATOMIC_RELAXED);
 #endif /* DISTRIBUTED_SGX_SORT_CACHE_COUNTER */
+            cache_line->is_loaded = true;
+            condvar_broadcast(&cache_line->loaded, &cache_line->lock);
+            spinlock_unlock(&cache_line->lock);
             return cache_line->elems;
         }
 
@@ -251,6 +261,10 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
         }
     }
 
+    cache_line->is_loaded = true;
+    condvar_broadcast(&cache_line->loaded, &cache_line->lock);
+    spinlock_unlock(&cache_line->lock);
+
     return cache_line->elems;
 
 exit:
@@ -260,13 +274,7 @@ exit:
 void cache_free_elems(elem_t *elems) {
     struct cache_line *cache_line =
         (void *)((unsigned char *) elems - offsetof(struct cache_line, elems));
-    size_t set_idx = cache_line->cache_idx / CACHE_ASSOCIATIVITY;
-    struct cache_set *cache_set = &cache[set_idx];
-
-    spinlock_lock(&cache_set->lock);
-    spinlock_unlock(&cache_line->lock);
-    condvar_signal(&cache_line->released, &cache_set->lock);
-    spinlock_unlock(&cache_set->lock);
+    __atomic_sub_fetch(&cache_line->num_writers, 1, __ATOMIC_RELEASE);
 }
 
 int cache_evictall(void *arr, size_t local_start) {
