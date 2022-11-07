@@ -11,18 +11,12 @@
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
 #include "common/defs.h"
-#include "common/elem_t.h"
 #include "common/error.h"
 #include "common/util.h"
+#include "enclave/cache.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
-#include "enclave/synch.h"
 #include "enclave/threading.h"
-
-/* The cache has CACHE_SETS * CACHE_ASSOCIATIVITY buckets. */
-#define CACHE_SETS 16
-#define CACHE_ASSOCIATIVITY 64
-#define CACHE_BUCKETS (CACHE_SETS * CACHE_ASSOCIATIVITY)
 
 #define SAMPLE_PARTITION_BUF_SIZE 512
 
@@ -32,29 +26,6 @@ static unsigned char key[16];
 
 /* Thread-local buffer used for generic operations. */
 static _Thread_local elem_t *buffer;
-
-/* Cache used to store decrypted buckets in enclave memory. */
-struct eviction {
-    size_t idx;
-    condvar_t finished;
-    struct eviction *prev;
-    struct eviction *next;
-};
-struct cache_line {
-    bool valid;
-    size_t bucket_idx;
-    spinlock_t lock;
-    condvar_t released;
-    unsigned int acquired;
-    elem_t elems[BUCKET_SIZE];
-};
-struct cache_set {
-    spinlock_t lock;
-    struct eviction *evictions;
-    struct cache_line lines[CACHE_ASSOCIATIVITY];
-};
-struct cache_set *cache;
-unsigned int cache_counter;
 
 static int get_bucket_rank(size_t bucket) {
     size_t num_buckets =
@@ -86,23 +57,17 @@ int bucket_init(void) {
         goto exit;
     }
 
+    /* Initialize cache. */
+    if (cache_init()) {
+        handle_error_string("Error initializing cache");
+        goto exit_free_rand;
+    }
+
     /* Allocate buffer. */
     buffer = malloc(BUCKET_SIZE * 2 * sizeof(*buffer));
     if (!buffer) {
         perror("Error allocating buffer");
         goto exit_free_rand;
-    }
-
-    /* Attempt to allocate buffer first by test-and-setting the pointer, which
-     * should be unset (AKA NULL) if not yet allocated. */
-    struct cache_set *temp = NULL;
-    if (__atomic_compare_exchange_n(&cache, &temp, (struct cache_set *) 0x1,
-                false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-        cache = malloc(CACHE_SETS * sizeof(*cache));
-        if (!cache) {
-            perror("Error allocating cache");
-            goto exit_free_rand;
-        }
     }
 
     return 0;
@@ -114,249 +79,10 @@ exit:
 }
 
 void bucket_free(void) {
-    /* Attempt to free buffer. */
-    struct cache_set *temp = cache;
-    if (buffer) {
-        if (__atomic_compare_exchange_n(&cache, &temp, NULL, false,
-                    __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-            free(temp);
-        }
-    }
-
     /* Free resources. */
     free(buffer);
+    cache_free();
     rand_free();
-}
-
-/* Bucket buffer management. */
-
-#ifdef DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER
-static int cache_hits;
-static int cache_misses;
-static int cache_evictions;
-#endif /* DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER */
-
-static int evict_bucket(struct cache_line *cache_line, size_t bucket_idx,
-        void *arr_) {
-    unsigned char *arr = arr_;
-    int ret;
-
-    size_t local_bucket_start = get_local_bucket_start(world_rank);
-
-    for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        ret =
-            elem_encrypt(key, &cache_line->elems[i],
-                arr
-                    + ((bucket_idx - local_bucket_start) * BUCKET_SIZE + i)
-                        * SIZEOF_ENCRYPTED_NODE,
-                bucket_idx * BUCKET_SIZE + i);
-        if (ret) {
-            handle_error_string("Error encrypting elem %lu",
-                    bucket_idx * BUCKET_SIZE + i);
-            goto exit;
-        }
-    }
-
-#ifdef DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER
-    __atomic_add_fetch(&cache_evictions, 1, __ATOMIC_RELAXED);
-#endif /* DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER */
-
-exit:
-    return ret;
-}
-
-/* Loads the bucket ARR[BUCKET_IDX - LOCAL_BUCKET_START], assuming that ARR is
- * an array of encrypted elems such that each BUCKET_SIZE elems i one bucket.
- * Buckets are decrypted as if ARR[0] is encrypted using START_IDX.
- *
- * The buffer is a BUCKET_ASSOCIATIVTY-way set associative cache indexed using
- * (BUCKET_IDX - LOCAL_BUCKET_START) % CACHE_SETS. This is a simple system that
- * is meant to reduce the overhead of accessing buckets as much as possible, but
- * it means that a small buffer size will lead to non-ideal multithreading
- * behaviors, since all threads share the same buffer. */
-static elem_t *load_bucket(void *arr_, size_t bucket_idx) {
-    unsigned char *arr = arr_;
-
-    size_t local_bucket_start = get_local_bucket_start(world_rank);
-    size_t set_idx = (bucket_idx - local_bucket_start) % CACHE_SETS;
-    struct cache_set *cache_set = &cache[set_idx];
-
-    /* Lock set in cache. */
-    spinlock_lock(&cache_set->lock);
-
-    /* Check eviction list and sleep until our bucket is cleared from the
-     * eviction list. */
-    size_t line_idx = 0;
-    bool bucket_is_evicted = true;
-    while (bucket_is_evicted) {
-        bucket_is_evicted = false;
-        struct eviction *cur_eviction = cache_set->evictions;
-        while (cur_eviction) {
-            if (cur_eviction->idx == bucket_idx) {
-                bucket_is_evicted = true;
-                condvar_wait(&cur_eviction->finished, &cache_set->lock);
-                break;
-            }
-            cur_eviction = cur_eviction->next;
-        }
-    }
-
-    /* Find a bucket to lock in the set. */
-    for (size_t i = 0; i < CACHE_ASSOCIATIVITY; i++) {
-        /* Check for bucket already resident in cache. */
-        if (cache_set->lines[i].valid
-                && cache_set->lines[i].bucket_idx == bucket_idx) {
-            line_idx = i;
-            while (cache_set->lines[i].lock.locked) {
-                condvar_wait(&cache_set->lines[i].released, &cache_set->lock);
-            }
-            break;
-        }
-
-        /* Skip other locked or waited-for buckets. */
-        if (cache_set->lines[i].lock.locked
-                || cache_set->lines[i].released.head) {
-            continue;
-        }
-
-        /* If current bucket is locked, prioritize non-locked bucket. */
-        if (cache_set->lines[line_idx].lock.locked) {
-            line_idx = i;
-            continue;
-        }
-
-        /* If current bucket is invalid, we don't need to check for another
-         * invalid bucket. */
-        if (!cache_set->lines[line_idx].valid) {
-            continue;
-        }
-
-        /* If current bucket is valid, check for invalid bucket or bucket with
-         * earlier acquisition. */
-        if (!cache_set->lines[i].valid
-                || cache_set->lines[i].acquired
-                    < cache_set->lines[line_idx].acquired) {
-            line_idx = i;
-            continue;
-        }
-    }
-
-    struct cache_line *cache_line = &cache_set->lines[line_idx];
-
-    /* Begin eviction process if necessary by adding to eviction list, lock the
-     * bucket, and unlock the set. */
-    size_t old_bucket_idx = cache_line->bucket_idx;
-    bool was_valid = cache_line->valid;
-    struct eviction eviction;
-    if (was_valid && old_bucket_idx != bucket_idx) {
-        eviction.idx = old_bucket_idx;
-        condvar_init(&eviction.finished);
-        eviction.prev = NULL;
-        eviction.next = cache_set->evictions;
-        if (eviction.next) {
-            eviction.next->prev = &eviction;
-        }
-        cache_set->evictions = &eviction;
-    }
-    cache_line->valid = true;
-    cache_line->bucket_idx = bucket_idx;
-    cache_line->acquired =
-        __atomic_fetch_add(&cache_counter, 1, __ATOMIC_RELAXED);
-    spinlock_lock(&cache_line->lock);
-    spinlock_unlock(&cache_set->lock);
-
-    /* If valid, check if this was a hit. */
-    if (was_valid) {
-        /* If hit, return the bucket. */
-        if (old_bucket_idx == bucket_idx) {
-#ifdef DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER
-            __atomic_add_fetch(&cache_hits, 1, __ATOMIC_RELAXED);
-#endif /* DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER */
-            return cache_line->elems;
-        }
-
-        /* Else, evict the current bucket to host memory, then remove the bucket
-         * from the eviction list. */
-        int ret = evict_bucket(cache_line, old_bucket_idx, arr);
-        if (ret) {
-            handle_error_string(
-                    "Error evicting bucket %lu from set %lu line %lu",
-                    old_bucket_idx, set_idx, line_idx);
-            goto exit;
-        }
-        spinlock_lock(&cache_line->lock);
-        if (eviction.prev) {
-            eviction.prev->next = eviction.next;
-        } else {
-            cache_set->evictions = eviction.next;
-        }
-        if (eviction.next) {
-            eviction.next->prev = eviction.prev;
-        }
-        condvar_broadcast(&eviction.finished, &cache_set->lock);
-        spinlock_unlock(&cache_set->lock);
-    }
-
-#ifdef DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER
-    __atomic_add_fetch(&cache_misses, 1, __ATOMIC_RELAXED);
-#endif /* DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER */
-
-    /* If missed, decrypt the elems from host memory and then return the pointer
-     * to the buffer. */
-    for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        int ret = elem_decrypt(key, &cache_line->elems[i],
-                arr
-                    + ((bucket_idx - local_bucket_start) * BUCKET_SIZE + i)
-                        * SIZEOF_ENCRYPTED_NODE,
-                bucket_idx * BUCKET_SIZE + i);
-        if (ret) {
-            handle_error_string("Error decrypting elem %lu",
-                    bucket_idx * BUCKET_SIZE + i);
-            goto exit;
-        }
-    }
-
-    return cache_line->elems;
-
-exit:
-    return NULL;
-}
-
-static void free_bucket(elem_t *bucket) {
-    struct cache_line *cache_line =
-        (void *)((unsigned char *) bucket - offsetof(struct cache_line, elems));
-    size_t set_idx = cache_line->bucket_idx / CACHE_ASSOCIATIVITY;
-    struct cache_set *cache_set = &cache[set_idx];
-
-    spinlock_lock(&cache_set->lock);
-    spinlock_unlock(&cache_line->lock);
-    condvar_signal(&cache_line->released, &cache_set->lock);
-    spinlock_unlock(&cache_set->lock);
-}
-
-static int evict_buckets(void *arr) {
-    int ret = 0;
-
-    for (size_t i = 0; i < CACHE_SETS; i++) {
-        struct cache_set *cache_set = &cache[i];
-        for (size_t j = 0; j < CACHE_ASSOCIATIVITY; j++) {
-            struct cache_line *cache_line = &cache_set->lines[j];
-            if (cache_line->valid) {
-                ret = evict_bucket(cache_line, cache_line->bucket_idx, arr);
-                if (ret) {
-                    handle_error_string(
-                            "Error evicting bucket %lu from set %lu line %lu",
-                            cache_line->bucket_idx, i, j);
-                    goto exit;
-                }
-
-                cache_line->valid = false;
-            }
-        }
-    }
-
-exit:
-    return ret;
 }
 
 /* Bucket sort. */
@@ -506,6 +232,8 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     int bucket2_rank = get_bucket_rank(bucket2_idx);
     bool bucket1_local = bucket1_rank == world_rank;
     bool bucket2_local = bucket2_rank == world_rank;
+    size_t local_bucket_start = get_local_bucket_start(world_rank);
+    size_t local_start = local_bucket_start * BUCKET_SIZE;
 
     /* If both buckets are remote, ignore this merge-split. */
     if (!bucket1_local && !bucket2_local) {
@@ -520,7 +248,9 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     /* Load bucket 1 elems if local. */
     elem_t *bucket1;
     if (bucket1_local) {
-        bucket1 = load_bucket(arr, bucket1_idx);
+        bucket1 =
+            cache_load_elems(arr,
+                (bucket1_idx - local_bucket_start) * BUCKET_SIZE, local_start);
         if (!bucket1) {
             handle_error_string("Error loading bucket %lu", bucket1_idx);
             ret = -1;
@@ -531,7 +261,10 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     /* Load bucket 2 elems if local. */
     elem_t *bucket2;
     if (bucket2_local) {
-        bucket2 = load_bucket(arr, bucket2_idx);
+        bucket2 =
+            cache_load_elems(arr,
+                    (bucket2_idx - local_bucket_start) * BUCKET_SIZE,
+                    local_start);
         if (!bucket2) {
             handle_error_string("Error loading bucket %lu", bucket2_idx);
             ret = -1;
@@ -659,12 +392,12 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
 
     /* Free bucket 1 if local. */
     if (bucket1_local) {
-        free_bucket(bucket1);
+        cache_free_elems(bucket1);
     }
 
     /* Free bucket 2 if local. */
     if (bucket2_local) {
-        free_bucket(bucket2);
+        cache_free_elems(bucket2);
     }
 
     ret = 0;
@@ -1701,10 +1434,10 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
      * all BUF_SIZE buckets in a given chunk can be kept in the cache. For
      * example, instead of merging 0-1, 2-3, 4-5, 6-7, 0-2, 1-3, 4-6, 5-7, we
      * might do 0-1, 2-3, 0-2, 1-3 with a BUF_SIZE of 4. */
-    size_t num_chunked_buckets = MIN(CACHE_BUCKETS, num_buckets);
+    size_t num_chunked_buckets = MIN(CACHE_SIZE / BUCKET_SIZE, num_buckets);
     size_t num_chunked_levels = log2li(num_chunked_buckets);
     for (size_t chunk_start = 0; chunk_start < num_buckets;
-            chunk_start += CACHE_BUCKETS) {
+            chunk_start += CACHE_SIZE / BUCKET_SIZE) {
         for (size_t bit_idx = 0; bit_idx < num_chunked_levels; bit_idx++) {
             size_t bucket_stride = 2u << bit_idx;
 
@@ -1775,7 +1508,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
             goto exit;
         }
     }
-    ret = evict_buckets(buf);
+    ret = cache_evictall(buf, local_start);
     if (ret) {
         handle_error_string("Error evicting buckets");
         goto exit;
@@ -1882,11 +1615,11 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     }
 #endif
 
-#ifdef DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER
-    printf("[bucket cache] Hits: %d\n", cache_hits);
-    printf("[bucket cache] Misses: %d\n", cache_misses);
-    printf("[bucket cache] Evictions: %d\n", cache_evictions);
-#endif /* DISTRIBUTED_SGX_SORT_BUCKET_CACHE_COUNTER */
+#ifdef DISTRIBUTED_SGX_SORT_CACHE_COUNTER
+    printf("[cache] Hits: %d\n", cache_hits);
+    printf("[cache] Misses: %d\n", cache_misses);
+    printf("[cache] Evictions: %d\n", cache_evictions);
+#endif /* DISTRIBUTED_SGX_SORT_CACHE_COUNTER */
 
     /* Wait for all threads to exit the work function, then unrelease the
      * threads. */
