@@ -584,7 +584,8 @@ int main(int argc, char **argv) {
     unsigned char *arr;
     switch (sort_type) {
         case SORT_BITONIC:
-            arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE);
+            arr = malloc(MAX(local_length, 512) * SIZEOF_ENCRYPTED_NODE);
+
             break;
         case SORT_BUCKET: {
             /* The total number of buckets is the max of either double the
@@ -622,15 +623,15 @@ int main(int argc, char **argv) {
         goto exit_free_arr;
     }
     srand(world_rank + 1);
-    for (size_t i = local_start; i < local_start + local_length; i++) {
+    for (size_t i = 0; i < MAX(local_length, 512); i++) {
         /* Initialize elem. */
         elem_t elem;
         memset(&elem, '\0', sizeof(elem));
         elem.key = rand();
 
         /* Encrypt to array. */
-        unsigned char *start = arr + (i - local_start) * SIZEOF_ENCRYPTED_NODE;
-        ret = elem_encrypt(key, &elem, start, i);
+        unsigned char *start = arr + i * SIZEOF_ENCRYPTED_NODE;
+        ret = elem_encrypt(key, &elem, start, i + local_start);
         if (ret < 0) {
             handle_error_string("Error encrypting elem in host");
         }

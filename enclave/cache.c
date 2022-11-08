@@ -231,7 +231,6 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
                     set_idx, line_idx);
             goto exit;
         }
-        spinlock_lock(&cache_line->lock);
         if (eviction.prev) {
             eviction.prev->next = eviction.next;
         } else {
