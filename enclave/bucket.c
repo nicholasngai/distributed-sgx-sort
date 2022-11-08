@@ -21,6 +21,10 @@
 
 #define SAMPLE_PARTITION_BUF_SIZE 512
 
+#define BUCKET_DISTRIBUTE_MPI_TAG 1
+#define SAMPLE_PARTITION_MPI_TAG 2
+#define QUICKSELECT_MPI_TAG 3
+
 static size_t total_length;
 
 static unsigned char key[16];
@@ -30,13 +34,15 @@ static thread_local elem_t *buffer;
 
 static int get_bucket_rank(size_t bucket) {
     size_t num_buckets =
-        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size * 2);
+        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE,
+                (size_t) world_size * 2);
     return bucket * world_size / num_buckets;
 }
 
 static size_t get_local_bucket_start(int rank) {
     size_t num_buckets =
-        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE, world_size * 2);
+        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE,
+                (size_t) world_size * 2);
     return (rank * num_buckets + world_size - 1) / world_size;
 }
 
@@ -176,31 +182,28 @@ exit:
     return ret;
 }
 
-/* Compare elements by the BIT_IDX bit of the ORP ID, then by dummy element
- * (real elements first). */
-static int merge_split_comparator(const elem_t *a, const elem_t *b,
-        size_t bit_idx) {
-    /* Compare and obliviously swap if the BIT_IDX bit of ORP ID of elem A is
-     * 1 and that of elem B is 0 or if the ORP IDs are the same, but elem A is a
-     * dummy and elem B is real. */
-    char bit_a = (a->orp_id >> bit_idx) & 1;
-    char bit_b = (b->orp_id >> bit_idx) & 1;
-    return (bit_a << 1) - (bit_b << 1) + a->is_dummy - b->is_dummy;
-}
-
-struct merge_split_swapper_aux {
+struct merge_split_ocompact_aux {
     elem_t *bucket1;
     elem_t *bucket2;
     size_t bit_idx;
 };
-static void merge_split_swapper(size_t a, size_t b, void *aux_) {
-    struct merge_split_swapper_aux *aux = aux_;
+
+static bool merge_split_is_marked(size_t index, void *aux_) {
+    /* The element is marked if the BIT_IDX'th bit of the ORP ID of the element
+     * is set to 0. */
+    struct merge_split_ocompact_aux *aux = aux_;
+    elem_t *elem =
+        &(index < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[index % BUCKET_SIZE];
+    return !((elem->orp_id >> aux->bit_idx) & 1);
+}
+
+static void merge_split_swapper(size_t a, size_t b, bool should_swap, void *aux_) {
+    struct merge_split_ocompact_aux *aux = aux_;
     elem_t *elem_a =
         &(a < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[a % BUCKET_SIZE];
     elem_t *elem_b =
         &(b < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[b % BUCKET_SIZE];
-    int comp = merge_split_comparator(elem_a, elem_b, aux->bit_idx);
-    o_memswap(elem_a, elem_b, sizeof(*elem_a), comp > 0);
+    o_memswap(elem_a, elem_b, sizeof(*elem_a), should_swap);
 }
 
 /* Merge BUCKET1 and BUCKET2 and split such that BUCKET1 contains all elements
@@ -368,12 +371,12 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     }
 
     /* Oblivious bitonic sort elements according to BIT_IDX bit of ORP id. */
-    struct merge_split_swapper_aux aux = {
+    struct merge_split_ocompact_aux aux = {
         .bucket1 = bucket1,
         .bucket2 = bucket2,
         .bit_idx = bit_idx,
     };
-    o_sort_generate_swaps(BUCKET_SIZE * 2, merge_split_swapper, &aux);
+    o_compact_generate_swaps(BUCKET_SIZE * 2, merge_split_is_marked, merge_split_swapper, &aux);
 
     /* Free bucket 1 if local. */
     if (bucket1_local) {
@@ -445,19 +448,304 @@ exit:
     }
 }
 
-/* Compares elements by their ORP ID. */
+/* Run merge-split as part of a butterfly network, routing based on
+ * ORP_ID[START_BIT_IDX:START_BIT_IDX + NUM_LEVELS - 1]. This is modified from
+ * the paper, since all merge-split operations will be constrained to the same
+ * buckets of memory. */
+static int bucket_route(void *arr, size_t num_levels, size_t start_bit_idx) {
+    size_t num_buckets = get_local_bucket_start(world_size);
+    size_t local_bucket_start = get_local_bucket_start(world_rank);
+    size_t num_local_buckets =
+        get_local_bucket_start(world_rank + 1) - local_bucket_start;
+    int ret;
+
+    /* Merge the first log2(BUF_SIZE) levels going by chunks of BUF_SIZE, since
+     * all BUF_SIZE buckets in a given chunk can be kept in the cache. For
+     * example, instead of merging 0-1, 2-3, 4-5, 6-7, 0-2, 1-3, 4-6, 5-7, we
+     * might do 0-1, 2-3, 0-2, 1-3 with a BUF_SIZE of 4. */
+    size_t num_chunked_buckets = MIN(CACHE_SIZE, num_buckets);
+    size_t num_chunked_levels = MIN(num_levels, log2li(num_chunked_buckets));
+    for (size_t chunk_start = 0; chunk_start < num_local_buckets;
+            chunk_start += CACHE_SIZE) {
+        for (size_t bit_idx = 0; bit_idx < num_chunked_levels; bit_idx++) {
+            size_t bucket_stride = 2u << bit_idx;
+
+            /* Create iterative task for merge split. */
+            struct merge_split_idx_args args = {
+                .arr = arr,
+                .bit_idx = start_bit_idx + bit_idx,
+                .bucket_stride = bucket_stride,
+                .bucket_offset = chunk_start,
+                .num_buckets = num_chunked_buckets,
+            };
+            struct thread_work work = {
+                .type = THREAD_WORK_ITER,
+                .iter = {
+                    .func = merge_split_idx,
+                    .arg = &args,
+                    .count = num_chunked_buckets / 2,
+                },
+            };
+            thread_work_push(&work);
+
+            thread_work_until_empty();
+
+            /* Get work from others. */
+            thread_wait(&work);
+            ret = args.ret;
+            if (ret) {
+                handle_error_string("Error in merge split range at level %lu",
+                        bit_idx);
+                goto exit;
+            }
+        }
+    }
+
+    /* Merge split remaining levels, when chunks of BUF_SIZE buckets can't all
+     * be kept in the cache. */
+    for (size_t bit_idx = num_chunked_levels; bit_idx < num_levels; bit_idx++) {
+        size_t bucket_stride = 2u << bit_idx;
+
+        /* Create iterative task for merge split. */
+        struct merge_split_idx_args args = {
+            .arr = arr,
+            .bit_idx = start_bit_idx + bit_idx,
+            .bucket_stride = bucket_stride,
+            .bucket_offset = 0,
+            .num_buckets = num_buckets,
+        };
+        struct thread_work work = {
+            .type = THREAD_WORK_ITER,
+            .iter = {
+                .func = merge_split_idx,
+                .arg = &args,
+                .count = num_buckets / 2,
+            },
+        };
+        thread_work_push(&work);
+
+        thread_work_until_empty();
+
+        /* Get work from others. */
+        thread_wait(&work);
+        ret = args.ret;
+        if (ret) {
+            handle_error_string("Error in merge split range at level %lu",
+                    bit_idx);
+            goto exit;
+        }
+    }
+    ret = cache_evictall(arr, local_bucket_start * BUCKET_SIZE);
+    if (ret) {
+        handle_error_string("Error evicting cache");
+        goto exit;
+    }
+
+exit:
+    return ret;
+}
+
+/* Distribute and receive elements from buckets in ARR to buckets in OUT.
+ * Bucket i is sent to enclave i % E. */
+static int distributed_bucket_route(void *arr, void *out_) {
+    unsigned char *out = out_;
+    size_t local_bucket_start = get_local_bucket_start(world_rank);
+    size_t num_local_buckets =
+        get_local_bucket_start(world_rank + 1) - local_bucket_start;
+    size_t local_start = local_bucket_start * BUCKET_SIZE;
+    int ret;
+
+    mpi_tls_request_t requests[world_size];
+    size_t request_idxs[world_size];
+
+    if (world_size == 1) {
+        memcpy(out, arr,
+                num_local_buckets * BUCKET_SIZE * SIZEOF_ENCRYPTED_NODE);
+        ret = 0;
+        goto exit;
+    }
+
+    elem_t *buf = malloc(BUCKET_SIZE * 2 * sizeof(*buf));
+    if (!buf) {
+        handle_error_string("Error allocating buffer");
+        ret = errno;
+        goto exit;
+    }
+
+    /* Send and receive buckets according to the rules above. Note that we are
+     * iterating by enclave instead of by bucket. */
+    size_t num_requests = 0;
+    request_idxs[world_rank] = 0;
+    for (size_t i = 0; i < (size_t) world_size; i++) {
+        requests[i].type = MPI_TLS_NULL;
+    }
+    for (size_t i = 0; i < MIN(num_local_buckets, (size_t) world_size); i++) {
+        int rank = (world_rank * num_local_buckets + i) % world_size;
+        if (rank == world_rank) {
+            /* Copy our own buckets to the output, if any. */
+            for (size_t j = i; j < num_local_buckets; j += world_size) {
+                elem_t *bucket =
+                    cache_load_elems(arr, j * BUCKET_SIZE, local_start);
+                if (!bucket) {
+                    handle_error_string("Error loading bucket %lu",
+                            j + local_bucket_start);
+                    goto exit_free_buf;
+                }
+
+                for (size_t k = 0; k < BUCKET_SIZE; k++) {
+                    ret =
+                        elem_encrypt(key, &bucket[k],
+                                out + (request_idxs[rank] * BUCKET_SIZE + k) * SIZEOF_ENCRYPTED_NODE,
+                                request_idxs[rank] * BUCKET_SIZE + k + local_start);
+                    if (ret) {
+                        handle_error_string("Error encrypting elem %lu",
+                                request_idxs[rank] * BUCKET_SIZE + k);
+                        cache_free_elems(bucket);
+                        goto exit_free_buf;
+                    }
+                }
+                request_idxs[rank]++;
+
+                cache_free_elems(bucket);
+            }
+        } else {
+            /* Post a send request to the remote rank containing the first
+             * bucket. */
+            request_idxs[rank] = i;
+            elem_t *bucket =
+                cache_load_elems(arr, request_idxs[rank] * BUCKET_SIZE,
+                        local_start);
+            if (!bucket) {
+                handle_error_string("Error loading bucket %lu",
+                        request_idxs[rank] + local_bucket_start);
+                ret = -1;
+                goto exit_free_buf;
+            }
+
+            ret = mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
+                    rank, BUCKET_DISTRIBUTE_MPI_TAG, &requests[rank]);
+            if (ret) {
+                handle_error_string("Error sending bucket %lu to %d from %d",
+                        request_idxs[rank] + local_bucket_start, rank,
+                        world_rank);
+                cache_free_elems(bucket);
+                goto exit_free_buf;
+            }
+            num_requests++;
+
+            cache_free_elems(bucket);
+        }
+    }
+
+    /* Post a receive request for the current bucket. */
+    ret =
+        mpi_tls_irecv_bytes(buf, BUCKET_SIZE * sizeof(*buf),
+                MPI_TLS_ANY_SOURCE, BUCKET_DISTRIBUTE_MPI_TAG,
+                &requests[world_rank]);
+    if (ret) {
+        handle_error_string("Error posting receive into %d", world_rank);
+        goto exit_free_buf;
+    }
+    num_requests++;
+
+    while (num_requests) {
+        size_t index;
+        mpi_tls_status_t status;
+        ret = mpi_tls_waitany(world_size, requests, &index, &status);
+        if (ret) {
+            handle_error_string("Error waiting on requests");
+            goto exit_free_buf;
+        }
+
+        if (index == (size_t) world_rank) {
+            /* This was the receive request. */
+
+            /* Write the received bucket out. */
+            for (size_t i = 0; i < BUCKET_SIZE; i++) {
+                ret =
+                    elem_encrypt(key, &buf[i],
+                            out + (request_idxs[index] * BUCKET_SIZE + i) * SIZEOF_ENCRYPTED_NODE,
+                            request_idxs[index] * BUCKET_SIZE + i + local_start);
+                if (ret) {
+                    handle_error_string("Error encrypting elem %lu",
+                            request_idxs[index] * BUCKET_SIZE + i);
+                    goto exit_free_buf;
+                }
+            }
+            request_idxs[index]++;
+
+            if (request_idxs[index] < num_local_buckets) {
+                /* Post receive for the next bucket. */
+                ret =
+                    mpi_tls_irecv_bytes(buf, BUCKET_SIZE * sizeof(*buf),
+                            MPI_TLS_ANY_SOURCE, BUCKET_DISTRIBUTE_MPI_TAG,
+                            &requests[index]);
+                if (ret) {
+                    handle_error_string("Error posting receive into %d",
+                            (int) index);
+                    goto exit_free_buf;
+                }
+            } else {
+                /* Nullify the receiving request. */
+                requests[index].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        } else {
+            /* This was a send request. */
+
+            request_idxs[index] += world_size;
+
+            if (request_idxs[index] < num_local_buckets) {
+                elem_t *bucket =
+                    cache_load_elems(arr, request_idxs[index] * BUCKET_SIZE,
+                            local_start);
+                if (!bucket) {
+                    handle_error_string("Error loading bucket %lu",
+                            request_idxs[index] + local_bucket_start);
+                    goto exit;
+                }
+
+                ret =
+                    mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
+                            index, BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
+                if (ret) {
+                    handle_error_string(
+                            "Error sending bucket %lu from %d to %d",
+                            request_idxs[index] + local_bucket_start,
+                            world_rank, (int) index);
+                    cache_free_elems(bucket);
+                    goto exit_free_buf;
+                }
+
+                cache_free_elems(bucket);
+            } else {
+                /* Nullify the sending request. */
+                requests[index].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        }
+    }
+
+exit_free_buf:
+    free(buf);
+exit:
+    return ret;
+}
+
+/* Compares elements first by sorting real elements before dummy elements, and
+ * then by their ORP ID. */
 static int permute_comparator(const void *a_, const void *b_,
         void *aux UNUSED) {
     const elem_t *a = a_;
     const elem_t *b = b_;
-    return (a > b) - (a < b);
+    return (a->is_dummy - b->is_dummy) * 2
+        + ((a->orp_id > b->orp_id) - (a->orp_id < b->orp_id));
 }
 
-/* Permutes the real elements in the bucket (which are guaranteed to be at the
- * beginning of the bucket) by sorting according to all bits of the ORP ID. This
- * is valid because the bin assignment used the lower bits of the ORP ID,
- * leaving the upper bits free for comparison and permutation within the bin.
- * The elems are then written sequentially to ARR[*COMPRESS_IDX], and
+/* Permutes the real elements in the bucket by sorting according to all bits of
+ * the ORP ID. This is valid because the bin assignment used the lower bits of
+ * the ORP ID, leaving the upper bits free for comparison and permutation within
+ * the bin.  The elems are then written sequentially to ARR[*COMPRESS_IDX], and
  * *COMPRESS_IDX is incremented. The elems receive new random ORP IDs. The first
  * element is assumed to have START_IDX for the purposes of decryption. */
 struct permute_and_compress_args {
@@ -486,20 +774,19 @@ static void permute_and_compress(void *args_, size_t bucket_idx) {
         }
     }
 
-    /* Scan for first dummy elem. */
-    size_t real_len = BUCKET_SIZE;
-    for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        if (buffer[i].is_dummy) {
-            real_len = i;
-            break;
-        }
-    }
-
-    o_sort(buffer, real_len, sizeof(*buffer), permute_comparator, NULL);
+    o_sort(buffer, BUCKET_SIZE, sizeof(*buffer), permute_comparator, NULL);
 
     /* Assign random ORP IDs and encrypt elems from buffer to compressed
      * array. */
-    for (size_t i = 0; i < real_len; i++) {
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        /* If this is a dummy element, break out of the loop. All real elements
+         * are sorted before the dummy elements at this point. This
+         * non-oblivious comparison is fine since it's fine to leak how many
+         * elements end up in each bucket. */
+        if (buffer[i].is_dummy) {
+            break;
+        }
+
         /* Fetch the next index to encrypt. */
         size_t out_idx =
             __atomic_fetch_add(args->compress_idx, 1, __ATOMIC_RELAXED);
@@ -827,7 +1114,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     for (int i = 0; i < world_size; i++) {
         if (i != world_rank) {
             bool *flag = left < right ? &ready : &not_ready;
-            ret = mpi_tls_send_bytes(flag, sizeof(*flag), i, 0);
+            ret =
+                mpi_tls_send_bytes(flag, sizeof(*flag), i, QUICKSELECT_MPI_TAG);
             if (ret) {
                 handle_error_string("Error sending ready flag to %d from %d",
                         i, world_rank);
@@ -839,8 +1127,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         bool is_ready;
         if (i != world_rank) {
             ret =
-                mpi_tls_recv_bytes(&is_ready, sizeof(is_ready), i, 0,
-                        MPI_TLS_STATUS_IGNORE);
+                mpi_tls_recv_bytes(&is_ready, sizeof(is_ready), i,
+                        QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
             if (ret) {
                 handle_error_string(
                         "Error receiving ready flag from %d into %d", i,
@@ -882,7 +1170,9 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         /* Send pivot to all other elems. */
         for (int i = 0; i < world_size; i++) {
             if (i != world_rank) {
-                ret = mpi_tls_send_bytes(&pivot, sizeof(pivot), i, 0);
+                ret =
+                    mpi_tls_send_bytes(&pivot, sizeof(pivot), i,
+                            QUICKSELECT_MPI_TAG);
                 if (ret) {
                     handle_error_string("Error sending pivot to %d from %d", i,
                             world_rank);
@@ -893,8 +1183,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     } else {
         /* Receive pivot from master. */
         ret =
-            mpi_tls_recv_bytes(&pivot, sizeof(pivot), master_rank, 0,
-                    MPI_TLS_STATUS_IGNORE);
+            mpi_tls_recv_bytes(&pivot, sizeof(pivot), master_rank,
+                    QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string("Error receiving pivot into %d from %d",
                     world_rank, master_rank);
@@ -1022,8 +1312,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
                 size_t remote_partition_right;
                 ret =
                     mpi_tls_recv_bytes(&remote_partition_right,
-                            sizeof(remote_partition_right), i, 0,
-                            MPI_TLS_STATUS_IGNORE);
+                            sizeof(remote_partition_right), i,
+                            QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
                 if (ret) {
                     handle_error_string(
                             "Error receiving partition size from %d into %d",
@@ -1036,7 +1326,9 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
 
         for (int i = 0; i < world_size; i++) {
             if (i != world_rank) {
-                ret = mpi_tls_send_bytes(&cur_pivot, sizeof(cur_pivot), i, 0);
+                ret =
+                    mpi_tls_send_bytes(&cur_pivot, sizeof(cur_pivot), i,
+                            QUICKSELECT_MPI_TAG);
                 if (ret) {
                     handle_error_string(
                             "Error sending current pivot to %d from %d", i,
@@ -1048,7 +1340,7 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     } else {
         ret =
             mpi_tls_send_bytes(&partition_right, sizeof(partition_right),
-                    master_rank, 0);
+                    master_rank, QUICKSELECT_MPI_TAG);
         if (ret) {
             handle_error_string(
                     "Error sending partition size from %d to %d",
@@ -1057,8 +1349,8 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
         }
 
         ret =
-            mpi_tls_recv_bytes(&cur_pivot, sizeof(cur_pivot), master_rank, 0,
-                    MPI_TLS_STATUS_IGNORE);
+            mpi_tls_recv_bytes(&cur_pivot, sizeof(cur_pivot), master_rank,
+                    QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string(
                     "Error receiving current pivot into %d from %d",
@@ -1216,7 +1508,8 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 ret =
                     mpi_tls_irecv_bytes(&partition_buf[i],
                             elems_to_recv * sizeof(*partition_buf[i]),
-                            MPI_TLS_ANY_SOURCE, 0, &requests[i]);
+                            MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
+                            &requests[i]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
                     goto exit_free_buf;
@@ -1249,8 +1542,8 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 /* Asynchronously send to enclave. */
                 ret =
                     mpi_tls_isend_bytes(&partition_buf[i],
-                            elems_to_send * sizeof(*partition_buf[i]), i, 0,
-                            &requests[i]);
+                            elems_to_send * sizeof(*partition_buf[i]), i,
+                            SAMPLE_PARTITION_MPI_TAG, &requests[i]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
                     goto exit_free_buf;
@@ -1296,7 +1589,8 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 ret =
                     mpi_tls_irecv_bytes(&partition_buf[world_rank],
                             elems_to_recv * sizeof(*partition_buf[world_rank]),
-                            MPI_TLS_ANY_SOURCE, 0, &requests[index]);
+                            MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
+                            &requests[index]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
                     goto exit_free_buf;
@@ -1336,7 +1630,7 @@ static int distributed_sample_partition(void *arr_, void *out_,
                     mpi_tls_isend_bytes(&partition_buf[index],
                             elems_to_send
                                 * sizeof(*partition_buf[index]),
-                            index, 0, &requests[index]);
+                            index, SAMPLE_PARTITION_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
                     goto exit_free_buf;
@@ -1375,11 +1669,10 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     size_t src_local_start = total_length * world_rank / world_size;
     size_t src_local_length =
         total_length * (world_rank + 1) / world_size - src_local_start;
-    size_t num_buckets = get_local_bucket_start(world_size);
+    size_t local_bucket_start = get_local_bucket_start(world_rank);
     size_t num_local_buckets =
-        (get_local_bucket_start(world_rank + 1)
-            - get_local_bucket_start(world_rank));
-    size_t local_start = get_local_bucket_start(world_rank) * BUCKET_SIZE;
+        get_local_bucket_start(world_rank + 1) - local_bucket_start;
+    size_t local_start = local_bucket_start * BUCKET_SIZE;
     size_t local_length = num_local_buckets * BUCKET_SIZE;
 
     unsigned char *buf = arr + local_length * SIZEOF_ENCRYPTED_NODE;
@@ -1418,91 +1711,24 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
-    /* Run merge-split as part of a butterfly network. This is modified from
-     * the paper, since all merge-split operations will be constrained to the
-     * same buckets of memory. */
-
-    /* Merge the first log2(BUF_SIZE) levels going by chunks of BUF_SIZE, since
-     * all BUF_SIZE buckets in a given chunk can be kept in the cache. For
-     * example, instead of merging 0-1, 2-3, 4-5, 6-7, 0-2, 1-3, 4-6, 5-7, we
-     * might do 0-1, 2-3, 0-2, 1-3 with a BUF_SIZE of 4. */
-    size_t num_chunked_buckets = MIN(CACHE_SIZE / BUCKET_SIZE, num_buckets);
-    size_t num_chunked_levels = log2li(num_chunked_buckets);
-    for (size_t chunk_start = 0; chunk_start < num_buckets;
-            chunk_start += CACHE_SIZE / BUCKET_SIZE) {
-        for (size_t bit_idx = 0; bit_idx < num_chunked_levels; bit_idx++) {
-            size_t bucket_stride = 2u << bit_idx;
-
-            /* Create iterative task for merge split. */
-            struct merge_split_idx_args args = {
-                .arr = buf,
-                .bit_idx = bit_idx,
-                .bucket_stride = bucket_stride,
-                .bucket_offset = chunk_start,
-                .num_buckets = num_chunked_buckets,
-            };
-            struct thread_work work = {
-                .type = THREAD_WORK_ITER,
-                .iter = {
-                    .func = merge_split_idx,
-                    .arg = &args,
-                    .count = num_chunked_buckets / 2,
-                },
-            };
-            thread_work_push(&work);
-
-            thread_work_until_empty();
-
-            /* Get work from others. */
-            thread_wait(&work);
-            ret = args.ret;
-            if (ret) {
-                handle_error_string("Error in merge split range at level %lu",
-                        bit_idx);
-                goto exit_free_cache;
-            }
-        }
-    }
-
-    /* Merge split remaining levels, when chunks of BUF_SIZE buckets can't all
-     * be kept in the cache. */
-    for (size_t bit_idx = num_chunked_levels; 2u << bit_idx <= num_buckets;
-            bit_idx++) {
-        size_t bucket_stride = 2u << bit_idx;
-
-        /* Create iterative task for merge split. */
-        struct merge_split_idx_args args = {
-            .arr = buf,
-            .bit_idx = bit_idx,
-            .bucket_stride = bucket_stride,
-            .bucket_offset = 0,
-            .num_buckets = num_buckets,
-        };
-        struct thread_work work = {
-            .type = THREAD_WORK_ITER,
-            .iter = {
-                .func = merge_split_idx,
-                .arg = &args,
-                .count = num_buckets / 2,
-            },
-        };
-        thread_work_push(&work);
-
-        thread_work_until_empty();
-
-        /* Get work from others. */
-        thread_wait(&work);
-        ret = args.ret;
-        if (ret) {
-            handle_error_string("Error in merge split range at level %lu",
-                    bit_idx);
-            goto exit_free_cache;
-        }
-    }
-    ret = cache_evictall(buf, local_start);
+    size_t route_levels1 = log2li(world_size);
+    ret = bucket_route(buf, route_levels1, 0);
     if (ret) {
-        handle_error_string("Error evicting buckets");
-        goto exit_free_cache;
+        handle_error_string("Error routing elements through butterfly network");
+        goto exit;
+    }
+
+    ret = distributed_bucket_route(buf, arr);
+    if (ret) {
+        handle_error_string("Error distributing elements in butterfly network");
+        goto exit;
+    }
+
+    size_t route_levels2 = log2li(num_local_buckets);
+    ret = bucket_route(buf, route_levels2, route_levels1 + route_levels2);
+    if (ret) {
+        handle_error_string("Error routing elements through butterfly network");
+        goto exit;
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK

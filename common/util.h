@@ -4,15 +4,15 @@
 #include <stddef.h>
 #include <limits.h>
 
-static inline long next_pow2l(long x) {
+static inline unsigned long next_pow2l(unsigned long x) {
 #ifdef __GNUC__
-    long next = 1 << (sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1);
+    unsigned long next = 1 << (sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1);
     if (next < x) {
         next <<= 1;
     }
     return next;
 #else
-    long next = 1;
+    unsigned long next = 1;
     while (next < x) {
         next <<= 1;
     }
@@ -20,11 +20,11 @@ static inline long next_pow2l(long x) {
 #endif
 }
 
-static inline long log2li(long x) {
+static inline unsigned long log2li(unsigned long x) {
 #ifdef __GNUC__
     return sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1;
 #else
-    long log = -1;
+    unsigned long log = -1;
     while (x) {
         log++;
         x >>= 1;
