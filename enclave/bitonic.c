@@ -9,10 +9,11 @@
 #include "common/elem_t.h"
 #include "common/error.h"
 #include "common/util.h"
-#include "enclave/cache.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
 #include "enclave/threading.h"
+
+#define SWAP_CHUNK_SIZE 4096
 
 static size_t total_length;
 
@@ -20,7 +21,7 @@ static thread_local elem_t *buffer;
 
 int bitonic_init(void) {
     /* Allocate buffers. */
-    buffer = malloc(CACHE_LINESIZE * sizeof(*buffer));
+    buffer = malloc(SWAP_CHUNK_SIZE * sizeof(*buffer));
     if (!buffer) {
         perror("malloc local_buffer");
         goto exit;
@@ -47,82 +48,20 @@ static size_t get_local_start(int rank) {
     return (rank * total_length + world_size - 1) / world_size;
 }
 
-/* Swapping. */
-
-static int sort_cache_line_comparator(const void *a_, const void *b_,
-        void *aux UNUSED) {
-    const elem_t *a = a_;
-    const elem_t *b = b_;
-    return (a->key > b->key) - (a->key < b->key);
-}
-static void sort_cache_line(void *arr, size_t start, size_t count) {
-    size_t local_start = get_local_start(world_rank);
-
-    if (count > CACHE_LINESIZE) {
-        handle_error_string("Count too long for sort_cache_line");
-        return;
-    }
-
-    elem_t *elems = cache_load_elems(arr, start - local_start, local_start);
-    if (!elems) {
-        handle_error_string("Error fetching elems");
-        return;
-    }
-
-    o_sort(elems, count, sizeof(*elems), sort_cache_line_comparator, NULL);
-
-    cache_free_elems(elems);
-}
-
-static void swap_local_range(void *arr, size_t a, size_t b, size_t count,
+static void swap_local_range(elem_t *arr, size_t a, size_t b, size_t count,
         bool descending) {
     size_t local_start = get_local_start(world_rank);
 
-    while (count) {
-        /* Fetch both lines. */
-        elem_t *elems_a =
-            cache_load_elems(arr, ROUND_DOWN(a - local_start, CACHE_LINESIZE),
-                    local_start);
-        if (!elems_a) {
-            handle_error_string("Error fetching elems");
-            return;
-        }
-        elem_t *elems_b =
-            cache_load_elems(arr,
-                    ROUND_DOWN(b - local_start, CACHE_LINESIZE),
-                    local_start);
-        if (!elems_b) {
-            handle_error_string("Error fetching elems");
-            cache_free_elems(elems_a);
-            return;
-        }
-
-        /* Oblivious comparison and swap. */
-        size_t a_start_idx = (a - local_start) % CACHE_LINESIZE;
-        size_t b_start_idx = (b - local_start) % CACHE_LINESIZE;
-        size_t elems_to_swap =
-            MIN(count,
-                    MIN(CACHE_LINESIZE - a_start_idx,
-                        CACHE_LINESIZE - b_start_idx));
-        for (size_t i = 0; i < elems_to_swap; i++) {
-            bool cond =
-                (elems_a[a_start_idx + i].key > elems_b[b_start_idx + i].key)
-                    != descending;
-            o_memswap(&elems_a[a_start_idx + i], &elems_b[b_start_idx + i],
-                    sizeof(*elems_a), cond);
-        }
-
-        /* Free elems. */
-        cache_free_elems(elems_a);
-        cache_free_elems(elems_b);
-
-        a += elems_to_swap;
-        b += elems_to_swap;
-        count -= elems_to_swap;
+    for (size_t i = 0; i < count; i++) {
+        bool cond =
+            (arr[a + i - local_start].key > arr[b + i - local_start].key);
+        cond = cond != descending;
+        o_memswap(&arr[a + i - local_start], &arr[b + i - local_start],
+                sizeof(*arr), cond);
     }
 }
 
-static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
+static void swap_remote_range(elem_t *arr, size_t local_idx, size_t remote_idx,
         size_t count, bool descending) {
     size_t local_start = get_local_start(world_rank);
     int remote_rank = get_index_address(remote_idx);
@@ -131,16 +70,7 @@ static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
     /* Swap elems in maximum chunk sizes of SWAP_CHUNK_SIZE and iterate until no
      * count is remaining. */
     while (count) {
-        size_t elems_to_swap = MIN(count, CACHE_LINESIZE);
-
-        /* Fetch local elems. */
-        elem_t *local_elems =
-            cache_load_elems(arr, local_idx - local_start, local_start);
-        if (!local_elems) {
-            handle_error_string("Error fetching local elems from %lu",
-                    local_idx);
-            return;
-        }
+        size_t elems_to_swap = MIN(count, SWAP_CHUNK_SIZE);
 
         /* Post receive for remote elems to encrypted buffer. */
         mpi_tls_request_t request;
@@ -153,8 +83,9 @@ static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
         }
 
         /* Send local elems to the remote. */
-        ret = mpi_tls_send_bytes(local_elems,
-                elems_to_swap * sizeof(*local_elems), remote_rank, remote_idx);
+        ret =
+            mpi_tls_send_bytes(arr + local_idx - local_start,
+                    elems_to_swap * sizeof(*arr), remote_rank, remote_idx);
         if (ret) {
             handle_error_string("Error sending elem bytes");
             return;
@@ -175,12 +106,11 @@ static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
         for (size_t i = 0; i < elems_to_swap; i++) {
             bool cond =
                 (local_idx < remote_idx)
-                    == (local_elems[i].key > buffer[i].key);
+                    == (arr[local_idx + i - local_start].key > buffer[i].key);
             cond = cond != descending;
-            o_memcpy(&local_elems[i], &buffer[i], sizeof(*local_elems), cond);
+            o_memcpy(&arr[local_idx + i - local_start], &buffer[i],
+                    sizeof(*arr), cond);
         }
-
-        cache_free_elems(local_elems);
 
         /* Bump pointers, decrement count, and continue. */
         local_idx += elems_to_swap;
@@ -189,7 +119,7 @@ static void swap_remote_range(void *arr, size_t local_idx, size_t remote_idx,
     }
 }
 
-static void swap(void *arr, size_t a, size_t b, bool descending) {
+static void swap(elem_t *arr, size_t a, size_t b, bool descending) {
     int a_rank = get_index_address(a);
     int b_rank = get_index_address(b);
 
@@ -202,7 +132,7 @@ static void swap(void *arr, size_t a, size_t b, bool descending) {
     }
 }
 
-static void swap_range(void *arr, size_t a_start, size_t b_start,
+static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
         size_t count, bool descending) {
     // TODO Assumption: Only either a subset of range A is local, or a subset of
     // range B is local. For local-remote swaps, the subset of the remote range
@@ -233,7 +163,7 @@ static void swap_range(void *arr, size_t a_start, size_t b_start,
 /* Bitonic sort. */
 
 struct threaded_args {
-    void *arr;
+    elem_t *arr;
     size_t start;
     size_t length;
     bool descending;
@@ -241,10 +171,10 @@ struct threaded_args {
 };
 
 static void sort_threaded(void *args);
-static void sort_single(void *arr, size_t start, size_t length,
+static void sort_single(elem_t *arr, size_t start, size_t length,
         bool descending);
 static void merge_threaded(void *args);
-static void merge_single(void *arr, size_t start, size_t length,
+static void merge_single(elem_t *arr, size_t start, size_t length,
         bool descending);
 
 void sort_threaded(void *args_) {
@@ -292,40 +222,34 @@ void sort_threaded(void *args_) {
                 sort_threaded(&right_args);
             } else {
                 /* Sort both. */
-                if (args->length <= CACHE_LINESIZE) {
-                    /* If we've reached the level of a cache line, do the for
-                     * the cache line at once. */
-                    sort_cache_line(args->arr, args->start, args->length);
-                } else {
-                    size_t right_threads =
-                        args->num_threads * right_length / args->length;
-                    struct threaded_args right_args = {
-                        .arr = args->arr,
-                        .start = right_start,
-                        .length = right_length,
-                        .descending = !args->descending,
-                        .num_threads = right_threads,
-                    };
-                    struct thread_work right_work = {
-                        .type = THREAD_WORK_SINGLE,
-                        .single = {
-                            .func = sort_threaded,
-                            .arg = &right_args,
-                        },
-                    };
-                    thread_work_push(&right_work);
+                size_t right_threads =
+                    args->num_threads * right_length / args->length;
+                struct threaded_args right_args = {
+                    .arr = args->arr,
+                    .start = right_start,
+                    .length = right_length,
+                    .descending = !args->descending,
+                    .num_threads = right_threads,
+                };
+                struct thread_work right_work = {
+                    .type = THREAD_WORK_SINGLE,
+                    .single = {
+                        .func = sort_threaded,
+                        .arg = &right_args,
+                    },
+                };
+                thread_work_push(&right_work);
 
-                    struct threaded_args left_args = {
-                        .arr = args->arr,
-                        .start = args->start,
-                        .length = left_length,
-                        .descending = args->descending,
-                        .num_threads = args->num_threads - right_threads,
-                    };
-                    sort_threaded(&left_args);
+                struct threaded_args left_args = {
+                    .arr = args->arr,
+                    .start = args->start,
+                    .length = left_length,
+                    .descending = args->descending,
+                    .num_threads = args->num_threads - right_threads,
+                };
+                sort_threaded(&left_args);
 
-                    thread_wait(&right_work);
-                }
+                thread_wait(&right_work);
             }
 
             /* Bitonic merge. */
@@ -335,7 +259,7 @@ void sort_threaded(void *args_) {
     }
 }
 
-void sort_single(void *arr, size_t start, size_t length,
+void sort_single(elem_t *arr, size_t start, size_t length,
         bool descending) {
     switch (length) {
         case 0:
@@ -359,15 +283,8 @@ void sort_single(void *arr, size_t start, size_t length,
                 /* Only sort the right. The left is completely remote. */
                 sort_single(arr, right_start, right_length, !descending);
             } else {
-                /* Sort both. */
-                if (length <= CACHE_LINESIZE) {
-                    /* If we've reached the level of a cache line, do the for
-                     * the cache line at once. */
-                    sort_cache_line(arr, start, length);
-                } else {
-                    sort_single(arr, start, left_length, descending);
-                    sort_single(arr, right_start, right_length, !descending);
-                }
+                sort_single(arr, start, left_length, descending);
+                sort_single(arr, right_start, right_length, !descending);
             }
 
             /* Bitonic merge. */
@@ -457,7 +374,7 @@ static void merge_threaded(void *args_) {
     }
 }
 
-static void merge_single(void *arr, size_t start, size_t length,
+static void merge_single(elem_t *arr, size_t start, size_t length,
         bool descending) {
     switch (length) {
         case 0:
@@ -498,29 +415,13 @@ static void root_work_function(void *args_) {
     args->start = 0;
     args->descending = false;
 
-    /* Initialize cache. */
-    if (cache_init()) {
-        handle_error_string("Error initializing cache");
-        goto exit;
-    }
-
     sort_threaded(args);
-
-    if (cache_evictall(args->arr, get_local_start(world_rank))) {
-        handle_error_string("Error evicting elements from cache");
-        goto exit_free_cache;
-    }
 
     /* Release threads. */
     thread_release_all();
-
-exit_free_cache:
-    cache_free();
-exit:
-    ;
 }
 
-void bitonic_sort(void *arr, size_t length, size_t num_threads) {
+void bitonic_sort(elem_t *arr, size_t length, size_t num_threads) {
     total_length = length;
 
     if (1lu << log2li(length) != length) {
