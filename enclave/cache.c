@@ -42,17 +42,11 @@ int cache_evictions;
 int cache_init(void) {
     int ret;
 
-    /* Attempt to allocate buffer first by test-and-setting the pointer, which
-     * should be unset (AKA NULL) if not yet allocated. */
-    struct cache_set *temp = NULL;
-    if (__atomic_compare_exchange_n(&cache, &temp, (struct cache_set *) 0x1,
-                false, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-        cache = calloc(CACHE_SETS, sizeof(*cache));
-        if (!cache) {
-            perror("Error allocating cache");
-            ret = -1;
-            goto exit;
-        }
+    cache = calloc(CACHE_SETS, sizeof(*cache));
+    if (!cache) {
+        perror("Error allocating cache");
+        ret = -1;
+        goto exit;
     }
 
     ret = 0;
@@ -62,12 +56,7 @@ exit:
 }
 
 void cache_free(void) {
-    /* Attempt to free buffer. */
-    struct cache_set *temp = cache;
-    if (__atomic_compare_exchange_n(&cache, &temp, NULL, false,
-                __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
-        free(temp);
-    }
+    free(cache);
 }
 
 /* Bucket buffer management. */

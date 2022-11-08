@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <threads.h>
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
 #include <time.h>
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
@@ -25,7 +26,7 @@ static size_t total_length;
 static unsigned char key[16];
 
 /* Thread-local buffer used for generic operations. */
-static _Thread_local elem_t *buffer;
+static thread_local elem_t *buffer;
 
 static int get_bucket_rank(size_t bucket) {
     size_t num_buckets =
@@ -51,29 +52,15 @@ static double get_time_difference(struct timespec *start,
 /* Initialization and deinitialization. */
 
 int bucket_init(void) {
-    /* Initialize random. */
-    if (rand_init()) {
-        handle_error_string("Error initializing enclave random number generator");
-        goto exit;
-    }
-
-    /* Initialize cache. */
-    if (cache_init()) {
-        handle_error_string("Error initializing cache");
-        goto exit_free_rand;
-    }
-
     /* Allocate buffer. */
     buffer = malloc(BUCKET_SIZE * 2 * sizeof(*buffer));
     if (!buffer) {
         perror("Error allocating buffer");
-        goto exit_free_rand;
+        goto exit;
     }
 
     return 0;
 
-exit_free_rand:
-    rand_free();
 exit:
     return -1;
 }
@@ -81,8 +68,6 @@ exit:
 void bucket_free(void) {
     /* Free resources. */
     free(buffer);
-    cache_free();
-    rand_free();
 }
 
 /* Bucket sort. */
@@ -1399,12 +1384,19 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
 
     unsigned char *buf = arr + local_length * SIZEOF_ENCRYPTED_NODE;
 
+    /* Initialize cache. */
+    ret = cache_init();
+    if (ret) {
+        handle_error_string("Error initializing cache");
+        goto exit;
+    }
+
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_start;
     if (clock_gettime(CLOCK_REALTIME, &time_start)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit;
+        goto exit_free_cache;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
@@ -1414,7 +1406,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     if (ret) {
         handle_error_string("Error assigning random IDs to elems");
         ret = errno;
-        goto exit;
+        goto exit_free_cache;
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
@@ -1422,7 +1414,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     if (clock_gettime(CLOCK_REALTIME, &time_assign_ids)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit;
+        goto exit_free_cache;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
@@ -1467,8 +1459,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
             if (ret) {
                 handle_error_string("Error in merge split range at level %lu",
                         bit_idx);
-                goto exit;
-
+                goto exit_free_cache;
             }
         }
     }
@@ -1505,13 +1496,13 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
         if (ret) {
             handle_error_string("Error in merge split range at level %lu",
                     bit_idx);
-            goto exit;
+            goto exit_free_cache;
         }
     }
     ret = cache_evictall(buf, local_start);
     if (ret) {
         handle_error_string("Error evicting buckets");
-        goto exit;
+        goto exit_free_cache;
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
@@ -1519,7 +1510,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     if (clock_gettime(CLOCK_REALTIME, &time_merge_split)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit;
+        goto exit_free_cache;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
@@ -1549,7 +1540,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
         ret = args.ret;
         if (ret) {
             handle_error_string("Error permuting buckets");
-            goto exit;
+            goto exit_free_cache;
         }
     }
 
@@ -1558,7 +1549,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     if (clock_gettime(CLOCK_REALTIME, &time_compress)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit;
+        goto exit_free_cache;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
@@ -1569,7 +1560,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
                 length);
     if (ret) {
         handle_error_string("Error in distributed sample partitioning");
-        goto exit;
+        goto exit_free_cache;
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
@@ -1577,7 +1568,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     if (clock_gettime(CLOCK_REALTIME, &time_sample_partition)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit;
+        goto exit_free_cache;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
@@ -1585,7 +1576,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     ret = mergesort(buf, arr, src_local_length, src_local_start);
     if (ret) {
         handle_error_string("Error in non-oblivious local sort");
-        goto exit;
+        goto exit_free_cache;
     }
 
     /* Release threads. */
@@ -1596,7 +1587,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit;
+        goto exit_free_cache;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
@@ -1626,6 +1617,8 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     while (__atomic_load_n(&num_threads_working, __ATOMIC_ACQUIRE)) {}
     thread_unrelease_all();
 
+exit_free_cache:
+    cache_free();
 exit:
     return ret;
 }

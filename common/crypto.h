@@ -9,8 +9,6 @@
 
 extern mbedtls_entropy_context entropy_ctx;
 
-int entropy_init(void);
-void entropy_free(void);
 int rand_init(void);
 void rand_free(void);
 int rand_read(void *buf, size_t n);

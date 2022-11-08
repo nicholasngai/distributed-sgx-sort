@@ -8,6 +8,7 @@
 #include <liboblivious/primitives.h>
 #include "common/elem_t.h"
 #include "common/error.h"
+#include "common/util.h"
 #include "enclave/cache.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
@@ -25,24 +26,8 @@ int bitonic_init(void) {
         goto exit;
     }
 
-    /* Initialize cache. */
-    if (cache_init()) {
-        handle_error_string("Error initializing cache");
-        goto exit_free_buffer;
-    }
-
-    /* Initialize random. */
-    if (rand_init()) {
-        handle_error_string("Error initializing enclave random number generator");
-        goto exit_free_cache;
-    }
-
     return 0;
 
-exit_free_cache:
-    cache_free();
-exit_free_buffer:
-    free(buffer);
 exit:
     return -1;
 }
@@ -50,8 +35,6 @@ exit:
 void bitonic_free(void) {
     /* Free resources. */
     free(buffer);
-    cache_free();
-    rand_free();
 }
 
 /* Array index and world rank relationship helpers. */
@@ -514,19 +497,36 @@ static void root_work_function(void *args_) {
     struct threaded_args *args = args_;
     args->start = 0;
     args->descending = false;
+
+    /* Initialize cache. */
+    if (cache_init()) {
+        handle_error_string("Error initializing cache");
+        goto exit;
+    }
+
     sort_threaded(args);
 
     if (cache_evictall(args->arr, get_local_start(world_rank))) {
         handle_error_string("Error evicting elements from cache");
-        return;
+        goto exit_free_cache;
     }
 
     /* Release threads. */
     thread_release_all();
+
+exit_free_cache:
+    cache_free();
+exit:
+    ;
 }
 
 void bitonic_sort(void *arr, size_t length, size_t num_threads) {
     total_length = length;
+
+    if (1lu << log2li(length) != length) {
+        fprintf(stderr, "Length must be a multiple of 2\n");
+        goto exit;
+    }
 
     /* Start work for this thread. */
     struct threaded_args root_args = {
@@ -548,4 +548,7 @@ void bitonic_sort(void *arr, size_t length, size_t num_threads) {
      * threads. */
     while (__atomic_load_n(&num_threads_working, __ATOMIC_ACQUIRE)) {}
     thread_unrelease_all();
+
+exit:
+    ;
 }
