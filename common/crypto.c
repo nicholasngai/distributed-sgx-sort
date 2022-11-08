@@ -1,42 +1,65 @@
 #include "crypto.h"
+#include <stdbool.h>
+#include <stddef.h>
+#include <threads.h>
 #include <mbedtls/gcm.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ctr_drbg.h>
-#include <stdbool.h>
 #include "common/error.h"
-//#include <string.h>
+
+#define THREAD_LOCAL_LIST_MAXLEN 64
 
 mbedtls_entropy_context entropy_ctx;
-static _Thread_local mbedtls_ctr_drbg_context drbg_ctx;
+static thread_local bool drbg_initted;
+static thread_local mbedtls_ctr_drbg_context drbg_ctx;
 
-int entropy_init(void) {
+static struct {
+    mbedtls_ctr_drbg_context *drbg_ctx;
+    bool *drbg_initted;
+} thread_local_list[THREAD_LOCAL_LIST_MAXLEN];
+static size_t thread_local_list_len;
+
+int rand_init(void) {
     mbedtls_entropy_init(&entropy_ctx);
     return 0;
 }
 
-void entropy_free(void) {
-    mbedtls_entropy_free(&entropy_ctx);
-}
-
-int rand_init(void) {
-    int ret;
-
-    mbedtls_ctr_drbg_init(&drbg_ctx);
-    ret = mbedtls_ctr_drbg_seed(&drbg_ctx, mbedtls_entropy_func, &entropy_ctx,
-            NULL, 0);
-    if (ret) {
-        handle_mbedtls_error(ret, "mbedtls_ctr_drbg_seed");
-    }
-
-    return ret;
-}
-
 void rand_free(void) {
-    mbedtls_ctr_drbg_free(&drbg_ctx);
+    for (size_t i = 0; i < thread_local_list_len; i++) {
+        mbedtls_ctr_drbg_free(thread_local_list[i].drbg_ctx);
+        *thread_local_list[i].drbg_initted = false;
+    }
+    thread_local_list_len = 0;
+    mbedtls_entropy_free(&entropy_ctx);
 }
 
 int rand_read(void *buf, size_t n) {
     int ret = -1;
+
+    if (!drbg_initted) {
+        size_t thread_local_list_idx =
+            __atomic_fetch_add(&thread_local_list_len, 1, __ATOMIC_RELAXED);
+        if (thread_local_list_idx >= THREAD_LOCAL_LIST_MAXLEN) {
+            handle_error_string("Too many threads for crypto");
+            __atomic_fetch_sub(&thread_local_list_len, 1, __ATOMIC_RELAXED);
+            goto exit;
+        }
+
+        mbedtls_ctr_drbg_init(&drbg_ctx);
+        ret =
+            mbedtls_ctr_drbg_seed(&drbg_ctx, mbedtls_entropy_func, &entropy_ctx,
+                    NULL, 0);
+        if (ret) {
+            handle_mbedtls_error(ret, "mbedtls_ctr_drbg_seed");
+            mbedtls_ctr_drbg_free(&drbg_ctx);
+            __atomic_fetch_sub(&thread_local_list_len, 1, __ATOMIC_RELAXED);
+            goto exit;
+        }
+        drbg_initted = true;
+
+        thread_local_list[thread_local_list_idx].drbg_ctx = &drbg_ctx;
+        thread_local_list[thread_local_list_idx].drbg_initted = &drbg_initted;
+    }
 
     ret = mbedtls_ctr_drbg_random(&drbg_ctx, buf, n);
     if (ret) {

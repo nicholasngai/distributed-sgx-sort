@@ -13,18 +13,13 @@
 #include "common/elem_t.h"
 #include "common/error.h"
 #include "common/ocalls.h"
+#include "common/sort_type.h"
 #include "common/util.h"
 #include "enclave/bucket.h"
 #include "host/error.h"
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include "host/parallel_u.h"
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
-
-enum sort_type {
-    SORT_BITONIC,
-    SORT_BUCKET,
-    SORT_OPAQUE,
-};
 
 enum ocall_mpi_request_type {
     OCALL_MPI_SEND,
@@ -513,17 +508,85 @@ int main(int argc, char **argv) {
         }
     }
 
-    pthread_t threads[num_threads - 1];
-
     /* Init MPI. */
 
     ret = init_mpi(&argc, &argv);
+    pthread_t threads[num_threads - 1];
+    if (ret) {
+        goto exit;
+    }
+
+    /* Init random array. */
+
+    size_t local_length =
+        ((world_rank + 1) * length + world_size - 1) / world_size
+            - (world_rank * length + world_size - 1) / world_size;
+    size_t local_start = (world_rank * length + world_size - 1) / world_size;
+    unsigned char *arr;
+    switch (sort_type) {
+        case SORT_BITONIC:
+            arr = malloc(MAX(local_length, 512) * SIZEOF_ENCRYPTED_NODE);
+            break;
+        case SORT_BUCKET: {
+            /* The total number of buckets is the max of either double the
+             * number of buckets needed to hold all the elements or double the
+             * number of enclaves (since each enclaves needs at least two
+             * buckets. */
+            size_t num_buckets =
+                MAX(next_pow2l(length) * 2 / BUCKET_SIZE,
+                        (size_t) world_size * 2);
+            size_t local_num_buckets =
+                num_buckets * (world_rank + 1) / world_size
+                    - num_buckets * world_rank / world_size;
+            /* The bucket sort relies on having 2 local buffers, so we allocate
+             * double the size of a single buffer (a single buffer is
+             * local_num_buckets * BUCKET_SIZE * SIZEOF_ENCRYPTED_NODE). */
+            arr =
+                malloc(local_num_buckets * BUCKET_SIZE
+                        * SIZEOF_ENCRYPTED_NODE * 2);
+            break;
+        case SORT_OPAQUE:
+            arr = malloc(local_length * 2 * SIZEOF_ENCRYPTED_NODE);
+            break;
+        case SORT_UNSET:
+            handle_error_string("Invalid sort type");
+            ret = -1;
+            goto exit_mpi_finalize;
+        }
+    }
+    if (!arr) {
+        perror("malloc arr");
+        ret = -1;
+        goto exit_mpi_finalize;
+    }
+    if (rand_init()) {
+        handle_error_string("Error initializing host random number generator");
+        ret = -1;
+        goto exit_free_arr;
+    }
+    srand(world_rank + 1);
+    for (size_t i = 0; i < MAX(local_length, 512); i++) {
+        /* Initialize elem. */
+        elem_t elem;
+        memset(&elem, '\0', sizeof(elem));
+        elem.key = rand();
+
+        /* Encrypt to array. */
+        unsigned char *start = arr + i * SIZEOF_ENCRYPTED_NODE;
+        ret = elem_encrypt(key, &elem, start, i + local_start);
+        if (ret < 0) {
+            handle_error_string("Error encrypting elem in host");
+            rand_free();
+            goto exit_free_arr;
+        }
+    }
+    rand_free();
 
     /* Create enclave. */
 
     if (ret) {
         handle_error_string("init_mpi");
-        goto exit_mpi_finalize;
+        goto exit_free_arr;
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
@@ -547,21 +610,26 @@ int main(int argc, char **argv) {
     if (result != OE_OK) {
         handle_oe_error(result, "oe_create_parallel_enclave");
         ret = result;
-        goto exit_mpi_finalize;
+        goto exit_free_arr;
     }
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 
     /* Init enclave with threads. */
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    result = ecall_set_params(enclave, world_rank, world_size, num_threads);
+    result =
+        ecall_sort_init(enclave, &ret, world_rank, world_size, num_threads);
     if (result != OE_OK) {
-        handle_oe_error(result, "ecall_set_params");
+        handle_oe_error(result, "ecall_sort_init");
         goto exit_terminate_enclave;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ecall_set_params(world_rank, world_size, num_threads);
+    ret = ecall_sort_init(world_rank, world_size, num_threads);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    if (ret) {
+        handle_error_string("Error in enclave sorting initialization");
+        goto exit_terminate_enclave;
+    }
 
     for (size_t i = 1; i < num_threads; i++) {
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
@@ -571,73 +639,9 @@ int main(int argc, char **argv) {
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         if (ret) {
             perror("pthread_create");
-            goto exit_terminate_enclave;
+            goto exit_free_sort;
         }
     }
-
-    /* Init random array. */
-
-    size_t local_length =
-        ((world_rank + 1) * length + world_size - 1) / world_size
-            - (world_rank * length + world_size - 1) / world_size;
-    size_t local_start = (world_rank * length + world_size - 1) / world_size;
-    unsigned char *arr;
-    switch (sort_type) {
-        case SORT_BITONIC:
-            arr = malloc(local_length * SIZEOF_ENCRYPTED_NODE);
-            break;
-        case SORT_BUCKET: {
-            /* The total number of buckets is the max of either double the
-             * number of buckets needed to hold all the elements or double the
-             * number of enclaves (since each enclaves needs at least two
-             * buckets. */
-            size_t num_buckets =
-                MAX(next_pow2l(length) * 2 / BUCKET_SIZE,
-                        (size_t) world_size * 2);
-            size_t local_num_buckets =
-                num_buckets * (world_rank + 1) / world_size
-                    - num_buckets * world_rank / world_size;
-            /* The bucket sort relies on having 2 local buffers, so we allocate
-             * double the size of a single buffer (a single buffer is
-             * local_num_buckets * BUCKET_SIZE * SIZEOF_ENCRYPTED_NODE). */
-            arr =
-                malloc(local_num_buckets * BUCKET_SIZE
-                        * SIZEOF_ENCRYPTED_NODE * 2);
-            break;
-        case SORT_OPAQUE:
-            arr = malloc(local_length * 2 * SIZEOF_ENCRYPTED_NODE);
-            break;
-        }
-    }
-    if (!arr) {
-        perror("malloc arr");
-        goto exit_terminate_enclave;
-    }
-    if (entropy_init()) {
-        handle_error_string("Error initializing host entropy context");
-        goto exit_free_arr;
-    }
-    if (rand_init()) {
-        handle_error_string("Error initializing host random number generator");
-        entropy_free();
-        goto exit_free_arr;
-    }
-    srand(world_rank + 1);
-    for (size_t i = local_start; i < local_start + local_length; i++) {
-        /* Initialize elem. */
-        elem_t elem;
-        memset(&elem, '\0', sizeof(elem));
-        elem.key = rand();
-
-        /* Encrypt to array. */
-        unsigned char *start = arr + (i - local_start) * SIZEOF_ENCRYPTED_NODE;
-        ret = elem_encrypt(key, &elem, start, i);
-        if (ret < 0) {
-            handle_error_string("Error encrypting elem in host");
-        }
-    }
-    rand_free();
-    entropy_free();
 
     /* Time sort and join. */
 
@@ -645,39 +649,47 @@ int main(int argc, char **argv) {
     ret = timespec_get(&start, TIME_UTC);
     if (!ret) {
         perror("starting timespec_get");
-        goto exit_free_arr;
+        goto exit_free_sort;
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     switch (sort_type) {
         case SORT_BITONIC:
-            result = ecall_bitonic_sort(enclave, &ret, arr, length, local_length);
+            result = ecall_bitonic_sort(enclave, &ret, arr, length);
             break;
         case SORT_BUCKET:
-            result = ecall_bucket_sort(enclave, &ret, arr, length, local_length);
+            result = ecall_bucket_sort(enclave, &ret, arr, length);
             break;
         case SORT_OPAQUE:
-            result = ecall_opaque_sort(enclave, &ret, arr, length, local_length);
+            result = ecall_opaque_sort(enclave, &ret, arr, length);
             break;
+        case SORT_UNSET:
+            handle_error_string("Invalid sort type");
+            ret = -1;
+            goto exit_free_sort;
     }
     if (result != OE_OK) {
-        goto exit_free_arr;
+        goto exit_free_sort;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     switch (sort_type) {
         case SORT_BITONIC:
-            ret = ecall_bitonic_sort(arr, length, local_length);
+            ret = ecall_bitonic_sort(arr, length);
             break;
         case SORT_BUCKET:
-            ret = ecall_bucket_sort(arr, length, local_length);
+            ret = ecall_bucket_sort(arr, length);
             break;
         case SORT_OPAQUE:
-            ret = ecall_opaque_sort(arr, length, local_length);
+            ret = ecall_opaque_sort(arr, length);
             break;
+        case SORT_UNSET:
+            handle_error_string("Invalid sort type");
+            ret = -1;
+            goto exit_free_sort;
     }
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
-        goto exit_free_arr;
+        goto exit_free_sort;
     }
 
     for (size_t i = 1; i < num_threads; i++) {
@@ -686,7 +698,7 @@ int main(int argc, char **argv) {
 
     if (ret) {
         handle_error_string("Enclave exited with return code %d", ret);
-        goto exit_terminate_enclave;
+        goto exit_free_sort;
     }
 
     MPI_Barrier(MPI_COMM_WORLD);
@@ -695,7 +707,7 @@ int main(int argc, char **argv) {
     ret = timespec_get(&end, TIME_UTC);
     if (!ret) {
         perror("ending timespec_get");
-        goto exit_free_arr;
+        goto exit_free_sort;
     }
 
     /* Check array. */
@@ -717,7 +729,7 @@ int main(int argc, char **argv) {
                    first_key = elem.key;
                 } else if (prev_key > elem.key) {
                     printf("Not sorted correctly!\n");
-                    break;
+                    goto exit_free_sort;
                 }
                 prev_key = elem.key;
             }
@@ -751,13 +763,23 @@ int main(int argc, char **argv) {
         printf("%f\n", seconds_taken);
     }
 
-exit_free_arr:
-    free(arr);
+exit_free_sort:
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    result = ecall_sort_free(enclave);
+    if (result != OE_OK) {
+        handle_oe_error(result, "ecall_sort_free");
+    }
+#else
+    ecall_sort_free();
+#endif
 exit_terminate_enclave:
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_terminate_enclave(enclave);
 #endif
+exit_free_arr:
+    free(arr);
 exit_mpi_finalize:
     MPI_Finalize();
+exit:
     return ret;
 }

@@ -541,75 +541,66 @@ int opaque_sort(void *arr_, size_t length) {
     unsigned char *buf = arr + local_length * SIZEOF_ENCRYPTED_NODE;
     int ret;
 
-    /* Initialize random. */
-    ret = rand_init();
-    if (ret) {
-        handle_error_string("Error initializing enclave random number generator");
-        goto exit;
-    }
-
     /* Step 1: Local sort. */
     ret = local_bitonic_sort(arr, 0, local_length, local_start, false);
     if (ret) {
         handle_error_string("Error in local sort (step 1)");
-        goto exit_free_rand;
+        goto exit;
     }
 
     if (world_size == 1) {
-        goto exit_free_rand;
+        goto exit;
     }
 
     /* Step 2: Transpose. */
     ret = transpose(arr, buf, local_length, local_start, false);
     if (ret) {
         handle_error_string("Error in transpose (step 2)");
-        goto exit_free_rand;
+        goto exit;
     }
 
     /* Step 3: Local sort. */
     ret = local_bitonic_sort(buf, 0, local_length, local_start, false);
     if (ret) {
         handle_error_string("Error in local sort (step 3)");
-        goto exit_free_rand;
+        goto exit;
     }
 
     /* Step 4: Transpose. */
     ret = transpose(buf, arr, local_length, local_start, true);
     if (ret) {
         handle_error_string("Error in reverse transpose (step 4)");
-        goto exit_free_rand;
+        goto exit;
     }
 
     /* Step 5: Local sort. */
     ret = local_bitonic_sort(arr, 0, local_length, local_start, false);
     if (ret) {
         handle_error_string("Error in local sort (step 5)");
-        goto exit_free_rand;
+        goto exit;
     }
 
     /* Step 6: Back shift. */
     ret = back_shift(arr, buf, local_length, local_start, false);
     if (ret) {
         handle_error_string("Error in back shift (step 6)");
-        goto exit_free_rand;
+        goto exit;
     }
 
     /* Step 7: Local sort. */
     ret = local_bitonic_sort(buf, 0, local_length, local_start, false);
     if (ret) {
         handle_error_string("Error in local sort (step 7)");
-        goto exit_free_rand;
+        goto exit;
     }
 
     /* Step 8: Forward shift. */
     ret = back_shift(buf, arr, local_length, local_start, true);
     if (ret) {
         handle_error_string("Error in forward shift (step 8)");
-        goto exit_free_rand;
+        goto exit;
     }
 
-exit_free_rand:
-    rand_free();
 exit:
     return ret;
 }
