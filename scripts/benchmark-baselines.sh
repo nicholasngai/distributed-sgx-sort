@@ -22,12 +22,15 @@ mkdir -p "$BENCHMARK_DIR"
 
 for e in 32 16 8 4 2 1; do
     # Deallocate previous machines.
-    if "$AZ" && [ ! -z "$last_e" ]; then
-        i=$(( last_e - 1 ))
-        while [ "$i" -ge "$e" ]; do
-            az vm deallocate -g enclave_group -n "enclave$i" --no-wait
-            i=$(( i - 1 ))
-        done
+    if "$AZ"; then
+       if [ ! -z "$last_e" ]; then
+            i=$(( last_e - 1 ))
+            while [ "$i" -ge "$e" ]; do
+                az vm deallocate -g enclave_group -n "enclave$i" --no-wait
+                i=$(( i - 1 ))
+            done
+       fi
+       last_e=$e
     fi
 
     for a in $(find ./baselines -type f -perm -111); do
@@ -53,16 +56,12 @@ for e in 32 16 8 4 2 1; do
             done | tee "$BENCHMARK_DIR/$(basename "$a")-enclaves$e-size$s.txt"
         done
     done
-
-    if "$AZ"; then
-        last_e="$e"
-    fi
 done
 
 # Deallocate remaining machines.
 if "$AZ"; then
     i=$(( last_e - 1 ))
-    while [ "$i" -ge "$e" ]; do
+    while [ "$i" -ge 0 ]; do
         az vm deallocate -g enclave_group -n "enclave$i" --no-wait
         i=$(( i - 1 ))
     done
