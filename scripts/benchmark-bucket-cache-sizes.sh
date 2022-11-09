@@ -7,6 +7,8 @@ cd "$(dirname "$0")/.."
 BENCHMARK_DIR=benchmarks
 BUCKET_SIZE=512
 
+ENCLAVE_OFFSET=0
+
 if [ ! -z "${AZ+x}" ]; then
     export AZDCAP_DEBUG_LOG_LEVEL=0
     AZ=true
@@ -29,7 +31,7 @@ for e in 32 16 8 4 2 1; do
        if [ ! -z "$last_e" ]; then
             i=$(( last_e - 1 ))
             while [ "$i" -ge "$e" ]; do
-                az vm deallocate -g enclave_group -n "enclave$i" --no-wait
+                az vm deallocate -g enclave_group -n "enclave$(( i + ENCLAVE_OFFSET ))" --no-wait
                 i=$(( i - 1 ))
             done
        fi
@@ -40,7 +42,7 @@ for e in 32 16 8 4 2 1; do
     hosts=''
     i=0
     while [ "$i" -lt "$e" ]; do
-        hosts="${hosts}enclave$i,"
+        hosts="${hosts}enclave$(( i + ENCLAVE_OFFSET )),"
         i=$(( i + 1 ))
     done
     hosts="${hosts%,}"
@@ -82,7 +84,7 @@ done
 if "$AZ"; then
     i=$(( last_e - 1 ))
     while [ "$i" -ge 0 ]; do
-        az vm deallocate -g enclave_group -n "enclave$i" --no-wait
+        az vm deallocate -g enclave_group -n "enclave$(( i + ENCLAVE_OFFSET ))" --no-wait
         i=$(( i - 1 ))
     done
 fi
