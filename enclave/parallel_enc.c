@@ -98,6 +98,14 @@ exit:
     ;
 }
 
+void ecall_release_threads(void) {
+    thread_release_all();
+}
+
+void ecall_unrelease_threads(void) {
+    thread_unrelease_all();
+}
+
 int ecall_bitonic_sort(unsigned char *arr, size_t total_length) {
     int ret = -1;
 

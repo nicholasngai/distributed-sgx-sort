@@ -61,6 +61,8 @@ enclave {
         public int ecall_sort_init(int world_rank, int world_size, size_t num_threads);
         public void ecall_sort_free(void);
         public void ecall_start_work(void);
+        public void ecall_release_threads(void);
+        public void ecall_unrelease_threads(void);
         public int ecall_bitonic_sort(unsigned char *arr, size_t total_length);
         public int ecall_bucket_sort(unsigned char *arr, size_t total_length);
         public int ecall_opaque_sort(unsigned char *arr, size_t total_length);

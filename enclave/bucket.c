@@ -1805,9 +1805,6 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
         goto exit_free_cache;
     }
 
-    /* Release threads. */
-    thread_release_all();
-
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_finish;
     if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
@@ -1837,11 +1834,6 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     printf("[cache] Misses: %d\n", cache_misses);
     printf("[cache] Evictions: %d\n", cache_evictions);
 #endif /* DISTRIBUTED_SGX_SORT_CACHE_COUNTER */
-
-    /* Wait for all threads to exit the work function, then unrelease the
-     * threads. */
-    while (__atomic_load_n(&num_threads_working, __ATOMIC_ACQUIRE)) {}
-    thread_unrelease_all();
 
 exit_free_cache:
     cache_free();

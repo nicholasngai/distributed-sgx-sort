@@ -493,33 +493,6 @@ static void merge_single(void *arr, size_t start, size_t length,
 
 /* Entry. */
 
-static void root_work_function(void *args_) {
-    struct threaded_args *args = args_;
-    args->start = 0;
-    args->descending = false;
-
-    /* Initialize cache. */
-    if (cache_init()) {
-        handle_error_string("Error initializing cache");
-        goto exit;
-    }
-
-    sort_threaded(args);
-
-    if (cache_evictall(args->arr, get_local_start(world_rank))) {
-        handle_error_string("Error evicting elements from cache");
-        goto exit_free_cache;
-    }
-
-    /* Release threads. */
-    thread_release_all();
-
-exit_free_cache:
-    cache_free();
-exit:
-    ;
-}
-
 void bitonic_sort(void *arr, size_t length, size_t num_threads) {
     total_length = length;
 
@@ -528,27 +501,29 @@ void bitonic_sort(void *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
+    /* Initialize cache. */
+    if (cache_init()) {
+        handle_error_string("Error initializing cache");
+        goto exit;
+    }
+
     /* Start work for this thread. */
-    struct threaded_args root_args = {
+    struct threaded_args args = {
         .arr = arr,
+        .start = 0,
         .length = total_length,
+        .descending = false,
         .num_threads = num_threads,
     };
-    struct thread_work root_work = {
-        .type = THREAD_WORK_SINGLE,
-        .single = {
-            .func = root_work_function,
-            .arg = &root_args,
-        },
-    };
-    thread_work_push(&root_work);
-    thread_start_work();
+    sort_threaded(&args);
 
-    /* Wait for all threads to exit the work function, then unrelease the
-     * threads. */
-    while (__atomic_load_n(&num_threads_working, __ATOMIC_ACQUIRE)) {}
-    thread_unrelease_all();
+    if (cache_evictall(arr, get_local_start(world_rank))) {
+        handle_error_string("Error evicting elements from cache");
+        goto exit_free_cache;
+    }
 
+exit_free_cache:
+    cache_free();
 exit:
     ;
 }

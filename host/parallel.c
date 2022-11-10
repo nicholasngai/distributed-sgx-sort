@@ -692,6 +692,15 @@ int main(int argc, char **argv) {
         goto exit_free_sort;
     }
 
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    result = ecall_release_threads(enclave);
+    if (result != OE_OK) {
+        handle_oe_error(result, "ecall_release_threads");
+    }
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    ecall_release_threads();
+#endif
+
     for (size_t i = 1; i < num_threads; i++) {
         pthread_join(threads[i - 1], NULL);
     }
@@ -709,6 +718,15 @@ int main(int argc, char **argv) {
         perror("ending timespec_get");
         goto exit_free_sort;
     }
+
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    result = ecall_unrelease_threads(enclave);
+    if (result != OE_OK) {
+        handle_oe_error(result, "ecall_release_threads");
+    }
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    ecall_unrelease_threads();
+#endif
 
     /* Check array. */
 
