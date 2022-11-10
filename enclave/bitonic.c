@@ -410,16 +410,6 @@ static void merge_single(elem_t *arr, size_t start, size_t length,
 
 /* Entry. */
 
-static void root_work_function(void *args_) {
-    struct threaded_args *args = args_;
-    args->start = 0;
-    args->descending = false;
-
-    sort_threaded(args);
-
-    /* Release threads. */
-    thread_release_all();
-}
 
 void bitonic_sort(elem_t *arr, size_t length, size_t num_threads) {
     total_length = length;
@@ -430,25 +420,14 @@ void bitonic_sort(elem_t *arr, size_t length, size_t num_threads) {
     }
 
     /* Start work for this thread. */
-    struct threaded_args root_args = {
+    struct threaded_args args = {
         .arr = arr,
+        .start = 0,
         .length = total_length,
+        .descending = false,
         .num_threads = num_threads,
     };
-    struct thread_work root_work = {
-        .type = THREAD_WORK_SINGLE,
-        .single = {
-            .func = root_work_function,
-            .arg = &root_args,
-        },
-    };
-    thread_work_push(&root_work);
-    thread_start_work();
-
-    /* Wait for all threads to exit the work function, then unrelease the
-     * threads. */
-    while (__atomic_load_n(&num_threads_working, __ATOMIC_ACQUIRE)) {}
-    thread_unrelease_all();
+    sort_threaded(&args);
 
 exit:
     ;

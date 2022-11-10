@@ -1220,9 +1220,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads UNUSED) {
     qsort(buf, src_local_length, sizeof(*buf), qsort_comparator);
     memcpy(arr, buf, src_local_length * sizeof(*arr));
 
-    /* Release threads. */
-    thread_release_all();
-
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_finish;
     if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
@@ -1246,11 +1243,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads UNUSED) {
                 get_time_difference(&time_sample_partition, &time_finish));
     }
 #endif
-
-    /* Wait for all threads to exit the work function, then unrelease the
-     * threads. */
-    while (__atomic_load_n(&num_threads_working, __ATOMIC_ACQUIRE)) {}
-    thread_unrelease_all();
 
 exit:
     return ret;

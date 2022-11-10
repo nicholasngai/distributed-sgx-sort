@@ -135,22 +135,17 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
         if (cache_set->lines[i].valid
                 && cache_set->lines[i].cache_idx == cache_idx) {
             line_idx = i;
-            while (!cache_set->lines[i].is_loaded) {
-                condvar_wait(&cache_set->lines[i].loaded, &cache_set->lock);
-            }
             break;
         }
 
         /* Skip other locked or waited-for lines. */
         if (cache_set->lines[i].num_writers
-                || cache_set->lines[i].loaded.head
                 || cache_set->lines[i].lock.locked) {
             continue;
         }
 
         /* If current line is occupied or locked, prioritize non-locked line. */
         if (cache_set->lines[line_idx].num_writers
-                || cache_set->lines[line_idx].loaded.head
                 || cache_set->lines[line_idx].lock.locked) {
             line_idx = i;
             continue;
@@ -191,7 +186,6 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
     }
     cache_line->valid = true;
     cache_line->cache_idx = cache_idx;
-    cache_line->is_loaded = false;
     cache_line->acquired =
         __atomic_fetch_add(&cache_counter, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&cache_line->num_writers, 1, __ATOMIC_ACQUIRE);
@@ -200,6 +194,10 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
 
     /* If valid, check if this was a hit. */
     if (was_valid) {
+        while (!cache_line->is_loaded) {
+            condvar_wait(&cache_line->loaded, &cache_line->lock);
+        }
+
         /* If hit, return the line. */
         if (old_cache_idx == cache_idx) {
 #ifdef DISTRIBUTED_SGX_SORT_CACHE_COUNTER
