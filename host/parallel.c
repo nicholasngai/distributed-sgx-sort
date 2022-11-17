@@ -449,10 +449,10 @@ int main(int argc, char **argv) {
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     if (argc < 4) {
-        printf("usage: %s enclave_image {bitonic|bucket|opaque} array_size [num_threads]\n", argv[0]);
+        printf("usage: %s enclave_image {bitonic|bucket|opaque|orshuffle} array_size [num_threads]\n", argv[0]);
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (argc < 3) {
-        printf("usage: %s {bitonic|bucket|opaque} array_size [num_threads]\n", argv[0]);
+        printf("usage: %s {bitonic|bucket|opaque|orshuffle} array_size [num_threads]\n", argv[0]);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         return 0;
     }
@@ -469,6 +469,8 @@ int main(int argc, char **argv) {
         sort_type = SORT_BUCKET;
     } else if (strcmp(SORT_TYPE_STR, "opaque") == 0) {
         sort_type = SORT_OPAQUE;
+    } else if (strcmp(SORT_TYPE_STR, "orshuffle") == 0) {
+        sort_type = SORT_ORSHUFFLE;
     } else {
         printf("Invalid sort type\n");
         return ret;
@@ -546,6 +548,7 @@ int main(int argc, char **argv) {
                         * SIZEOF_ENCRYPTED_NODE * 2);
             break;
         case SORT_OPAQUE:
+        case SORT_ORSHUFFLE:
             arr = malloc(MAX(local_length * 2, 512) * SIZEOF_ENCRYPTED_NODE);
             break;
         case SORT_UNSET:
@@ -663,6 +666,9 @@ int main(int argc, char **argv) {
         case SORT_OPAQUE:
             result = ecall_opaque_sort(enclave, &ret, arr, length);
             break;
+        case SORT_ORSHUFFLE:
+            result = ecall_orshuffle_sort(enclave, &ret, arr, length);
+            break;
         case SORT_UNSET:
             handle_error_string("Invalid sort type");
             ret = -1;
@@ -681,6 +687,9 @@ int main(int argc, char **argv) {
             break;
         case SORT_OPAQUE:
             ret = ecall_opaque_sort(arr, length);
+            break;
+        case SORT_ORSHUFFLE:
+            ret = ecall_orshuffle_sort(arr, length);
             break;
         case SORT_UNSET:
             handle_error_string("Invalid sort type");

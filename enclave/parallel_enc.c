@@ -10,6 +10,7 @@
 #include "enclave/bucket.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/opaque.h"
+#include "enclave/orshuffle.h"
 #include "enclave/threading.h"
 
 int world_rank;
@@ -91,6 +92,20 @@ void ecall_start_work(void) {
             /* Nothing to do. */
             break;
 
+        case SORT_ORSHUFFLE:
+            /* Initialize sort. */
+            if (orshuffle_init()) {
+                handle_error_string("Error initializing sort");
+                return;
+            }
+
+            /* Start work. */
+            thread_start_work();
+
+            /* Free sort. */
+            orshuffle_free();
+            break;
+
         case SORT_UNSET:
             handle_error_string("Invalid sort type");
             goto exit;
@@ -166,6 +181,31 @@ int ecall_opaque_sort(unsigned char *arr, size_t total_length) {
         goto exit;
     }
 
+exit:
+    return ret;
+}
+
+int ecall_orshuffle_sort(unsigned char *arr, size_t total_length) {
+    int ret;
+
+    sort_type = SORT_ORSHUFFLE;
+
+    /* Initialize sort. */
+    ret = bucket_init();
+    if (ret) {
+        handle_error_string("Error initializing sort");
+        goto exit;
+    }
+
+    /* Sort. */
+    ret = orshuffle_sort(arr, total_length, total_num_threads);
+    if (ret) {
+        handle_error_string("Error in Opaque sort");
+        goto exit_free_sort;
+    }
+
+exit_free_sort:
+    orshuffle_free();
 exit:
     return ret;
 }
