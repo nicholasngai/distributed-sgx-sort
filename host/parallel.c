@@ -546,7 +546,7 @@ int main(int argc, char **argv) {
                         * SIZEOF_ENCRYPTED_NODE * 2);
             break;
         case SORT_OPAQUE:
-            arr = malloc(local_length * 2 * SIZEOF_ENCRYPTED_NODE);
+            arr = malloc(MAX(local_length * 2, 512) * SIZEOF_ENCRYPTED_NODE);
             break;
         case SORT_UNSET:
             handle_error_string("Invalid sort type");
