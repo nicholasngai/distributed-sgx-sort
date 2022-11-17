@@ -21,8 +21,6 @@
 
 static size_t total_length;
 
-static unsigned char key[16];
-
 /* Thread-local buffer used for generic operations. */
 static thread_local elem_t *buffer;
 

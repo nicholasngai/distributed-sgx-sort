@@ -15,6 +15,8 @@
 int world_rank;
 int world_size;
 
+unsigned char key[16];
+
 volatile enum sort_type sort_type;
 
 int ecall_sort_init(int world_rank_, int world_size_, size_t num_threads) {
