@@ -191,7 +191,7 @@ int ecall_orshuffle_sort(unsigned char *arr, size_t total_length) {
     sort_type = SORT_ORSHUFFLE;
 
     /* Initialize sort. */
-    ret = bucket_init();
+    ret = orshuffle_init();
     if (ret) {
         handle_error_string("Error initializing sort");
         goto exit;
