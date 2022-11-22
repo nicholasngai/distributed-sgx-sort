@@ -375,12 +375,6 @@ static void compact(void *args_) {
         goto exit;
     }
 
-    if (args->start >= local_start + local_length
-            || args->start + args->length <= local_start) {
-        ret = 0;
-        goto exit;
-    }
-
     if (args->start >= local_start
             && args->start + args->length <= local_start + local_length
             && args->length <= CACHE_LINESIZE) {
@@ -485,7 +479,6 @@ static void compact(void *args_) {
         .start = args->start,
         .length = args->length / 2,
         .offset = args->offset % (args->length / 2),
-        .num_threads = MAX(args->num_threads / 2, 1),
         .ret = 0,
     };
     struct compact_args right_args = {
@@ -493,33 +486,57 @@ static void compact(void *args_) {
         .start = args->start + args->length / 2,
         .length = args->length / 2,
         .offset = (args->offset + left_marked_count) % (args->length / 2),
-        .num_threads = MAX(args->num_threads / 2, 1),
         .ret = 0,
     };
-    struct thread_work right_work = {
-        .type = THREAD_WORK_SINGLE,
-        .single = {
-            .func = compact,
-            .arg = &right_args,
-        },
-    };
-    if (args->num_threads > 1) {
+    if (args->start + args->length / 2 >= local_start + local_length) {
+        /* Right is remote; do just the left. */
+        compact(&left_args);
+        left_args.num_threads = args->num_threads;
+        if (left_args.ret) {
+            ret = left_args.ret;
+            goto exit;
+        }
+    } else if (args->start + args->length / 2 <= local_start) {
+        /* Left is remote; do just the right. */
+        compact(&right_args);
+        right_args.num_threads = args->num_threads;
+        if (right_args.ret) {
+            ret = right_args.ret;
+            goto exit;
+        }
+    } else if (args->num_threads > 1) {
+        /* Do both in a threaded manner. */
+        left_args.num_threads = args->num_threads / 2;
+        right_args.num_threads = args->num_threads / 2;
+        struct thread_work right_work = {
+            .type = THREAD_WORK_SINGLE,
+            .single = {
+                .func = compact,
+                .arg = &right_args,
+            },
+        };
         thread_work_push(&right_work);
-    }
-    compact(&left_args);
-    if (left_args.ret) {
-        ret = left_args.ret;
-        goto exit;
-    }
-    if (args->num_threads == 1) {
+        compact(&left_args);
+        left_args.num_threads = args->num_threads;
+        if (left_args.ret) {
+            ret = left_args.ret;
+            goto exit;
+        }
+        thread_wait(&right_work);
+    } else {
+        /* Do both in our own thread. */
+        left_args.num_threads = 1;
+        right_args.num_threads = 1;
+        compact(&left_args);
+        if (left_args.ret) {
+            ret = left_args.ret;
+            goto exit;
+        }
         compact(&right_args);
         if (right_args.ret) {
             ret = right_args.ret;
             goto exit;
         }
-    }
-    if (args->num_threads > 1) {
-        thread_wait(&right_work);
     }
 
 exit:
@@ -663,45 +680,68 @@ static void shuffle(void *args_) {
         goto exit;
     }
 
-    /* Recursively shuffle. */
+    /* Recursively compact. */
     struct shuffle_args left_args = {
         .arr = args->arr,
         .start = args->start,
         .length = args->length / 2,
-        .num_threads = MAX(args->num_threads / 2, 1),
         .ret = 0,
     };
     struct shuffle_args right_args = {
         .arr = args->arr,
         .start = args->start + args->length / 2,
         .length = args->length / 2,
-        .num_threads = MAX(args->num_threads / 2, 1),
         .ret = 0,
     };
-    struct thread_work right_work = {
-        .type = THREAD_WORK_SINGLE,
-        .single = {
-            .func = shuffle,
-            .arg = &right_args,
-        },
-    };
-    if (args->num_threads > 1) {
+    if (args->start + args->length / 2 >= local_start + local_length) {
+        /* Right is remote; do just the left. */
+        shuffle(&left_args);
+        left_args.num_threads = args->num_threads;
+        if (left_args.ret) {
+            ret = left_args.ret;
+            goto exit;
+        }
+    } else if (args->start + args->length / 2 <= local_start) {
+        /* Left is remote; do just the right. */
+        shuffle(&right_args);
+        right_args.num_threads = args->num_threads;
+        if (right_args.ret) {
+            ret = right_args.ret;
+            goto exit;
+        }
+    } else if (args->num_threads > 1) {
+        /* Do both in a threaded manner. */
+        left_args.num_threads = args->num_threads / 2;
+        right_args.num_threads = args->num_threads / 2;
+        struct thread_work right_work = {
+            .type = THREAD_WORK_SINGLE,
+            .single = {
+                .func = shuffle,
+                .arg = &right_args,
+            },
+        };
         thread_work_push(&right_work);
-    }
-    shuffle(&left_args);
-    if (left_args.ret) {
-        ret = left_args.ret;
-        goto exit;
-    }
-    if (args->num_threads == 1) {
+        shuffle(&left_args);
+        left_args.num_threads = args->num_threads;
+        if (left_args.ret) {
+            ret = left_args.ret;
+            goto exit;
+        }
+        thread_wait(&right_work);
+    } else {
+        /* Do both in our own thread. */
+        left_args.num_threads = 1;
+        right_args.num_threads = 1;
+        shuffle(&left_args);
+        if (left_args.ret) {
+            ret = left_args.ret;
+            goto exit;
+        }
         shuffle(&right_args);
         if (right_args.ret) {
             ret = right_args.ret;
             goto exit;
         }
-    }
-    if (args->num_threads > 1) {
-        thread_wait(&right_work);
     }
 
     ret = 0;
