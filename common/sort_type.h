@@ -6,6 +6,7 @@ enum sort_type {
     SORT_BITONIC,
     SORT_BUCKET,
     SORT_OPAQUE,
+    SORT_ORSHUFFLE,
 };
 
 #endif /* distributed-sgx-sort/common/sort_type.h */
