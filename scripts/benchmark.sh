@@ -52,7 +52,7 @@ for e in 32 16 8 4 2 1; do
         $warm_up
 
         for s in 256 4096 65536 1048576 16777216; do
-            for t in 1 2 4 8; do
+            for t in 1 2 4; do
                 if [ "$a" = 'bitonic' ]; then
                     output_filename="$BENCHMARK_DIR/$a-enclaves$e-chunked$BITONIC_CHUNK_SIZE-size$s-threads$t.txt"
                 elif [ "$a" = 'bucket' ]; then
