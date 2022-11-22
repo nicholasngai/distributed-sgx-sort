@@ -200,7 +200,7 @@ int ecall_orshuffle_sort(unsigned char *arr, size_t total_length) {
     /* Sort. */
     ret = orshuffle_sort(arr, total_length, total_num_threads);
     if (ret) {
-        handle_error_string("Error in Opaque sort");
+        handle_error_string("Error in ORShuffle sort");
         goto exit_free_sort;
     }
 
