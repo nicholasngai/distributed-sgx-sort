@@ -524,33 +524,44 @@ exit:
     }
 }
 
-static int shuffle(void *arr, size_t start, size_t length, size_t num_threads) {
+struct shuffle_args {
+    void *arr;
+    size_t start;
+    size_t length;
+    size_t num_threads;
+    int ret;
+};
+static void shuffle(void *args_) {
+    struct shuffle_args *args = args_;
     size_t local_start = get_local_start(world_rank);
     size_t local_length = get_local_start(world_rank + 1) - local_start;
     int ret;
 
-    if (length < 2) {
+    if (args->length < 2) {
         ret = 0;
         goto exit;
     }
 
-    if (start >= local_start + local_length || start + length <= local_start) {
+    if (args->start >= local_start + local_length
+            || args->start + args->length <= local_start) {
         ret = 0;
         goto exit;
     }
 
-    if (start >= local_start && start + length <= local_start + local_length
-            && length <= CACHE_LINESIZE) {
-        return shuffle_cache_line(arr, start, length);
+    if (args->start >= local_start
+            && args->start + args->length <= local_start + local_length
+            && args->length <= CACHE_LINESIZE) {
+        ret = shuffle_cache_line(args->arr, args->start, args->length);
+        goto exit;
     }
 
     /* Get the number of elements to mark in this enclave. */
-    int master_rank = get_index_address(start);
-    int final_rank = get_index_address(start + length - 1);
+    int master_rank = get_index_address(args->start);
+    int final_rank = get_index_address(args->start + args->length - 1);
     size_t left_to_mark;
     if (master_rank == final_rank) {
         /* For single enclave, the number of elements is just half. */
-        left_to_mark = length / 2;
+        left_to_mark = args->length / 2;
     } else if (world_rank == master_rank) {
         /* If we are the first enclave containing this slice, do a bunch of
          * random sampling to figure out how many elements each enclave should
@@ -558,13 +569,13 @@ static int shuffle(void *arr, size_t start, size_t length, size_t num_threads) {
         size_t enclave_mark_counts[world_size];
         memset(enclave_mark_counts, '\0', sizeof(enclave_mark_counts));
 
-        size_t total_left_to_mark = length / 2;
-        size_t total_left = length;
+        size_t total_left_to_mark = args->length / 2;
+        size_t total_left = args->length;
         for (int rank = master_rank; rank <= final_rank; rank++) {
             size_t rank_start = get_local_start(rank);
             size_t rank_end = get_local_start(rank + 1);
-            for (size_t i = MAX(start, rank_start);
-                    i < MIN(start + length, rank_end); i++) {
+            for (size_t i = MAX(args->start, rank_start);
+                    i < MIN(args->start + args->length, rank_end); i++) {
                 bool marked;
                 ret = should_mark(total_left_to_mark, total_left, &marked);
                 if (ret) {
@@ -603,12 +614,12 @@ static int shuffle(void *arr, size_t start, size_t length, size_t num_threads) {
     }
 
     /* Mark exactly LEFT_TO_MARK elems in our partition. */
-    size_t start_idx = MAX(start, local_start);
-    size_t end_idx = MIN(start + length, local_start + local_length);
+    size_t start_idx = MAX(args->start, local_start);
+    size_t end_idx = MIN(args->start + args->length, local_start + local_length);
     size_t total_left = end_idx - start_idx;
     for (size_t i = ROUND_DOWN(start_idx - local_start, CACHE_LINESIZE) + local_start;
             i < end_idx; i += CACHE_LINESIZE) {
-        elem_t *elems = cache_load_elems(arr, i - local_start, local_start);
+        elem_t *elems = cache_load_elems(args->arr, i - local_start, local_start);
         if (!elems) {
             handle_error_string("Error loading elems %lu\n", i);
             goto exit;
@@ -634,9 +645,9 @@ static int shuffle(void *arr, size_t start, size_t length, size_t num_threads) {
 
     /* Obliviously compact. */
     struct compact_args compact_args = {
-        .arr = arr,
-        .start = start,
-        .length = length,
+        .arr = args->arr,
+        .start = args->start,
+        .length = args->length,
         .offset = 0,
         .ret = 0,
     };
@@ -647,19 +658,54 @@ static int shuffle(void *arr, size_t start, size_t length, size_t num_threads) {
     }
 
     /* Recursively shuffle. */
-    ret = shuffle(arr, start, length / 2, num_threads / 2);
-    if (ret) {
+    struct shuffle_args left_args = {
+        .arr = args->arr,
+        .start = args->start,
+        .length = args->length / 2,
+        .num_threads = MAX(args->num_threads / 2, 1),
+        .ret = 0,
+    };
+    struct shuffle_args right_args = {
+        .arr = args->arr,
+        .start = args->start + args->length / 2,
+        .length = args->length / 2,
+        .num_threads = MAX(args->num_threads / 2, 1),
+        .ret = 0,
+    };
+    struct thread_work right_work = {
+        .type = THREAD_WORK_SINGLE,
+        .single = {
+            .func = shuffle,
+            .arg = &right_args,
+        },
+    };
+    if (args->num_threads > 1) {
+        thread_work_push(&right_work);
+    }
+    shuffle(&left_args);
+    if (left_args.ret) {
+        ret = left_args.ret;
         goto exit;
     }
-    ret = shuffle(arr, start + length / 2, length / 2, num_threads / 2);
-    if (ret) {
-        goto exit;
+    if (args->num_threads == 1) {
+        shuffle(&right_args);
+        if (right_args.ret) {
+            ret = right_args.ret;
+            goto exit;
+        }
+    }
+    if (args->num_threads > 1) {
+        thread_wait(&right_work);
     }
 
     ret = 0;
 
 exit:
-    return ret;
+    {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    }
 }
 
 int orshuffle_sort(void *arr, size_t length, size_t num_threads) {
@@ -683,9 +729,18 @@ int orshuffle_sort(void *arr, size_t length, size_t num_threads) {
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     total_length = length;
-    ret = shuffle(arr, 0, length, num_threads);
-    if (ret) {
+
+    struct shuffle_args args = {
+        .arr = arr,
+        .start = 0,
+        .length = length,
+        .num_threads = num_threads,
+        .ret = 0,
+    };
+    shuffle(&args);
+    if (args.ret) {
         handle_error_string("Error in recursive shuffle");
+        ret = args.ret;
         goto exit;
     }
     ret = cache_evictall(arr, local_start);
