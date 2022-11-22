@@ -6,11 +6,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <threads.h>
+#include <time.h>
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
 #include "common/crypto.h"
 #include "common/defs.h"
 #include "common/error.h"
+#include "common/util.h"
 #include "enclave/cache.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
@@ -609,6 +611,15 @@ int orshuffle_sort(void *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    struct timespec time_start;
+    if (clock_gettime(CLOCK_REALTIME, &time_start)) {
+        handle_error_string("Error getting time");
+        ret = errno;
+        goto exit_free_cache;
+    }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
     total_length = length;
     ret = shuffle(arr, 0, length, num_threads);
     if (ret) {
@@ -621,11 +632,27 @@ int orshuffle_sort(void *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    struct timespec time_shuffle;
+    if (clock_gettime(CLOCK_REALTIME, &time_shuffle)) {
+        handle_error_string("Error getting time");
+        ret = errno;
+        goto exit_free_cache;
+    }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
     /* Nonoblivious sort. */
     ret = nonoblivious_sort(arr, length, local_length, local_start);
     if (ret) {
         goto exit_free_cache;
     }
+
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    if (world_rank == 0) {
+        printf("shuffle          : %f\n",
+                get_time_difference(&time_start, &time_shuffle));
+    }
+#endif
 
 exit_free_cache:
     cache_free();
