@@ -15,8 +15,9 @@
 #include "common/util.h"
 #include "enclave/cache.h"
 #include "enclave/mpi_tls.h"
-#include "enclave/parallel_enc.h"
 #include "enclave/nonoblivious.h"
+#include "enclave/parallel_enc.h"
+#include "enclave/threading.h"
 
 static size_t total_length;
 
@@ -355,32 +356,46 @@ static int swap_range(void *arr, size_t length, size_t a_start, size_t b_start,
     }
 }
 
-static int compact(void *arr, size_t start, size_t length, size_t offset) {
+struct compact_args {
+    void *arr;
+    size_t start;
+    size_t length;
+    size_t offset;
+    size_t num_threads;
+    int ret;
+};
+static void compact(void *args_) {
+    struct compact_args *args = args_;
     size_t local_start = get_local_start(world_rank);
     size_t local_length = get_local_start(world_rank + 1) - local_start;
     int ret;
 
-    if (length < 2) {
+    if (args->length < 2) {
         ret = 0;
         goto exit;
     }
 
-    if (start >= local_start + local_length || start + length <= local_start) {
+    if (args->start >= local_start + local_length
+            || args->start + args->length <= local_start) {
         ret = 0;
         goto exit;
     }
 
-    if (start >= local_start && start + length <= local_start + local_length
-            && length <= CACHE_LINESIZE) {
-        return compact_cache_line(arr, start, length, offset);
+    if (args->start >= local_start
+            && args->start + args->length <= local_start + local_length
+            && args->length <= CACHE_LINESIZE) {
+        ret = compact_cache_line(args->arr, args->start, args->length,
+                args->offset);
+        goto exit;
     }
 
     /* Count elements in the left half that are marked. */
     size_t left_marked_count = 0;
-    for (size_t i = ROUND_DOWN(MAX(start, local_start) - local_start, CACHE_LINESIZE) + local_start;
-            i < MIN(start + length / 2, local_start + local_length);
+    for (size_t i = ROUND_DOWN(MAX(args->start, local_start) - local_start, CACHE_LINESIZE) + local_start;
+            i < MIN(args->start + args->length / 2, local_start + local_length);
             i += CACHE_LINESIZE) {
-        elem_t *elems = cache_load_elems(arr, i - local_start, local_start);
+        elem_t *elems =
+            cache_load_elems(args->arr, i - local_start, local_start);
         if (!elems) {
             handle_error_string("Error loading elems %lu", i);
             ret = -1;
@@ -395,8 +410,8 @@ static int compact(void *arr, size_t start, size_t length, size_t offset) {
     }
 
     /* Sum left half marked counts across enclaves. */
-    int master_rank = get_index_address(start);
-    int final_rank = get_index_address(start + length - 1);
+    int master_rank = get_index_address(args->start);
+    int final_rank = get_index_address(args->start + args->length - 1);
     if (world_rank == master_rank) {
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
             size_t remote_left_marked_count;
@@ -448,29 +463,65 @@ static int compact(void *arr, size_t start, size_t length, size_t offset) {
 
     /* Swap. */
     ret =
-        swap_range(arr, length, start, start + length / 2, length / 2, offset,
+        swap_range(args->arr, args->length, args->start,
+                args->start + args->length / 2, args->length / 2, args->offset,
                 left_marked_count);
     if (ret) {
         handle_error_string(
                 "Error swapping range with start %lu and length %lu",
-                start, start + length / 2);
+                args->start, args->start + args->length / 2);
         goto exit;
     }
 
     /* Recursively compact. */
-    ret = compact(arr, start, length / 2, offset % (length / 2));
-    if (ret) {
+    struct compact_args left_args = {
+        .arr = args->arr,
+        .start = args->start,
+        .length = args->length / 2,
+        .offset = args->offset % (args->length / 2),
+        .num_threads = MAX(args->num_threads / 2, 1),
+        .ret = 0,
+    };
+    struct compact_args right_args = {
+        .arr = args->arr,
+        .start = args->start + args->length / 2,
+        .length = args->length / 2,
+        .offset = (args->offset + left_marked_count) % (args->length / 2),
+        .num_threads = MAX(args->num_threads / 2, 1),
+        .ret = 0,
+    };
+    struct thread_work right_work = {
+        .type = THREAD_WORK_SINGLE,
+        .single = {
+            .func = compact,
+            .arg = &right_args,
+        },
+    };
+    if (args->num_threads > 1) {
+        thread_work_push(&right_work);
+    }
+    compact(&left_args);
+    if (left_args.ret) {
+        ret = left_args.ret;
         goto exit;
     }
-    ret =
-        compact(arr, start + length / 2, length / 2,
-            (offset + left_marked_count) % (length / 2));
-    if (ret) {
-        goto exit;
+    if (args->num_threads == 1) {
+        compact(&right_args);
+        if (right_args.ret) {
+            ret = right_args.ret;
+            goto exit;
+        }
+    }
+    if (args->num_threads > 1) {
+        thread_wait(&right_work);
     }
 
 exit:
-    return ret;
+    {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+    }
 }
 
 static int shuffle(void *arr, size_t start, size_t length, size_t num_threads) {
@@ -582,7 +633,18 @@ static int shuffle(void *arr, size_t start, size_t length, size_t num_threads) {
     }
 
     /* Obliviously compact. */
-    ret = compact(arr, start, length, 0);
+    struct compact_args compact_args = {
+        .arr = arr,
+        .start = start,
+        .length = length,
+        .offset = 0,
+        .ret = 0,
+    };
+    compact(&compact_args);
+    if (compact_args.ret) {
+        ret = compact_args.ret;
+        goto exit;
+    }
 
     /* Recursively shuffle. */
     ret = shuffle(arr, start, length / 2, num_threads / 2);
