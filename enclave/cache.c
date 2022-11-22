@@ -4,9 +4,8 @@
 #include <stdlib.h>
 #include "common/elem_t.h"
 #include "common/error.h"
+#include "enclave/parallel_enc.h"
 #include "enclave/synch.h"
-
-static unsigned char key[16];
 
 /* Cache used to store decrypted elements in enclave memory. */
 struct eviction {

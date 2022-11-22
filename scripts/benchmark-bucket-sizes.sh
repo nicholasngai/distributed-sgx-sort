@@ -52,7 +52,7 @@ for e in 32 16 8 4 2 1; do
         echo "Bucket size: $b"
 
         for s in 256 4096 65536 1048576 16777216; do
-            for t in 1 2 4 8; do
+            for t in 1 2 4; do
                 CACHE_ASSOCIATIVITY=$(( t * 2 ))
                 find . -name '*.[ch]' -print0 | xargs -0 sed -Ei "$(cat <<EOF
 s/^#define (BUCKET_SIZE) .*$/#define \1 $b/

@@ -11,6 +11,7 @@
 #include "enclave/bucket.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/opaque.h"
+#include "enclave/orshuffle.h"
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include "enclave/parallel_t.h"
 #endif
@@ -21,6 +22,8 @@ int world_size;
 
 static elem_t *arr;
 static size_t total_length;
+
+unsigned char key[16];
 
 volatile enum sort_type sort_type;
 
@@ -83,6 +86,9 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
             break;
         case SORT_OPAQUE:
             arr = malloc(local_length * 2 * sizeof(*arr));
+            break;
+        case SORT_ORSHUFFLE:
+            arr = malloc(MAX(local_length * 2, 512) * sizeof(*arr));
             break;
         case SORT_UNSET:
             handle_error_string("Invalid sort type");
@@ -232,6 +238,20 @@ void ecall_start_work(void) {
             /* Nothing to do. */
             break;
 
+        case SORT_ORSHUFFLE:
+            /* Initialize sort. */
+            if (orshuffle_init()) {
+                handle_error_string("Error initializing sort");
+                return;
+            }
+
+            /* Start work. */
+            thread_start_work();
+
+            /* Free sort. */
+            orshuffle_free();
+            break;
+
         case SORT_UNSET:
             handle_error_string("Invalid sort type");
             goto exit;
@@ -307,6 +327,31 @@ int ecall_opaque_sort(void) {
         goto exit;
     }
 
+exit:
+    return ret;
+}
+
+int ecall_orshuffle_sort(void) {
+    int ret;
+
+    sort_type = SORT_ORSHUFFLE;
+
+    /* Initialize sort. */
+    ret = orshuffle_init();
+    if (ret) {
+        handle_error_string("Error initializing sort");
+        goto exit;
+    }
+
+    /* Sort. */
+    ret = orshuffle_sort(arr, total_length, total_num_threads);
+    if (ret) {
+        handle_error_string("Error in ORShuffle sort");
+        goto exit_free_sort;
+    }
+
+exit_free_sort:
+    orshuffle_free();
 exit:
     return ret;
 }

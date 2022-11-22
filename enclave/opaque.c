@@ -8,8 +8,6 @@
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
 
-static unsigned char key[16];
-
 /* Array index and world rank relationship helpers. */
 
 static size_t get_local_start(size_t length, int rank) {

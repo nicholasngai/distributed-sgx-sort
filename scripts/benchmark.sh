@@ -36,7 +36,7 @@ for e in 32 16 8 4 2 1; do
        last_e=$e
     fi
 
-    for a in bitonic bucket; do
+    for a in bitonic bucket orshuffle; do
         # Build command template.
         hosts=''
         i=0
@@ -52,11 +52,13 @@ for e in 32 16 8 4 2 1; do
         $warm_up
 
         for s in 256 4096 65536 1048576 16777216; do
-            for t in 1 2 4 8; do
+            for t in 1 2 4; do
                 if [ "$a" = 'bitonic' ]; then
                     output_filename="$BENCHMARK_DIR/$a-enclaves$e-chunked$BITONIC_CHUNK_SIZE-size$s-threads$t.txt"
                 elif [ "$a" = 'bucket' ]; then
                     output_filename="$BENCHMARK_DIR/$a-enclaves$e-bucketsize$BUCKET_SIZE-cachesize$BUCKET_CACHE_SIZE-size$s-threads$t.txt"
+                elif [ "$a" = 'orshuffle' ]; then
+                    output_filename="$BENCHMARK_DIR/$a-enclaves$e-size$s-threads$t.txt"
                 else
                     echo 'Invalid algorithm' >&2
                     exit -1

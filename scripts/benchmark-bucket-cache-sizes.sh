@@ -52,7 +52,7 @@ for e in 32 16 8 4 2 1; do
         echo "Cache size: $b"
 
         for s in 256 4096 65536 1048576 16777216; do
-            for t in 1 2 4 8; do
+            for t in 1 2 4; do
                 CACHE_ASSOCIATIVITY=$(( t * 2 ))
                 CACHE_SETS=$(( b / CACHE_ASSOCIATIVITY / BUCKET_SIZE ))
                 if [ "$CACHE_SETS" -eq 0 ]; then

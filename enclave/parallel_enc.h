@@ -6,4 +6,6 @@
 extern int world_rank;
 extern int world_size;
 
+extern unsigned char key[16];
+
 #endif /* distributed-sgx-sort/enclave/parallel_enc.h */

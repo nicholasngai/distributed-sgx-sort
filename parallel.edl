@@ -69,5 +69,6 @@ enclave {
         public int ecall_bitonic_sort(void);
         public int ecall_bucket_sort(void);
         public int ecall_opaque_sort(void);
+        public int ecall_orshuffle_sort(void);
     };
 };

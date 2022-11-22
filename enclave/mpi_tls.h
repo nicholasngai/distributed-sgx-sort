@@ -41,4 +41,11 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status);
 int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
         mpi_tls_status_t *status);
 
+/* Central location for MPI tags. */
+
+#define BUCKET_DISTRIBUTE_MPI_TAG 1
+#define SAMPLE_PARTITION_MPI_TAG 2
+#define QUICKSELECT_MPI_TAG 3
+#define OCOMPACT_MARKED_COUNT_MPI_TAG 4
+
 #endif /* distributed-sgx-sort/enclave/mpi_tls.h */
