@@ -58,6 +58,26 @@ static size_t get_local_start(int rank) {
     return (rank * total_length + world_size - 1) / world_size;
 }
 
+/* Marking helper. */
+
+static int should_mark(size_t left_to_mark, size_t total_left, bool *result) {
+    int ret;
+
+    size_t r;
+    do {
+        ret = rand_read(&r, sizeof(r));
+        if (ret) {
+            handle_error_string("Error reading random value");
+            goto exit;
+        }
+    } while (r >= SIZE_MAX - SIZE_MAX % total_left);
+
+    *result = r % total_left < left_to_mark;
+
+exit:
+    return ret;
+}
+
 /* Swapping. */
 
 static void compact_cache_line_offset(elem_t *arr, size_t length,
@@ -108,6 +128,54 @@ static int compact_cache_line(void *arr, size_t start, size_t length,
 
     compact_cache_line_offset(elems + (start - local_start) % CACHE_LINESIZE,
             length, offset);
+
+    cache_free_elems(elems);
+
+    ret = 0;
+
+exit:
+    return ret;
+}
+
+static void shuffle_cache_line_helper(elem_t *arr, size_t length) {
+    if (length < 2) {
+        return;
+    }
+
+    size_t total_left = length;
+    size_t left_to_mark = length / 2;
+
+    for (size_t i = 0; i < length; i++) {
+        should_mark(left_to_mark, total_left, &arr[i].marked);
+        total_left--;
+        left_to_mark -= arr[i].marked;
+    }
+
+    compact_cache_line_offset(arr, length, 0);
+}
+
+static int shuffle_cache_line(void *arr, size_t start, size_t length) {
+    size_t local_start = get_local_start(world_rank);
+    int ret;
+
+    if ((start - local_start) / CACHE_LINESIZE !=
+            (start + length - 1 - local_start) / CACHE_LINESIZE) {
+        handle_error_string("Call to shuffle_cache_line spans multiple lines");
+        ret = -1;
+        goto exit;
+    }
+
+    elem_t *elems =
+        cache_load_elems(arr, ROUND_DOWN(start - local_start, CACHE_LINESIZE),
+                local_start);
+    if (!elems) {
+        handle_error_string("Error fetching elems");
+        ret = -1;
+        goto exit;
+    }
+
+    shuffle_cache_line_helper(elems + (start - local_start) % CACHE_LINESIZE,
+            length);
 
     cache_free_elems(elems);
 
@@ -285,24 +353,6 @@ static int swap_range(void *arr, size_t length, size_t a_start, size_t b_start,
     }
 }
 
-static int should_mark(size_t left_to_mark, size_t total_left, bool *result) {
-    int ret;
-
-    size_t r;
-    do {
-        ret = rand_read(&r, sizeof(r));
-        if (ret) {
-            handle_error_string("Error reading random value");
-            goto exit;
-        }
-    } while (r >= SIZE_MAX - SIZE_MAX % total_left);
-
-    *result = r % total_left < left_to_mark;
-
-exit:
-    return ret;
-}
-
 static int compact(void *arr, size_t start, size_t length, size_t offset) {
     size_t local_start = get_local_start(world_rank);
     size_t local_length = get_local_start(world_rank + 1) - local_start;
@@ -434,6 +484,11 @@ static int shuffle(void *arr, size_t start, size_t length, size_t num_threads) {
     if (start >= local_start + local_length || start + length <= local_start) {
         ret = 0;
         goto exit;
+    }
+
+    if (start >= local_start && start + length <= local_start + local_length
+            && length <= CACHE_LINESIZE) {
+        return shuffle_cache_line(arr, start, length);
     }
 
     /* Get the number of elements to mark in this enclave. */
