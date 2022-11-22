@@ -7,7 +7,6 @@
 #include <string.h>
 #include <threads.h>
 #include <time.h>
-#include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
 #include "common/crypto.h"
 #include "common/defs.h"
