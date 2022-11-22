@@ -414,11 +414,14 @@ static void compact(void *args_) {
     int final_rank = get_index_address(args->start + args->length - 1);
     if (world_rank == master_rank) {
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
+            /* Use START + LENGTH / 2 as the tag (the midpoint index) since
+             * that's guaranteed to be unique across iterations. */
             size_t remote_left_marked_count;
             ret =
                 mpi_tls_recv_bytes(&remote_left_marked_count,
                         sizeof(remote_left_marked_count), MPI_TLS_ANY_SOURCE,
-                        OCOMPACT_MARKED_COUNT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
+                        OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2),
+                        MPI_TLS_STATUS_IGNORE);
             if (ret) {
                 handle_error_string("Error receiving marked count into %d",
                         world_rank);
@@ -440,9 +443,12 @@ static void compact(void *args_) {
             }
         }
     } else {
+        /* Use START + LENGTH / 2 as the tag (the midpoint index) since
+         * that's guaranteed to be unique across iterations. */
         ret =
             mpi_tls_send_bytes(&left_marked_count, sizeof(left_marked_count),
-                    master_rank, OCOMPACT_MARKED_COUNT_MPI_TAG);
+                    master_rank,
+                    OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2));
         if (ret) {
             handle_error_string("Error sending marked count from %d into %d",
                     world_rank, master_rank);
