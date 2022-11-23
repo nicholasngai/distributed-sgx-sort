@@ -32,22 +32,14 @@ int orshuffle_init(void) {
         goto exit;
     }
 
-    ret = rand_init();
-    if (ret) {
-        handle_error_string("Error initializing RNG");
-        goto exit_free_buffer;
-    }
+    return 0;
 
-    return ret;
-
-exit_free_buffer:
-    free(buffer);
 exit:
     return ret;
 }
 
 void orshuffle_free(void) {
-    rand_free();
+    free(buffer);
 }
 
 /* Array index and world rank relationship helpers. */
