@@ -481,16 +481,16 @@ static void compact(void *args_) {
     };
     if (args->start + args->length / 2 >= local_start + local_length) {
         /* Right is remote; do just the left. */
-        compact(&left_args);
         left_args.num_threads = args->num_threads;
+        compact(&left_args);
         if (left_args.ret) {
             ret = left_args.ret;
             goto exit;
         }
     } else if (args->start + args->length / 2 <= local_start) {
         /* Left is remote; do just the right. */
-        compact(&right_args);
         right_args.num_threads = args->num_threads;
+        compact(&right_args);
         if (right_args.ret) {
             ret = right_args.ret;
             goto exit;
@@ -508,7 +508,6 @@ static void compact(void *args_) {
         };
         thread_work_push(&right_work);
         compact(&left_args);
-        left_args.num_threads = args->num_threads;
         if (left_args.ret) {
             ret = left_args.ret;
             goto exit;
@@ -663,6 +662,7 @@ static void shuffle(void *args_) {
         .start = args->start,
         .length = args->length,
         .offset = 0,
+        .num_threads = args->num_threads,
         .ret = 0,
     };
     compact(&compact_args);
@@ -686,16 +686,16 @@ static void shuffle(void *args_) {
     };
     if (args->start + args->length / 2 >= local_start + local_length) {
         /* Right is remote; do just the left. */
-        shuffle(&left_args);
         left_args.num_threads = args->num_threads;
+        shuffle(&left_args);
         if (left_args.ret) {
             ret = left_args.ret;
             goto exit;
         }
     } else if (args->start + args->length / 2 <= local_start) {
         /* Left is remote; do just the right. */
-        shuffle(&right_args);
         right_args.num_threads = args->num_threads;
+        shuffle(&right_args);
         if (right_args.ret) {
             ret = right_args.ret;
             goto exit;
@@ -713,7 +713,6 @@ static void shuffle(void *args_) {
         };
         thread_work_push(&right_work);
         shuffle(&left_args);
-        left_args.num_threads = args->num_threads;
         if (left_args.ret) {
             ret = left_args.ret;
             goto exit;
