@@ -17,7 +17,6 @@ struct eviction {
 struct cache_line {
     bool valid;
     size_t cache_idx;
-    spinlock_t lock;
     bool is_loaded;
     condvar_t loaded;
     unsigned int num_writers;
@@ -128,7 +127,7 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
         }
     }
 
-    /* Find a line to lock in the set. */
+    /* Find a line to use in the set. */
     for (size_t i = 0; i < CACHE_ASSOCIATIVITY; i++) {
         /* Check for line already resident in cache. */
         if (cache_set->lines[i].valid
@@ -138,14 +137,12 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
         }
 
         /* Skip other locked or waited-for lines. */
-        if (cache_set->lines[i].num_writers
-                || cache_set->lines[i].lock.locked) {
+        if (cache_set->lines[i].num_writers) {
             continue;
         }
 
         /* If current line is occupied or locked, prioritize non-locked line. */
-        if (cache_set->lines[line_idx].num_writers
-                || cache_set->lines[line_idx].lock.locked) {
+        if (cache_set->lines[line_idx].num_writers) {
             line_idx = i;
             continue;
         }
@@ -168,65 +165,73 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
 
     struct cache_line *cache_line = &cache_set->lines[line_idx];
 
-    /* Begin eviction process if necessary by adding to eviction list, lock the
-     * line, and unlock the set. */
     size_t old_cache_idx = cache_line->cache_idx;
     bool was_valid = cache_line->valid;
-    struct eviction eviction;
-    if (was_valid && old_cache_idx != cache_idx) {
-        eviction.idx = old_cache_idx;
-        condvar_init(&eviction.finished);
-        eviction.prev = NULL;
-        eviction.next = cache_set->evictions;
-        if (eviction.next) {
-            eviction.next->prev = &eviction;
-        }
-        cache_set->evictions = &eviction;
-    }
     cache_line->valid = true;
     cache_line->cache_idx = cache_idx;
     cache_line->acquired =
         __atomic_fetch_add(&cache_counter, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&cache_line->num_writers, 1, __ATOMIC_ACQUIRE);
-    spinlock_lock(&cache_line->lock);
-    spinlock_unlock(&cache_set->lock);
 
     /* If valid, check if this was a hit. */
     if (was_valid) {
-        while (!cache_line->is_loaded) {
-            condvar_wait(&cache_line->loaded, &cache_line->lock);
-        }
-
-        /* If hit, return the line. */
-        if (old_cache_idx == cache_idx) {
-#ifdef DISTRIBUTED_SGX_SORT_CACHE_COUNTER
-            __atomic_add_fetch(&cache_hits, 1, __ATOMIC_RELAXED);
-#endif /* DISTRIBUTED_SGX_SORT_CACHE_COUNTER */
-            cache_line->is_loaded = true;
-            condvar_broadcast(&cache_line->loaded, &cache_line->lock);
-            spinlock_unlock(&cache_line->lock);
+        if (!cache_line->is_loaded) {
+            /* If not finished loading, someone else is currently loading it (we
+             * only pick up non-loaded lines if they match the current index).
+             * We can wait for it to be loaded and then return the line. */
+            while (!cache_line->is_loaded) {
+                condvar_wait(&cache_line->loaded, &cache_set->lock);
+            }
+            spinlock_unlock(&cache_set->lock);
             return cache_line->elems;
-        }
-
-        /* Else, evict the current line to host memory, then remove the line
-         * from the eviction list. */
-        int ret = evict_line(cache_line, old_cache_idx, arr, local_start);
-        if (ret) {
-            handle_error_string(
-                    "Error evicting line %lu from set %lu line %lu", idx,
-                    set_idx, line_idx);
-            goto exit;
-        }
-        if (eviction.prev) {
-            eviction.prev->next = eviction.next;
         } else {
-            cache_set->evictions = eviction.next;
+            /* Else, if this was loaded, this might be either a hit or a miss,
+             * so we need to check. */
+            if (old_cache_idx == cache_idx) {
+                /* If hit, return the line. */
+#ifdef DISTRIBUTED_SGX_SORT_CACHE_COUNTER
+                __atomic_add_fetch(&cache_hits, 1, __ATOMIC_RELAXED);
+#endif /* DISTRIBUTED_SGX_SORT_CACHE_COUNTER */
+                spinlock_unlock(&cache_set->lock);
+                return cache_line->elems;
+            }
+
+            /* Else, evict the current line to host memory, then remove the line
+             * from the eviction list. */
+
+            struct eviction eviction = {
+                .idx = old_cache_idx,
+                .prev = NULL,
+                .next = cache_set->evictions,
+            };
+            condvar_init(&eviction.finished);
+            if (eviction.next) {
+                eviction.next->prev = &eviction;
+            }
+            cache_set->evictions = &eviction;
+            cache_line->is_loaded = false;
+
+            spinlock_unlock(&cache_set->lock);
+
+            int ret = evict_line(cache_line, old_cache_idx, arr, local_start);
+            if (ret) {
+                handle_error_string(
+                        "Error evicting line %lu from set %lu line %lu", idx,
+                        set_idx, line_idx);
+                goto exit;
+            }
+
+            spinlock_lock(&cache_set->lock);
+            if (eviction.prev) {
+                eviction.prev->next = eviction.next;
+            } else {
+                cache_set->evictions = eviction.next;
+            }
+            if (eviction.next) {
+                eviction.next->prev = eviction.prev;
+            }
+            condvar_broadcast(&eviction.finished, &cache_set->lock);
+            spinlock_unlock(&cache_set->lock);
         }
-        if (eviction.next) {
-            eviction.next->prev = eviction.prev;
-        }
-        condvar_broadcast(&eviction.finished, &cache_set->lock);
-        spinlock_unlock(&cache_set->lock);
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_CACHE_COUNTER
@@ -235,6 +240,11 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
 
     /* If missed, decrypt the elems from host memory and then return the pointer
      * to the buffer. */
+
+    cache_line->is_loaded = false;
+
+    spinlock_unlock(&cache_set->lock);
+
     for (size_t i = 0; i < CACHE_LINESIZE; i++) {
         int ret = elem_decrypt(key, &cache_line->elems[i],
                 arr + (cache_idx * CACHE_LINESIZE + i) * SIZEOF_ENCRYPTED_NODE,
@@ -246,9 +256,10 @@ elem_t *cache_load_elems(void *arr_, size_t idx, size_t local_start) {
         }
     }
 
+    spinlock_lock(&cache_set->lock);
     cache_line->is_loaded = true;
-    condvar_broadcast(&cache_line->loaded, &cache_line->lock);
-    spinlock_unlock(&cache_line->lock);
+    condvar_broadcast(&cache_line->loaded, &cache_set->lock);
+    spinlock_unlock(&cache_set->lock);
 
     return cache_line->elems;
 
