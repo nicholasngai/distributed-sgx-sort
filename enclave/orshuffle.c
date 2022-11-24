@@ -397,6 +397,8 @@ static void compact(void *args_) {
     /* Sum left half marked counts across enclaves. */
     int master_rank = get_index_address(args->start);
     int final_rank = get_index_address(args->start + args->length - 1);
+    int tag =
+        OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2);
     if (world_rank == master_rank) {
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
             /* Use START + LENGTH / 2 as the tag (the midpoint index) since
@@ -405,8 +407,7 @@ static void compact(void *args_) {
             ret =
                 mpi_tls_recv_bytes(&remote_left_marked_count,
                         sizeof(remote_left_marked_count), MPI_TLS_ANY_SOURCE,
-                        OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2),
-                        MPI_TLS_STATUS_IGNORE);
+                        tag, MPI_TLS_STATUS_IGNORE);
             if (ret) {
                 handle_error_string("Error receiving marked count into %d",
                         world_rank);
@@ -418,8 +419,7 @@ static void compact(void *args_) {
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
             ret =
                 mpi_tls_send_bytes(&left_marked_count,
-                        sizeof(left_marked_count), rank,
-                        OCOMPACT_MARKED_COUNT_MPI_TAG);
+                        sizeof(left_marked_count), rank, tag);
             if (ret) {
                 handle_error_string(
                         "Error sending total marked count from %d to %d",
@@ -432,8 +432,7 @@ static void compact(void *args_) {
          * that's guaranteed to be unique across iterations. */
         ret =
             mpi_tls_send_bytes(&left_marked_count, sizeof(left_marked_count),
-                    master_rank,
-                    OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2));
+                    master_rank, tag);
         if (ret) {
             handle_error_string("Error sending marked count from %d into %d",
                     world_rank, master_rank);
@@ -442,8 +441,7 @@ static void compact(void *args_) {
 
         ret =
             mpi_tls_recv_bytes(&left_marked_count, sizeof(left_marked_count),
-                    master_rank, OCOMPACT_MARKED_COUNT_MPI_TAG,
-                    MPI_TLS_STATUS_IGNORE);
+                    master_rank, tag, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string(
                     "Error receiving total marked count from %d into %d",
@@ -571,6 +569,8 @@ static void shuffle(void *args_) {
     /* Get the number of elements to mark in this enclave. */
     int master_rank = get_index_address(args->start);
     int final_rank = get_index_address(args->start + args->length - 1);
+    int tag =
+        OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2);
     size_t left_to_mark;
     if (master_rank == final_rank) {
         /* For single enclave, the number of elements is just half. */
@@ -604,8 +604,7 @@ static void shuffle(void *args_) {
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
             ret =
                 mpi_tls_send_bytes(&enclave_mark_counts[rank],
-                        sizeof(enclave_mark_counts[rank]), rank,
-                        OCOMPACT_MARKED_COUNT_MPI_TAG);
+                        sizeof(enclave_mark_counts[rank]), rank, tag);
             if (ret) {
                 handle_error_string("Error sending mark count from %d to %d",
                         world_rank, rank);
@@ -618,10 +617,10 @@ static void shuffle(void *args_) {
         /* Else, receive the number of elements from the master. */
         ret =
             mpi_tls_recv_bytes(&left_to_mark, sizeof(left_to_mark), master_rank,
-                    OCOMPACT_MARKED_COUNT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
+                    tag, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string("Error receiving mark count from %d into %d\n",
-                    OCOMPACT_MARKED_COUNT_MPI_TAG, world_rank);
+                    master_rank, world_rank);
             goto exit;
         }
     }
