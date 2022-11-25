@@ -82,10 +82,10 @@ static void compact_cache_line_offset(elem_t *arr, size_t length,
         return;
     }
 
-    size_t left_marked_count = 0;
-    for (size_t i = 0; i < length / 2; i++) {
-        left_marked_count += arr[i].marked;
-    }
+    size_t left_marked_count =
+        arr[length / 2 - 1].marked_prefix_sum
+            - arr[0].marked_prefix_sum
+            + arr[0].marked;
 
     compact_cache_line_offset(arr, length / 2, offset % (length / 2));
     compact_cache_line_offset(arr + length / 2, length / 2,
@@ -137,12 +137,13 @@ static void shuffle_cache_line_helper(elem_t *arr, size_t length) {
     }
 
     size_t total_left = length;
-    size_t left_to_mark = length / 2;
-
+    size_t num_to_mark = length / 2;
+    size_t marked_so_far = 0;
     for (size_t i = 0; i < length; i++) {
-        should_mark(left_to_mark, total_left, &arr[i].marked);
+        should_mark(num_to_mark - marked_so_far, total_left, &arr[i].marked);
         total_left--;
-        left_to_mark -= arr[i].marked;
+        marked_so_far += arr[i].marked;
+        arr[i].marked_prefix_sum = marked_so_far;
     }
 
     compact_cache_line_offset(arr, length, 0);
@@ -374,48 +375,87 @@ static void compact(void *args_) {
         goto exit;
     }
 
-    /* Count elements in the left half that are marked. */
-    size_t left_marked_count = 0;
-    for (size_t i = ROUND_DOWN(MAX(args->start, local_start) - local_start, CACHE_LINESIZE) + local_start;
-            i < MIN(args->start + args->length / 2, local_start + local_length);
-            i += CACHE_LINESIZE) {
+    /* Get number of elements in the left half that are marked. The elements
+     * contains the prefix sums, so taking the final prefix sum minus the first
+     * prefix sum plus 1 if first element is marked should be sufficient. */
+    int master_rank = get_index_address(args->start);
+    int final_rank = get_index_address(args->start + args->length - 1);
+    size_t mid_idx = args->start + args->length / 2 - 1;
+    int mid_rank = get_index_address(mid_idx);
+    /* Use START + LENGTH / 2 as the tag (the midpoint index) since that's
+     * guaranteed to be unique across iterations. */
+    int tag =
+        OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2);
+    size_t left_marked_count;
+    size_t mid_prefix_sum;
+    if (world_rank == mid_rank) {
+        /* Send the middle prefix sum to the master rank, since we have the
+         * middle element. */
         elem_t *elems =
-            cache_load_elems(args->arr, i - local_start, local_start);
+            cache_load_elems(args->arr,
+                    ROUND_DOWN(mid_idx - local_start, 512),
+                local_start);
         if (!elems) {
-            handle_error_string("Error loading elems %lu", i);
+            handle_error_string("Error loading elems %lu",
+                    ROUND_DOWN(mid_idx - local_start, 512) + local_start);
             ret = -1;
             goto exit;
         }
 
-        for (size_t j = 0; j < CACHE_LINESIZE; j++) {
-            left_marked_count += elems[j].marked;
+        if (world_rank == master_rank) {
+            /* We are also the master, so set the local variable. */
+            mid_prefix_sum =
+                elems[(mid_idx - local_start) % CACHE_LINESIZE].marked_prefix_sum;
+        } else {
+            /* Send it to the master. */
+            ret =
+                mpi_tls_send_bytes(
+                        &elems[(mid_idx - local_start) % CACHE_LINESIZE].marked_prefix_sum,
+                        sizeof(elems->marked_prefix_sum), master_rank, tag);
+            if (ret) {
+                handle_error_string(
+                        "Error sending prefix marked count for %lu from %d to %d",
+                        mid_idx, world_rank, master_rank);
+                cache_free_elems(elems);
+                goto exit;
+            }
         }
 
         cache_free_elems(elems);
     }
-
-    /* Sum left half marked counts across enclaves. */
-    int master_rank = get_index_address(args->start);
-    int final_rank = get_index_address(args->start + args->length - 1);
-    int tag =
-        OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2);
     if (world_rank == master_rank) {
-        for (int rank = master_rank + 1; rank <= final_rank; rank++) {
-            /* Use START + LENGTH / 2 as the tag (the midpoint index) since
-             * that's guaranteed to be unique across iterations. */
-            size_t remote_left_marked_count;
-            ret =
-                mpi_tls_recv_bytes(&remote_left_marked_count,
-                        sizeof(remote_left_marked_count), MPI_TLS_ANY_SOURCE,
-                        tag, MPI_TLS_STATUS_IGNORE);
-            if (ret) {
-                handle_error_string("Error receiving marked count into %d",
-                        world_rank);
-                goto exit;
-            }
-            left_marked_count += remote_left_marked_count;
+        elem_t *elems =
+            cache_load_elems(args->arr, ROUND_DOWN(args->start - local_start,
+                        512), local_start);
+        if (!elems) {
+            handle_error_string("Error loading elems %lu",
+                    ROUND_DOWN(args->start - local_start, 512));
+            ret = -1;
+            goto exit;
         }
 
+        /* If we don't have the middle element, receive the middle prefix
+         * sum. */
+        if (world_rank != mid_rank) {
+            ret =
+                mpi_tls_recv_bytes(&mid_prefix_sum, sizeof(mid_prefix_sum),
+                        mid_rank, tag, MPI_TLS_STATUS_IGNORE);
+            if (ret) {
+                handle_error_string(
+                        "Error receiving prefix marked count for %lu from %d into %d",
+                        args->start, final_rank, world_rank);
+                cache_free_elems(elems);
+                goto exit;
+            }
+        }
+
+        /* Compute the number of marked elements. */
+        left_marked_count =
+            mid_prefix_sum
+                - elems[(args->start - local_start) % CACHE_LINESIZE].marked_prefix_sum
+                + elems[(args->start - local_start) % CACHE_LINESIZE].marked;
+
+        /* Send it to everyone else. */
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
             ret =
                 mpi_tls_send_bytes(&left_marked_count,
@@ -424,21 +464,14 @@ static void compact(void *args_) {
                 handle_error_string(
                         "Error sending total marked count from %d to %d",
                         world_rank, rank);
+                cache_free_elems(elems);
                 goto exit;
             }
         }
-    } else {
-        /* Use START + LENGTH / 2 as the tag (the midpoint index) since
-         * that's guaranteed to be unique across iterations. */
-        ret =
-            mpi_tls_send_bytes(&left_marked_count, sizeof(left_marked_count),
-                    master_rank, tag);
-        if (ret) {
-            handle_error_string("Error sending marked count from %d into %d",
-                    world_rank, master_rank);
-            goto exit;
-        }
 
+        cache_free_elems(elems);
+    } else {
+        /* Receive the left marked count from the master. */
         ret =
             mpi_tls_recv_bytes(&left_marked_count, sizeof(left_marked_count),
                     master_rank, tag, MPI_TLS_STATUS_IGNORE);
@@ -567,14 +600,20 @@ static void shuffle(void *args_) {
     }
 
     /* Get the number of elements to mark in this enclave. */
+    struct mark_count_payload {
+        size_t num_to_mark;
+        size_t marked_in_prev;
+    };
     int master_rank = get_index_address(args->start);
     int final_rank = get_index_address(args->start + args->length - 1);
     int tag =
         OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2);
-    size_t left_to_mark;
+    size_t num_to_mark;
+    size_t marked_in_prev;
     if (master_rank == final_rank) {
         /* For single enclave, the number of elements is just half. */
-        left_to_mark = args->length / 2;
+        num_to_mark = args->length / 2;
+        marked_in_prev = 0;
     } else if (world_rank == master_rank) {
         /* If we are the first enclave containing this slice, do a bunch of
          * random sampling to figure out how many elements each enclave should
@@ -601,34 +640,43 @@ static void shuffle(void *args_) {
             }
         }
 
+        marked_in_prev = 0;
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
-            ret =
-                mpi_tls_send_bytes(&enclave_mark_counts[rank],
-                        sizeof(enclave_mark_counts[rank]), rank, tag);
+            struct mark_count_payload payload = {
+                .num_to_mark = enclave_mark_counts[rank],
+                .marked_in_prev = marked_in_prev,
+            };
+            ret = mpi_tls_send_bytes(&payload, sizeof(payload), rank, tag);
             if (ret) {
                 handle_error_string("Error sending mark count from %d to %d",
                         world_rank, rank);
                 goto exit;
             }
+            marked_in_prev += enclave_mark_counts[rank];
         }
 
-        left_to_mark = enclave_mark_counts[0];
+        num_to_mark = enclave_mark_counts[0];
+        marked_in_prev = 0;
     } else {
         /* Else, receive the number of elements from the master. */
+        struct mark_count_payload payload;
         ret =
-            mpi_tls_recv_bytes(&left_to_mark, sizeof(left_to_mark), master_rank,
+            mpi_tls_recv_bytes(&payload, sizeof(payload), master_rank,
                     tag, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string("Error receiving mark count from %d into %d\n",
                     master_rank, world_rank);
             goto exit;
         }
+        num_to_mark = payload.num_to_mark;
+        marked_in_prev = payload.marked_in_prev;
     }
 
-    /* Mark exactly LEFT_TO_MARK elems in our partition. */
+    /* Mark exactly NUM_TO_MARK elems in our partition. */
     size_t start_idx = MAX(args->start, local_start);
     size_t end_idx = MIN(args->start + args->length, local_start + local_length);
     size_t total_left = end_idx - start_idx;
+    size_t marked_so_far = 0;
     for (size_t i = ROUND_DOWN(start_idx - local_start, CACHE_LINESIZE) + local_start;
             i < end_idx; i += CACHE_LINESIZE) {
         elem_t *elems = cache_load_elems(args->arr, i - local_start, local_start);
@@ -640,15 +688,17 @@ static void shuffle(void *args_) {
         for (size_t j = MAX(i, start_idx); j < MIN(i + CACHE_LINESIZE, end_idx);
                 j++) {
             bool marked;
-            ret = should_mark(left_to_mark, total_left, &marked);
+            ret =
+                should_mark(num_to_mark - marked_so_far, total_left, &marked);
             if (ret) {
                 handle_error_string("Error getting random marked");
                 cache_free_elems(elems);
                 goto exit;
             }
-            left_to_mark -= marked;
+            marked_so_far += marked;
             total_left--;
 
+            elems[j - i].marked_prefix_sum = marked_in_prev + marked_so_far;
             elems[j - i].marked = marked;
         }
 

@@ -18,8 +18,9 @@ typedef struct elem {
 
     /* ORShuffle stuff. */
     bool marked;
+    size_t marked_prefix_sum;
 
-    unsigned char unused[107];
+    unsigned char unused[96];
 } elem_t;
 
 static_assert(sizeof(elem_t) == 128, "Element should be 128 bytes");
