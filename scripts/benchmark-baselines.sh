@@ -55,7 +55,7 @@ for e in 32 16 8 4 2 1; do
             echo "Command: $cmd"
             for i in {1..4}; do
                 $cmd
-            done | tee "$BENCHMARK_DIR/$(basename "$a")-enclaves$e-size$s.txt"
+            done | tee "$BENCHMARK_DIR/$(basename "$a")-sgx2-enclaves$e-size$s.txt"
         done
     done
 done

@@ -7,7 +7,6 @@ cd "$(dirname "$0")/.."
 BENCHMARK_DIR=benchmarks
 BITONIC_CHUNK_SIZE=4096
 BUCKET_SIZE=512
-BUCKET_CACHE_SIZE=524288
 
 ENCLAVE_OFFSET=0
 
@@ -54,11 +53,11 @@ for e in 32 16 8 4 2 1; do
         for s in 256 4096 65536 1048576 16777216; do
             for t in 1 2 4; do
                 if [ "$a" = 'bitonic' ]; then
-                    output_filename="$BENCHMARK_DIR/$a-enclaves$e-chunked$BITONIC_CHUNK_SIZE-size$s-threads$t.txt"
+                    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-chunked$BITONIC_CHUNK_SIZE-size$s-threads$t.txt"
                 elif [ "$a" = 'bucket' ]; then
-                    output_filename="$BENCHMARK_DIR/$a-enclaves$e-bucketsize$BUCKET_SIZE-cachesize$BUCKET_CACHE_SIZE-size$s-threads$t.txt"
+                    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$BUCKET_SIZE-size$s-threads$t.txt"
                 elif [ "$a" = 'orshuffle' ]; then
-                    output_filename="$BENCHMARK_DIR/$a-enclaves$e-size$s-threads$t.txt"
+                    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-size$s-threads$t.txt"
                 else
                     echo 'Invalid algorithm' >&2
                     exit -1
