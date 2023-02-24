@@ -25,7 +25,6 @@ ENCLAVE_OBJS = \
 	$(ENCLAVE_DIR)/parallel_enc.o \
 	$(ENCLAVE_DIR)/bitonic.o \
 	$(ENCLAVE_DIR)/bucket.o \
-	$(ENCLAVE_DIR)/cache.o \
 	$(ENCLAVE_DIR)/mpi_tls.o \
 	$(ENCLAVE_DIR)/nonoblivious.o \
 	$(ENCLAVE_DIR)/opaque.o \

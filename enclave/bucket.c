@@ -10,10 +10,11 @@
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
+#include "common/crypto.h"
 #include "common/defs.h"
+#include "common/elem_t.h"
 #include "common/error.h"
 #include "common/util.h"
-#include "enclave/cache.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/nonoblivious.h"
 #include "enclave/parallel_enc.h"
@@ -62,8 +63,8 @@ void bucket_free(void) {
 /* Bucket sort. */
 
 struct assign_random_id_args {
-    const void *arr;
-    void *out;
+    const elem_t *arr;
+    elem_t *out;
     size_t length;
     size_t src_start_idx;
     size_t result_start_idx;
@@ -72,45 +73,24 @@ struct assign_random_id_args {
 };
 static void assign_random_id(void *args_, size_t i) {
     struct assign_random_id_args *args = args_;
-    const unsigned char *arr = args->arr;
-    unsigned char *out = args->out;
     int ret;
 
-    elem_t *elem;
     if (i % 2 == 0 && i < args->length * 2) {
-        /* Decrypt index i / 2 as elem. */
-        elem_t real_elem;
-        ret = elem_decrypt(key, &real_elem, arr + i / 2 * SIZEOF_ENCRYPTED_NODE,
-                i / 2 + args->src_start_idx);
-        if (ret) {
-            handle_error_string("Error decrypting elem %lu",
-                    i + args->src_start_idx);
-            goto exit;
-        }
-
-        /* Assign ORP ID and initialize elem. */
-        ret = rand_read(&real_elem.orp_id, sizeof(real_elem.orp_id));
+        /* Copy elem from index i / 2 and assign ORP ID. */
+        memcpy(&args->out[i], &args->arr[i / 2], sizeof(args->out[i]));
+        ret = rand_read(&args->out[i].orp_id, sizeof(args->out[i].orp_id));
         if (ret) {
             handle_error_string("Error assigning random ID to elem %lu",
                     i + args->result_start_idx);
             goto exit;
         }
-        real_elem.is_dummy = false;
-
-        elem = &real_elem;
+        args->out[i].is_dummy = false;
     } else {
         /* Use dummy elem. */
-        elem = args->dummy_elem;
+        args->out[i].is_dummy = true;
     }
 
-    /* Encrypt to index i. */
-    ret = elem_encrypt(key, elem, out + i * SIZEOF_ENCRYPTED_NODE,
-            i + args->result_start_idx);
-    if (ret) {
-        handle_error_string("Error encrypting elem %lu",
-                i + args->result_start_idx);
-        goto exit;
-    }
+    ret = 0;
 
 exit:
     if (ret) {
@@ -124,10 +104,10 @@ exit:
  * encrypted with index SRC_START_IDX, in ARR and distributes them evenly over
  * the 2 * LENGTH elements in OUT, re-encrypting them according to
  * RESULT_START_IDX. Thus, ARR is assumed to be at least
- * 2 * MAX(LENGTH, BUCKET_SIZE) * SIZEOF_ENCRYPTED_NODE bytes. The result is an
- * array with real elements interspersed with dummy elements. */
+ * 2 * MAX(LENGTH, BUCKET_SIZE) bytes. The result is an array with real elements
+ * interspersed with dummy elements. */
 // TODO Can we do the first bucket assignment scan while generating these?
-static int assign_random_ids_and_spread(const void *arr, void *out,
+static int assign_random_ids_and_spread(const elem_t *arr, void *out,
         size_t length, size_t src_start_idx, size_t result_start_idx) {
     int ret;
 
@@ -195,16 +175,14 @@ static void merge_split_swapper(size_t a, size_t b, bool should_swap, void *aux_
  * that this is a modified version of the merge-split algorithm from the paper,
  * since the elements are swapped in-place rather than being swapped between
  * different buckets on different layers. */
-static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
+static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
         size_t bit_idx) {
     int ret = -1;
-    unsigned char *arr = arr_;
     int bucket1_rank = get_bucket_rank(bucket1_idx);
     int bucket2_rank = get_bucket_rank(bucket2_idx);
     bool bucket1_local = bucket1_rank == world_rank;
     bool bucket2_local = bucket2_rank == world_rank;
     size_t local_bucket_start = get_local_bucket_start(world_rank);
-    size_t local_start = local_bucket_start * BUCKET_SIZE;
 
     /* If both buckets are remote, ignore this merge-split. */
     if (!bucket1_local && !bucket2_local) {
@@ -219,28 +197,13 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     /* Load bucket 1 elems if local. */
     elem_t *bucket1;
     if (bucket1_local) {
-        bucket1 =
-            cache_load_elems(arr,
-                (bucket1_idx - local_bucket_start) * BUCKET_SIZE, local_start);
-        if (!bucket1) {
-            handle_error_string("Error loading bucket %lu", bucket1_idx);
-            ret = -1;
-            goto exit;
-        }
+        bucket1 = arr + (bucket1_idx - local_bucket_start) * BUCKET_SIZE;
     }
 
     /* Load bucket 2 elems if local. */
     elem_t *bucket2;
     if (bucket2_local) {
-        bucket2 =
-            cache_load_elems(arr,
-                    (bucket2_idx - local_bucket_start) * BUCKET_SIZE,
-                    local_start);
-        if (!bucket2) {
-            handle_error_string("Error loading bucket %lu", bucket2_idx);
-            ret = -1;
-            goto exit;
-        }
+        bucket2 = arr + (bucket2_idx - local_bucket_start) * BUCKET_SIZE;
     }
 
     /* The number of elements with corresponding bit 1. */
@@ -361,16 +324,6 @@ static int merge_split(void *arr_, size_t bucket1_idx, size_t bucket2_idx,
     };
     o_compact_generate_swaps(BUCKET_SIZE * 2, merge_split_is_marked, merge_split_swapper, &aux);
 
-    /* Free bucket 1 if local. */
-    if (bucket1_local) {
-        cache_free_elems(bucket1);
-    }
-
-    /* Free bucket 2 if local. */
-    if (bucket2_local) {
-        cache_free_elems(bucket2);
-    }
-
     ret = 0;
 
 exit:
@@ -396,7 +349,7 @@ exit:
  * bucket cache. BUCKET_OFFSET is used for chunking so that we can reuse this
  * function at different starting points for different chunks. */
 struct merge_split_idx_args {
-    void *arr;
+    elem_t *arr;
     size_t bit_idx;
     size_t bucket_stride;
     size_t bucket_offset;
@@ -435,58 +388,11 @@ exit:
  * ORP_ID[START_BIT_IDX:START_BIT_IDX + NUM_LEVELS - 1]. This is modified from
  * the paper, since all merge-split operations will be constrained to the same
  * buckets of memory. */
-static int bucket_route(void *arr, size_t num_levels, size_t start_bit_idx) {
+static int bucket_route(elem_t *arr, size_t num_levels, size_t start_bit_idx) {
     size_t num_buckets = get_local_bucket_start(world_size);
-    size_t local_bucket_start = get_local_bucket_start(world_rank);
-    size_t num_local_buckets =
-        get_local_bucket_start(world_rank + 1) - local_bucket_start;
     int ret;
 
-    /* Merge the first log2(BUF_SIZE) levels going by chunks of BUF_SIZE, since
-     * all BUF_SIZE buckets in a given chunk can be kept in the cache. For
-     * example, instead of merging 0-1, 2-3, 4-5, 6-7, 0-2, 1-3, 4-6, 5-7, we
-     * might do 0-1, 2-3, 0-2, 1-3 with a BUF_SIZE of 4. */
-    size_t num_chunked_buckets = MIN(CACHE_SIZE, num_buckets);
-    size_t num_chunked_levels = MIN(num_levels, log2li(num_chunked_buckets));
-    for (size_t chunk_start = 0; chunk_start < num_local_buckets;
-            chunk_start += CACHE_SIZE) {
-        for (size_t bit_idx = 0; bit_idx < num_chunked_levels; bit_idx++) {
-            size_t bucket_stride = 2u << bit_idx;
-
-            /* Create iterative task for merge split. */
-            struct merge_split_idx_args args = {
-                .arr = arr,
-                .bit_idx = start_bit_idx + bit_idx,
-                .bucket_stride = bucket_stride,
-                .bucket_offset = chunk_start,
-                .num_buckets = num_chunked_buckets,
-            };
-            struct thread_work work = {
-                .type = THREAD_WORK_ITER,
-                .iter = {
-                    .func = merge_split_idx,
-                    .arg = &args,
-                    .count = num_chunked_buckets / 2,
-                },
-            };
-            thread_work_push(&work);
-
-            thread_work_until_empty();
-
-            /* Get work from others. */
-            thread_wait(&work);
-            ret = args.ret;
-            if (ret) {
-                handle_error_string("Error in merge split range at level %lu",
-                        bit_idx);
-                goto exit;
-            }
-        }
-    }
-
-    /* Merge split remaining levels, when chunks of BUF_SIZE buckets can't all
-     * be kept in the cache. */
-    for (size_t bit_idx = num_chunked_levels; bit_idx < num_levels; bit_idx++) {
+    for (size_t bit_idx = 0; bit_idx < num_levels; bit_idx++) {
         size_t bucket_stride = 2u << bit_idx;
 
         /* Create iterative task for merge split. */
@@ -518,11 +424,6 @@ static int bucket_route(void *arr, size_t num_levels, size_t start_bit_idx) {
             goto exit;
         }
     }
-    ret = cache_evictall(arr, local_bucket_start * BUCKET_SIZE);
-    if (ret) {
-        handle_error_string("Error evicting cache");
-        goto exit;
-    }
 
 exit:
     return ret;
@@ -530,20 +431,18 @@ exit:
 
 /* Distribute and receive elements from buckets in ARR to buckets in OUT.
  * Bucket i is sent to enclave i % E. */
-static int distributed_bucket_route(void *arr, void *out_) {
+static int distributed_bucket_route(elem_t *arr, void *out_) {
     unsigned char *out = out_;
     size_t local_bucket_start = get_local_bucket_start(world_rank);
     size_t num_local_buckets =
         get_local_bucket_start(world_rank + 1) - local_bucket_start;
-    size_t local_start = local_bucket_start * BUCKET_SIZE;
     int ret;
 
     mpi_tls_request_t requests[world_size];
     size_t request_idxs[world_size];
 
     if (world_size == 1) {
-        memcpy(out, arr,
-                num_local_buckets * BUCKET_SIZE * SIZEOF_ENCRYPTED_NODE);
+        memcpy(out, arr, num_local_buckets * BUCKET_SIZE * sizeof(*out));
         ret = 0;
         goto exit;
     }
@@ -567,43 +466,15 @@ static int distributed_bucket_route(void *arr, void *out_) {
         if (rank == world_rank) {
             /* Copy our own buckets to the output, if any. */
             for (size_t j = i; j < num_local_buckets; j += world_size) {
-                elem_t *bucket =
-                    cache_load_elems(arr, j * BUCKET_SIZE, local_start);
-                if (!bucket) {
-                    handle_error_string("Error loading bucket %lu",
-                            j + local_bucket_start);
-                    goto exit_free_buf;
-                }
-
-                for (size_t k = 0; k < BUCKET_SIZE; k++) {
-                    ret =
-                        elem_encrypt(key, &bucket[k],
-                                out + (request_idxs[rank] * BUCKET_SIZE + k) * SIZEOF_ENCRYPTED_NODE,
-                                request_idxs[rank] * BUCKET_SIZE + k + local_start);
-                    if (ret) {
-                        handle_error_string("Error encrypting elem %lu",
-                                request_idxs[rank] * BUCKET_SIZE + k);
-                        cache_free_elems(bucket);
-                        goto exit_free_buf;
-                    }
-                }
+                memcpy(out + request_idxs[rank] * BUCKET_SIZE,
+                        arr + j * BUCKET_SIZE, BUCKET_SIZE * sizeof(*out));
                 request_idxs[rank]++;
-
-                cache_free_elems(bucket);
             }
         } else {
             /* Post a send request to the remote rank containing the first
              * bucket. */
             request_idxs[rank] = i;
-            elem_t *bucket =
-                cache_load_elems(arr, request_idxs[rank] * BUCKET_SIZE,
-                        local_start);
-            if (!bucket) {
-                handle_error_string("Error loading bucket %lu",
-                        request_idxs[rank] + local_bucket_start);
-                ret = -1;
-                goto exit_free_buf;
-            }
+            elem_t *bucket = arr + request_idxs[rank] * BUCKET_SIZE;
 
             ret = mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
                     rank, BUCKET_DISTRIBUTE_MPI_TAG, &requests[rank]);
@@ -611,12 +482,9 @@ static int distributed_bucket_route(void *arr, void *out_) {
                 handle_error_string("Error sending bucket %lu to %d from %d",
                         request_idxs[rank] + local_bucket_start, rank,
                         world_rank);
-                cache_free_elems(bucket);
                 goto exit_free_buf;
             }
             num_requests++;
-
-            cache_free_elems(bucket);
         }
     }
 
@@ -644,17 +512,8 @@ static int distributed_bucket_route(void *arr, void *out_) {
             /* This was the receive request. */
 
             /* Write the received bucket out. */
-            for (size_t i = 0; i < BUCKET_SIZE; i++) {
-                ret =
-                    elem_encrypt(key, &buf[i],
-                            out + (request_idxs[index] * BUCKET_SIZE + i) * SIZEOF_ENCRYPTED_NODE,
-                            request_idxs[index] * BUCKET_SIZE + i + local_start);
-                if (ret) {
-                    handle_error_string("Error encrypting elem %lu",
-                            request_idxs[index] * BUCKET_SIZE + i);
-                    goto exit_free_buf;
-                }
-            }
+            memcpy(out + request_idxs[index] * BUCKET_SIZE, buf,
+                    BUCKET_SIZE * sizeof(*out));
             request_idxs[index]++;
 
             if (request_idxs[index] < num_local_buckets) {
@@ -679,14 +538,7 @@ static int distributed_bucket_route(void *arr, void *out_) {
             request_idxs[index] += world_size;
 
             if (request_idxs[index] < num_local_buckets) {
-                elem_t *bucket =
-                    cache_load_elems(arr, request_idxs[index] * BUCKET_SIZE,
-                            local_start);
-                if (!bucket) {
-                    handle_error_string("Error loading bucket %lu",
-                            request_idxs[index] + local_bucket_start);
-                    goto exit;
-                }
+                elem_t *bucket = arr + request_idxs[index] * BUCKET_SIZE;
 
                 ret =
                     mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
@@ -696,11 +548,8 @@ static int distributed_bucket_route(void *arr, void *out_) {
                             "Error sending bucket %lu from %d to %d",
                             request_idxs[index] + local_bucket_start,
                             world_rank, (int) index);
-                    cache_free_elems(bucket);
                     goto exit_free_buf;
                 }
-
-                cache_free_elems(bucket);
             } else {
                 /* Nullify the sending request. */
                 requests[index].type = MPI_TLS_NULL;
@@ -732,65 +581,50 @@ static int permute_comparator(const void *a_, const void *b_,
  * *COMPRESS_IDX is incremented. The elems receive new random ORP IDs. The first
  * element is assumed to have START_IDX for the purposes of decryption. */
 struct permute_and_compress_args {
-    const void *arr;
-    void *out;
+    elem_t *arr;
+    elem_t *out;
     size_t start_idx;
     size_t *compress_idx;
     int ret;
 };
 static void permute_and_compress(void *args_, size_t bucket_idx) {
     struct permute_and_compress_args *args = args_;
-    const unsigned char *arr = args->arr;
-    unsigned char *out = args->out;
     int ret;
 
-    /* Decrypt elems from bucket to buffer. */
-    for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        size_t i_idx = bucket_idx * BUCKET_SIZE + i + args->start_idx;
+    o_sort(args->arr + bucket_idx * BUCKET_SIZE, BUCKET_SIZE,
+            sizeof(*args->arr), permute_comparator, NULL);
 
-        ret = elem_decrypt(key, buffer + i,
-                arr + (bucket_idx * BUCKET_SIZE + i) * SIZEOF_ENCRYPTED_NODE,
-                i_idx);
-        if (ret) {
-            handle_error_string("Error decrypting elem %lu", i_idx);
-            goto exit;
-        }
-    }
-
-    o_sort(buffer, BUCKET_SIZE, sizeof(*buffer), permute_comparator, NULL);
-
-    /* Assign random ORP IDs and encrypt elems from buffer to compressed
-     * array. */
+    /* Assign random ORP IDs and Count real elements. */
+    size_t num_real_elems = 0;
     for (size_t i = 0; i < BUCKET_SIZE; i++) {
         /* If this is a dummy element, break out of the loop. All real elements
          * are sorted before the dummy elements at this point. This
          * non-oblivious comparison is fine since it's fine to leak how many
          * elements end up in each bucket. */
-        if (buffer[i].is_dummy) {
+        if (args->arr[bucket_idx * BUCKET_SIZE + i].is_dummy) {
+            num_real_elems = i;
             break;
         }
 
-        /* Fetch the next index to encrypt. */
-        size_t out_idx =
-            __atomic_fetch_add(args->compress_idx, 1, __ATOMIC_RELAXED);
-
         /* Assign random ORP ID. */
-        ret = rand_read(&buffer[i].orp_id, sizeof(buffer[i].orp_id));
+        ret =
+            rand_read(&args->arr[bucket_idx * BUCKET_SIZE + i].orp_id,
+                    sizeof(buffer[i].orp_id));
         if (ret) {
             handle_error_string("Error assigning random ID to %lu",
-                    out_idx + args->start_idx);
-            goto exit;
-        }
-
-        /* Encrypt. */
-        ret = elem_encrypt(key, buffer + i,
-                out + out_idx * SIZEOF_ENCRYPTED_NODE,
-                out_idx + args->start_idx);
-        if (ret) {
-            handle_error_string("Error encrypting elem");
+                    bucket_idx * BUCKET_SIZE + args->start_idx);
             goto exit;
         }
     }
+
+    /* Fetch the next index to copy to. */
+    size_t out_idx =
+        __atomic_fetch_add(args->compress_idx, num_real_elems,
+                __ATOMIC_RELAXED);
+
+    /* Copy the elements to the output. */
+    memcpy(args->out + out_idx, args->arr + bucket_idx * BUCKET_SIZE,
+            num_real_elems * sizeof(*args->out));
 
 exit:
     if (ret) {
@@ -800,16 +634,8 @@ exit:
     }
 }
 
-int bucket_sort(void *arr, size_t length, size_t num_threads) {
+int bucket_sort(elem_t *arr, size_t length, size_t num_threads UNUSED) {
     int ret;
-
-    if (num_threads * 2 > CACHE_ASSOCIATIVITY) {
-        handle_error_string(
-                "Too many threads for the current associativity; max is %d\n",
-                CACHE_ASSOCIATIVITY / 2);
-        ret = -1;
-        goto exit;
-    }
 
     total_length = length;
 
@@ -822,21 +648,14 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     size_t local_start = local_bucket_start * BUCKET_SIZE;
     size_t local_length = num_local_buckets * BUCKET_SIZE;
 
-    unsigned char *buf = arr + local_length * SIZEOF_ENCRYPTED_NODE;
-
-    /* Initialize cache. */
-    ret = cache_init();
-    if (ret) {
-        handle_error_string("Error initializing cache");
-        goto exit;
-    }
+    elem_t *buf = arr + local_length;
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_start;
     if (clock_gettime(CLOCK_REALTIME, &time_start)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit_free_cache;
+        goto exit;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
@@ -846,7 +665,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     if (ret) {
         handle_error_string("Error assigning random IDs to elems");
         ret = errno;
-        goto exit_free_cache;
+        goto exit;
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
@@ -854,7 +673,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     if (clock_gettime(CLOCK_REALTIME, &time_assign_ids)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit_free_cache;
+        goto exit;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
@@ -883,7 +702,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     if (clock_gettime(CLOCK_REALTIME, &time_merge_split)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit_free_cache;
+        goto exit;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
@@ -913,7 +732,7 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
         ret = args.ret;
         if (ret) {
             handle_error_string("Error permuting buckets");
-            goto exit_free_cache;
+            goto exit;
         }
     }
 
@@ -922,14 +741,14 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     if (clock_gettime(CLOCK_REALTIME, &time_compress)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit_free_cache;
+        goto exit;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     ret = nonoblivious_sort(arr, length, compress_len, local_start);
     if (ret) {
         handle_error_string("Error in nonoblivious sort");
-        goto exit_free_cache;
+        goto exit;
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
@@ -943,14 +762,6 @@ int bucket_sort(void *arr, size_t length, size_t num_threads) {
     }
 #endif
 
-#ifdef DISTRIBUTED_SGX_SORT_CACHE_COUNTER
-    printf("[cache] Hits: %d\n", cache_hits);
-    printf("[cache] Misses: %d\n", cache_misses);
-    printf("[cache] Evictions: %d\n", cache_evictions);
-#endif /* DISTRIBUTED_SGX_SORT_CACHE_COUNTER */
-
-exit_free_cache:
-    cache_free();
 exit:
     return ret;
 }

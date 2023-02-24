@@ -28,79 +28,32 @@ static int mergesort_comparator(const void *a_, const void *b_) {
     return (comp_key << 1) + comp_orp_id;
 }
 
-/* Decrypt and sort ARR[RUN_IDX * BUF_SIZE] to ARR[MIN((RUN_IDX + 1), LENGTH)],
- * where ARR[0] is encrypted with index START_IDX. The results will be stored in
- * the same location as the inputs. */
+/* Sort ARR[RUN_IDX * BUF_SIZE] to ARR[MIN((RUN_IDX + 1), LENGTH)]. The results
+ * will be stored in the same * location as the inputs. */
 struct mergesort_first_pass_args {
-    void *arr;
+    elem_t *arr;
     size_t length;
-    size_t start_idx;
-    int ret;
 };
 static void mergesort_first_pass(void *args_, size_t run_idx) {
     struct mergesort_first_pass_args *args = args_;
-    unsigned char *arr = args->arr;
-    int ret;
 
     size_t run_start = run_idx * BUF_SIZE;
     size_t run_length = MIN(args->length - run_start, BUF_SIZE);
 
-    /* Allocate mergesort buffer. */
-    elem_t *buffer = malloc(BUF_SIZE * sizeof(*buffer));
-    if (!buffer) {
-        perror("malloc mergesort buffer");
-        ret = errno;
-        goto exit;
-    }
-
-    /* Decrypt elems. */
-    for (size_t j = 0; j < run_length; j++) {
-        ret = elem_decrypt(key, &buffer[j],
-                arr + (run_start + j) * SIZEOF_ENCRYPTED_NODE,
-                run_start + j + args->start_idx);
-        if (ret) {
-            handle_error_string("Error decrypting elem %lu",
-                    run_start + j + args->start_idx);
-            goto exit_free_buffer;
-        }
-    }
-
     /* Sort using libc quicksort. */
-    qsort(buffer, run_length, sizeof(*buffer), mergesort_comparator);
-
-    /* Encrypt elems. */
-    for (size_t j = 0; j < run_length; j++) {
-        ret = elem_encrypt(key, &buffer[j],
-                arr + (run_start + j) * SIZEOF_ENCRYPTED_NODE,
-                run_start + j + args->start_idx);
-        if (ret) {
-            handle_error_string("Error encrypting elem %lu",
-                    run_start + j + args->start_idx);
-            goto exit_free_buffer;
-        }
-    }
-
-exit_free_buffer:
-    free(buffer);
-exit:
-    if (ret) {
-        __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
-                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-    }
-    ;
+    qsort(args->arr + run_start, run_length, sizeof(*args->arr),
+            mergesort_comparator);
 }
 
-/* Decrypt and merge each BUF_SIZE runs of length RUN_LENGTH starting at element
+/* Merge each BUF_SIZE runs of length RUN_LENGTH starting at element
  * ARR[RUN_IDX * RUN_LENGTH * BUF_SIZE] and writing them to a single run of
  * length RUN_LENGTH * BUF_SIZE at OUT[RUN_IDX * RUN_LENGTH * BUF_SIZE]. If
  * LENGTH - RUN_IDX * RUN_LENGTH * BUF_SIZE is less than RUN_LENGTH * BUF_SIZE,
- * then the number of runs is reduced, and the last run is truncated. Both
- * ARR[0] and OUT[0] are encrypted with index START_IDX. */
+ * then the number of runs is reduced, and the last run is truncated. */
 struct mergesort_pass_args {
-    void *input;
-    void *output;
+    elem_t *input;
+    elem_t *output;
     size_t length;
-    size_t start_idx;
     size_t run_length;
     int ret;
 };
@@ -113,103 +66,58 @@ static void mergesort_pass(void *args_, size_t run_idx) {
     size_t num_runs =
         MIN(CEIL_DIV(args->length - run_start, args->run_length), BUF_SIZE);
 
-    /* Allocate mergesort buffer. */
-    elem_t *buffer = malloc(BUF_SIZE * sizeof(*buffer));
-    if (!buffer) {
-        perror("malloc mergesort buffer");
-        ret = errno;
-        goto exit;
-    }
-
     /* Create index buffer. */
     size_t *merge_indices = malloc(num_runs * sizeof(*merge_indices));
     if (!merge_indices) {
         perror("Allocate merge index buffer");
         ret = errno;
-        goto exit_free_buffer;
+        goto exit;
     }
     memset(merge_indices, '\0', num_runs * sizeof(*merge_indices));
-
-    /* Read in the first (smallest) element from run j into
-     * buffer[j]. The runs start at element i. */
-    for (size_t j = 0; j < num_runs; j++) {
-        ret = elem_decrypt(key, &buffer[j],
-                args->input
-                    + (run_start + j * args->run_length)
-                        * SIZEOF_ENCRYPTED_NODE,
-                run_start + j * args->run_length + args->start_idx);
-        if (ret) {
-            handle_error_string("Error decrypting elem %lu",
-                    run_start + j * args->run_length + args->start_idx);
-            goto exit_free_merge_indices;
-        }
-    }
 
     /* Merge the runs in the buffer and encrypt to the output array.
      * Nodes for which we have reach the end of the array are marked as
      * a dummy element, so we continue until all elems in buffer are
      * dummy elems. */
     size_t output_idx = 0;
-    bool all_dummy;
+    bool all_done;
     do {
         /* Scan for lowest elem. */
         // TODO Use a heap?
         size_t lowest_run;
-        all_dummy = true;
+        size_t lowest_idx;
+        all_done = true;
         for (size_t j = 0; j < num_runs; j++) {
-            if (buffer[j].is_dummy) {
+            size_t run_idx = j * args->run_length + merge_indices[j];
+
+            if (merge_indices[j] >= args->run_length
+                    || run_start + run_idx >= args->length) {
                 continue;
             }
-            if (all_dummy
-                    || mergesort_comparator(&buffer[j],
-                        &buffer[lowest_run]) < 0) {
+            if (all_done
+                    || mergesort_comparator(&args->input[run_start + run_idx],
+                        &args->input[run_start + lowest_idx]) < 0) {
                 lowest_run = j;
+                lowest_idx = run_idx;
             }
-            all_dummy = false;
+            all_done = false;
         }
 
-        /* Break out of loop if all elems were dummy. */
-        if (all_dummy) {
+        /* Break out of loop if all done. */
+        if (all_done) {
             continue;
         }
 
-        /* Encrypt lowest elem to output. */
-        ret = elem_encrypt(key, &buffer[lowest_run],
-                args->output + (run_start + output_idx) * SIZEOF_ENCRYPTED_NODE,
-                run_start + output_idx + args->start_idx);
+        /* Copy lowest elem to output. */
+        memcpy(&args->output[run_start + output_idx],
+                &args->input[run_start + lowest_idx], sizeof(*args->input));
         merge_indices[lowest_run]++;
         output_idx++;
+    } while (!all_done);
 
-        /* Check if we have reached the end of the run. */
-        if (merge_indices[lowest_run] >= args->run_length
-                || run_start + lowest_run * args->run_length
-                    + merge_indices[lowest_run] >= args->length) {
-            /* Reached the end, so mark the elem as dummy so that we
-             * ignore it. */
-            buffer[lowest_run].is_dummy = true;
-        } else {
-            /* Not yet reached the end, so read the next elem in the
-             * input run. */
-            ret = elem_decrypt(key, &buffer[lowest_run],
-                    args->input
-                        + (run_start + lowest_run * args->run_length +
-                                merge_indices[lowest_run])
-                            * SIZEOF_ENCRYPTED_NODE,
-                    run_start + lowest_run * args->run_length
-                        + merge_indices[lowest_run] + args->start_idx);
-            if (ret) {
-                handle_error_string("Error decrypting elem %lu",
-                        run_start + lowest_run * args->run_length
-                            + merge_indices[lowest_run] + args->start_idx);
-                goto exit_free_merge_indices;
-            }
-        }
-    } while (!all_dummy);
+    ret = 0;
 
-exit_free_merge_indices:
     free(merge_indices);
-exit_free_buffer:
-    free(buffer);
 exit:
     if (ret) {
         __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
@@ -218,18 +126,14 @@ exit:
     ;
 }
 
-/* Non-oblivious sort. Based on an external mergesort algorithm since decrypting
- * elems from host memory is expensive. */
-static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
-    unsigned char *arr = arr_;
-    unsigned char *out = out_;
+/* Non-oblivious sort. Based on an external mergesort algorithm. */
+static int mergesort(elem_t *arr, elem_t *out, size_t length) {
     int ret;
 
     /* Start by sorting runs of BUF_SIZE. */
     struct mergesort_first_pass_args args = {
         .arr = arr,
         .length = length,
-        .start_idx = start_idx,
     };
     struct thread_work work = {
         .type = THREAD_WORK_ITER,
@@ -242,17 +146,12 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
     thread_work_push(&work);
     thread_work_until_empty();
     thread_wait(&work);
-    ret = args.ret;
-    if (ret) {
-        handle_error_string("Error in first pass of mergesort");
-        goto exit;
-    }
 
     /* Merge runs of increasing length in a BUF_SIZE-way merge by reading the
      * next smallest element of run i into buffer[i], then merging and
      * encrypting to the output buffer. */
-    unsigned char *input = arr;
-    unsigned char *output = out;
+    elem_t *input = arr;
+    elem_t *output = out;
     for (size_t run_length = BUF_SIZE; run_length < length;
             run_length *= BUF_SIZE) {
         /* BUF_SIZE-way merge. */
@@ -260,7 +159,6 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
             .input = input,
             .output = output,
             .length = length,
-            .start_idx = start_idx,
             .run_length = run_length,
         };
         struct thread_work work = {
@@ -282,7 +180,7 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
         }
 
         /* Swap the input and output arrays. */
-        unsigned char *temp = input;
+        elem_t *temp = input;
         input = output;
         output = temp;
     }
@@ -290,7 +188,7 @@ static int mergesort(void *arr_, void *out_, size_t length, size_t start_idx) {
     /* If the final merging output (now the input since it would have been
      * swapped) isn't the output parameter, copy to the right place. */
     if (input != out) {
-        memcpy(out, input, length * SIZEOF_ENCRYPTED_NODE);
+        memcpy(out, input, length * sizeof(*out));
     }
 
     ret = 0;
@@ -310,7 +208,7 @@ static int elem_sample_comparator(const elem_t *a, const struct sample *b) {
     return (comp_key << 1) + comp_orp_id;
 }
 
-static int distributed_quickselect_helper(void *arr, size_t local_length,
+static int distributed_quickselect_helper(elem_t *arr, size_t local_length,
         size_t local_start, size_t *targets, struct sample *samples,
         size_t *sample_idxs, size_t num_targets, size_t left, size_t right) {
     int ret;
@@ -365,21 +263,12 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     }
 
     /* Get pivot. */
-    elem_t pivot_elem;
     struct sample pivot;
     if (world_rank == master_rank) {
         /* Use first elem as pivot. This is a random selection since this
          * samplesort should happen after ORP. */
-        ret =
-            elem_decrypt(key, &pivot_elem, arr + left * SIZEOF_ENCRYPTED_NODE,
-                    left + local_start);
-        if (ret) {
-            handle_error_string("Error decrypting elem %lu",
-                    left + local_start);
-            goto exit;
-        }
-        pivot.key = pivot_elem.key;
-        pivot.orp_id = pivot_elem.orp_id;
+        pivot.key = arr[left].key;
+        pivot.orp_id = arr[left].orp_id;
 
         /* Send pivot to all other elems. */
         for (int i = 0; i < world_size; i++) {
@@ -408,8 +297,6 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
 
     /* Partition data based on pivot. */
     // TODO It's possible to do this in-place.
-    elem_t left_elem;
-    elem_t right_elem;
     size_t partition_left = left + (world_rank == master_rank);
     size_t partition_right = right;
     enum {
@@ -419,19 +306,9 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     while (partition_left < partition_right) {
         switch (partition_state) {
         case PARTITION_SCAN_LEFT:
-            /* Scan left for elements greater than the pivot. */
-            ret =
-                elem_decrypt(key, &left_elem,
-                    arr + partition_left * SIZEOF_ENCRYPTED_NODE,
-                    partition_left + local_start);
-            if (ret) {
-                handle_error_string("Error decrypting elem %lu",
-                        partition_left + local_start);
-                goto exit;
-            }
-
-            /* If found, start scanning right. */
-            if (elem_sample_comparator(&left_elem, &pivot) > 0) {
+            /* Scan left for elements greater than the pivot. If found, start
+             * scanning right. */
+            if (elem_sample_comparator(&arr[partition_left], &pivot) > 0) {
                 partition_state = PARTITION_SCAN_RIGHT;
             } else {
                 partition_left++;
@@ -441,36 +318,14 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
 
         case PARTITION_SCAN_RIGHT:
             /* Scan right for elements less than the pivot. */
-            ret =
-                elem_decrypt(key, &right_elem,
-                    arr + (partition_right - 1) * SIZEOF_ENCRYPTED_NODE,
-                    partition_right - 1 + local_start);
-            if (ret) {
-                handle_error_string("Error decrypting elem %lu",
-                        partition_right - 1 + local_start);
-                goto exit;
-            }
 
             /* If found, swap and start scanning left. */
-            if (elem_sample_comparator(&right_elem, &pivot) < 0) {
-                ret =
-                    elem_encrypt(key, &left_elem,
-                            arr + (partition_right - 1) * SIZEOF_ENCRYPTED_NODE,
-                            partition_right - 1 + local_start);
-                if (ret) {
-                    handle_error_string("Error encrypting elem %lu",
-                            partition_right - 1 + local_start);
-                    goto exit;
-                }
-                ret =
-                    elem_encrypt(key, &right_elem,
-                            arr + partition_left * SIZEOF_ENCRYPTED_NODE,
-                            partition_left + local_start);
-                if (ret) {
-                    handle_error_string("Error encrypting elem %lu",
-                            partition_left + local_start);
-                    goto exit;
-                }
+            if (elem_sample_comparator(&arr[partition_right - 1], &pivot) < 0) {
+                elem_t temp;
+                memcpy(&temp, &arr[partition_right - 1], sizeof(temp));
+                memcpy(&arr[partition_right - 1], &arr[partition_left],
+                        sizeof(*arr));
+                memcpy(&arr[partition_left], &temp, sizeof(*arr));
 
                 partition_state = PARTITION_SCAN_LEFT;
                 partition_left++;
@@ -486,32 +341,11 @@ static int distributed_quickselect_helper(void *arr, size_t local_length,
     /* Finish partitioning by swapping the pivot into the center, if we are the
      * master. */
     if (world_rank == master_rank) {
-        elem_t elem;
-        ret = elem_decrypt(key, &elem,
-                arr + (partition_right - 1) * SIZEOF_ENCRYPTED_NODE,
-                partition_right - 1 + local_start);
-        if (ret) {
-            handle_error_string("Error decrypting elem %lu",
-                    partition_right - 1 + local_start);
-            goto exit;
-        }
-        ret =
-            elem_encrypt(key, &elem, arr + left * SIZEOF_ENCRYPTED_NODE,
-                    left + local_start);
-        if (ret) {
-            handle_error_string("Error encrypting elem %lu",
-                    left + local_start);
-            goto exit;
-        }
-        ret =
-            elem_encrypt(key, &pivot_elem,
-                    arr + (partition_right - 1) * SIZEOF_ENCRYPTED_NODE,
-                    partition_right - 1 + local_start);
-        if (ret) {
-            handle_error_string("Error encrypting elem %lu",
-                    partition_right - 1 + local_start);
-            goto exit;
-        }
+        elem_t temp;
+        memcpy(&temp, &arr[partition_right - 1], sizeof(temp));
+        memcpy(&arr[partition_right - 1], &arr[left], sizeof(*arr));
+        memcpy(&arr[left], &temp, sizeof(*arr));
+
         partition_right--;
     }
 
@@ -620,7 +454,7 @@ exit:
  * elements in the local, with the first element encrypted with index
  * LOCAL_START. Resulting samples are stored in SAMPLES. TARGETS must be a
  * sorted array. */
-static int distributed_quickselect(void *arr, size_t local_length,
+static int distributed_quickselect(elem_t *arr, size_t local_length,
         size_t local_start, size_t *targets, struct sample *samples,
         size_t *sample_idxs, size_t num_targets) {
     int ret =
@@ -636,17 +470,15 @@ exit:
 }
 
 /* Performs a non-oblivious samplesort across all enclaves. */
-static int distributed_sample_partition(void *arr_, void *out_,
+static int distributed_sample_partition(elem_t *arr, elem_t *out,
         size_t local_length, size_t local_start, size_t total_length) {
-    unsigned char *arr = arr_;
-    unsigned char *out = out_;
     size_t src_local_start = total_length * world_rank / world_size;
     size_t src_local_length =
         total_length * (world_rank + 1) / world_size - src_local_start;
     int ret;
 
     if (world_size == 1) {
-        memcpy(out, arr, total_length * SIZEOF_ENCRYPTED_NODE);
+        memcpy(out, arr, total_length * sizeof(*out));
         return 0;
     }
 
@@ -676,40 +508,11 @@ static int distributed_sample_partition(void *arr_, void *out_,
     /* Send elements to their corresponding enclaves. The elements in the array
      * should already be partitioned. */
 
-    /* Allocate buffer for decrypted partitions. */
-    elem_t (*partition_buf)[SAMPLE_PARTITION_BUF_SIZE] =
-        malloc(world_size * sizeof(*partition_buf));
-    if (!partition_buf) {
-        perror("malloc partition send buffer");
-        ret = errno;
-        goto exit;
-    }
-
     /* Copy own partition's elements to the output. */
     size_t num_received =
         sample_idxs[world_rank] - sample_scan_idxs[world_rank];
-    for (size_t i = 0; i < num_received; i++) {
-        elem_t elem;
-        ret =
-            elem_decrypt(key, &elem,
-                    arr
-                        + (sample_scan_idxs[world_rank] + i)
-                            * SIZEOF_ENCRYPTED_NODE,
-                    sample_scan_idxs[world_rank] + i + local_start);
-        if (ret) {
-            handle_error_string("Error decrypting elem %lu",
-                    sample_scan_idxs[world_rank] + i + local_start);
-            goto exit_free_buf;
-        }
-        ret =
-            elem_encrypt(key, &elem, out + i * SIZEOF_ENCRYPTED_NODE,
-                    i + src_local_start);
-        if (ret) {
-            handle_error_string("Error encrypting elem %lu",
-                    i + src_local_start);
-            goto exit_free_buf;
-        }
-    }
+    memcpy(out, arr + sample_scan_idxs[world_rank],
+            num_received * sizeof(*out));
     sample_scan_idxs[world_rank] = sample_idxs[world_rank];
 
     /* Construct initial requests. REQUESTS is used for all send requests except
@@ -720,13 +523,12 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 MIN(src_local_length - num_received, SAMPLE_PARTITION_BUF_SIZE);
             if (elems_to_recv > 0) {
                 ret =
-                    mpi_tls_irecv_bytes(&partition_buf[i],
-                            elems_to_recv * sizeof(*partition_buf[i]),
-                            MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
-                            &requests[i]);
+                    mpi_tls_irecv_bytes(out + num_received,
+                            elems_to_recv * sizeof(*out), MPI_TLS_ANY_SOURCE,
+                            SAMPLE_PARTITION_MPI_TAG, &requests[i]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
-                    goto exit_free_buf;
+                    goto exit;
                 }
             } else {
                 requests[i].type = MPI_TLS_NULL;
@@ -734,34 +536,20 @@ static int distributed_sample_partition(void *arr_, void *out_,
             }
         } else {
             if (sample_scan_idxs[i] < sample_idxs[i]) {
-                /* Decrypt elems. */
                 size_t elems_to_send =
                     MIN(sample_idxs[i] - sample_scan_idxs[i],
                             SAMPLE_PARTITION_BUF_SIZE);
-                for (size_t j = 0; j < elems_to_send; j++) {
-                    ret =
-                        elem_decrypt(key, &partition_buf[i][j],
-                                arr
-                                    + (sample_scan_idxs[i] + j)
-                                        * SIZEOF_ENCRYPTED_NODE,
-                                sample_scan_idxs[i] + j + local_start);
-                    if (ret) {
-                        handle_error_string("Error decrypting elem %lu",
-                                sample_scan_idxs[i] + j);
-                        goto exit_free_buf;
-                    }
-                }
-                sample_scan_idxs[i] += elems_to_send;
 
                 /* Asynchronously send to enclave. */
                 ret =
-                    mpi_tls_isend_bytes(&partition_buf[i],
-                            elems_to_send * sizeof(*partition_buf[i]), i,
+                    mpi_tls_isend_bytes(arr + sample_scan_idxs[i],
+                            elems_to_send * sizeof(*arr), i,
                             SAMPLE_PARTITION_MPI_TAG, &requests[i]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
-                    goto exit_free_buf;
+                    goto exit;
                 }
+                sample_scan_idxs[i] += elems_to_send;
             } else {
                 requests[i].type = MPI_TLS_NULL;
                 requests_len--;
@@ -776,24 +564,12 @@ static int distributed_sample_partition(void *arr_, void *out_,
         ret = mpi_tls_waitany(world_size, requests, &index, &status);
         if (ret) {
             handle_error_string("Error waiting on partition requests");
-            goto exit_free_buf;
+            goto exit;
         }
         bool keep_rank;
         if (index == (size_t) world_rank) {
             /* Receive request completed. */
-            size_t req_num_received =
-                status.count / sizeof(*partition_buf[world_rank]);
-            for (size_t i = 0; i < req_num_received; i++) {
-                ret =
-                    elem_encrypt(key, &partition_buf[world_rank][i],
-                            out + (num_received + i) * SIZEOF_ENCRYPTED_NODE,
-                            num_received + i + src_local_start);
-                if (ret) {
-                    handle_error_string("Error encrypting elem %lu",
-                            num_received + src_local_start);
-                    goto exit_free_buf;
-                }
-            }
+            size_t req_num_received = status.count / sizeof(*out);
             num_received += req_num_received;
 
             size_t elems_to_recv =
@@ -801,13 +577,12 @@ static int distributed_sample_partition(void *arr_, void *out_,
             keep_rank = elems_to_recv > 0;
             if (keep_rank) {
                 ret =
-                    mpi_tls_irecv_bytes(&partition_buf[world_rank],
-                            elems_to_recv * sizeof(*partition_buf[world_rank]),
-                            MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
-                            &requests[index]);
+                    mpi_tls_irecv_bytes(out + num_received,
+                            elems_to_recv * sizeof(*out), MPI_TLS_ANY_SOURCE,
+                            SAMPLE_PARTITION_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
-                    goto exit_free_buf;
+                    goto exit;
                 }
             }
         } else {
@@ -817,38 +592,21 @@ static int distributed_sample_partition(void *arr_, void *out_,
                 sample_idxs[index] - sample_scan_idxs[index] > 0;
 
             if (keep_rank) {
-                /* Decrypt elems. */
                 size_t elems_to_send =
                     MIN(sample_idxs[index]
                                 - sample_scan_idxs[index],
                             SAMPLE_PARTITION_BUF_SIZE);
-                for (size_t i = 0; i < elems_to_send; i++) {
-                    ret =
-                        elem_decrypt(key, &partition_buf[index][i],
-                                arr +
-                                    (sample_scan_idxs[index] + i)
-                                        * SIZEOF_ENCRYPTED_NODE,
-                                sample_scan_idxs[index]
-                                    + i + local_start);
-                    if (ret) {
-                        handle_error_string("Error decrypting elem %lu",
-                                sample_scan_idxs[index] + i
-                                    + local_start);
-                        goto exit_free_buf;
-                    }
-                }
-                sample_scan_idxs[index] += elems_to_send;
 
                 /* Asynchronously send to enclave. */
                 ret =
-                    mpi_tls_isend_bytes(&partition_buf[index],
-                            elems_to_send
-                                * sizeof(*partition_buf[index]),
-                            index, SAMPLE_PARTITION_MPI_TAG, &requests[index]);
+                    mpi_tls_isend_bytes(arr + sample_scan_idxs[index],
+                            elems_to_send * sizeof(*arr), index,
+                            SAMPLE_PARTITION_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
-                    goto exit_free_buf;
+                    goto exit;
                 }
+                sample_scan_idxs[index] += elems_to_send;
             }
         }
 
@@ -861,19 +619,16 @@ static int distributed_sample_partition(void *arr_, void *out_,
 
     assert(num_received == src_local_length);
 
-exit_free_buf:
-    free(partition_buf);
 exit:
     return ret;
 }
 
-int nonoblivious_sort(void *arr_, size_t length, size_t local_length,
+int nonoblivious_sort(elem_t *arr, size_t length, size_t local_length,
         size_t local_start) {
     size_t src_local_start = length * world_rank / world_size;
     size_t src_local_length =
         length * (world_rank + 1) / world_size - src_local_start;
-    unsigned char *arr = arr_;
-    unsigned char *buf = arr + local_length * SIZEOF_ENCRYPTED_NODE;
+    elem_t *buf = arr + local_length;
     int ret;
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
@@ -905,7 +660,7 @@ int nonoblivious_sort(void *arr_, size_t length, size_t local_length,
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Sort local partitions. */
-    ret = mergesort(buf, arr, src_local_length, src_local_start);
+    ret = mergesort(buf, arr, src_local_length);
     if (ret) {
         handle_error_string("Error in non-oblivious local sort");
         goto exit;

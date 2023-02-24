@@ -12,11 +12,12 @@
 #include "common/defs.h"
 #include "common/error.h"
 #include "common/util.h"
-#include "enclave/cache.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/nonoblivious.h"
 #include "enclave/parallel_enc.h"
 #include "enclave/threading.h"
+
+#define SWAP_CHUNK_SIZE 4096
 
 static size_t total_length;
 
@@ -25,7 +26,7 @@ static thread_local elem_t *buffer;
 int orshuffle_init(void) {
     int ret;
 
-    buffer = malloc(CACHE_LINESIZE * sizeof(*buffer));
+    buffer = malloc(SWAP_CHUNK_SIZE * sizeof(*buffer));
     if (!buffer) {
         perror("malloc buffer");
         ret = errno;
@@ -74,113 +75,7 @@ exit:
 
 /* Swapping. */
 
-static void compact_cache_line_offset(elem_t *arr, size_t length,
-        size_t offset) {
-    if (length == 2) {
-        o_memswap(&arr[0], &arr[1], sizeof(*arr),
-                (!arr[0].marked & arr[1].marked) != offset);
-        return;
-    }
-
-    size_t left_marked_count =
-        arr[length / 2 - 1].marked_prefix_sum
-            - arr[0].marked_prefix_sum
-            + arr[0].marked;
-
-    compact_cache_line_offset(arr, length / 2, offset % (length / 2));
-    compact_cache_line_offset(arr + length / 2, length / 2,
-            (offset + left_marked_count) % (length / 2));
-
-    bool s =
-        (offset % (length / 2) + left_marked_count >= length / 2) != (offset >= length / 2);
-    for (size_t i = 0; i < length / 2; i++) {
-        bool cond = s != (i >= (offset + left_marked_count) % (length / 2));
-        o_memswap(&arr[i], &arr[i + length / 2], sizeof(*arr), cond);
-    }
-}
-
-static int compact_cache_line(void *arr, size_t start, size_t length,
-        size_t offset) {
-    size_t local_start = get_local_start(world_rank);
-    int ret;
-
-    if ((start - local_start) / CACHE_LINESIZE !=
-            (start + length - 1 - local_start) / CACHE_LINESIZE) {
-        handle_error_string("Call to compact_cache_line spans multiple lines");
-        ret = -1;
-        goto exit;
-    }
-
-    elem_t *elems =
-        cache_load_elems(arr, ROUND_DOWN(start - local_start, CACHE_LINESIZE),
-                local_start);
-    if (!elems) {
-        handle_error_string("Error fetching elems");
-        ret = -1;
-        goto exit;
-    }
-
-    compact_cache_line_offset(elems + (start - local_start) % CACHE_LINESIZE,
-            length, offset);
-
-    cache_free_elems(elems);
-
-    ret = 0;
-
-exit:
-    return ret;
-}
-
-static void shuffle_cache_line_helper(elem_t *arr, size_t length) {
-    if (length < 2) {
-        return;
-    }
-
-    size_t total_left = length;
-    size_t num_to_mark = length / 2;
-    size_t marked_so_far = 0;
-    for (size_t i = 0; i < length; i++) {
-        should_mark(num_to_mark - marked_so_far, total_left, &arr[i].marked);
-        total_left--;
-        marked_so_far += arr[i].marked;
-        arr[i].marked_prefix_sum = marked_so_far;
-    }
-
-    compact_cache_line_offset(arr, length, 0);
-}
-
-static int shuffle_cache_line(void *arr, size_t start, size_t length) {
-    size_t local_start = get_local_start(world_rank);
-    int ret;
-
-    if ((start - local_start) / CACHE_LINESIZE !=
-            (start + length - 1 - local_start) / CACHE_LINESIZE) {
-        handle_error_string("Call to shuffle_cache_line spans multiple lines");
-        ret = -1;
-        goto exit;
-    }
-
-    elem_t *elems =
-        cache_load_elems(arr, ROUND_DOWN(start - local_start, CACHE_LINESIZE),
-                local_start);
-    if (!elems) {
-        handle_error_string("Error fetching elems");
-        ret = -1;
-        goto exit;
-    }
-
-    shuffle_cache_line_helper(elems + (start - local_start) % CACHE_LINESIZE,
-            length);
-
-    cache_free_elems(elems);
-
-    ret = 0;
-
-exit:
-    return ret;
-}
-
-static int swap_local_range(void *arr, size_t length, size_t a, size_t b,
+static int swap_local_range(elem_t *arr, size_t length, size_t a, size_t b,
         size_t count, size_t offset, size_t left_marked_count) {
     size_t local_start = get_local_start(world_rank);
     int ret;
@@ -188,56 +83,18 @@ static int swap_local_range(void *arr, size_t length, size_t a, size_t b,
     bool s =
         (offset % (length / 2) + left_marked_count >= length / 2) != (offset >= length / 2);
 
-    while (count) {
-        /* Fetch both lines. */
-        elem_t *elems_a =
-            cache_load_elems(arr, ROUND_DOWN(a - local_start, CACHE_LINESIZE),
-                    local_start);
-        if (!elems_a) {
-            handle_error_string("Error fetching elems");
-            ret = -1;
-            goto exit;
-        }
-        elem_t *elems_b =
-            cache_load_elems(arr,
-                    ROUND_DOWN(b - local_start, CACHE_LINESIZE),
-                    local_start);
-        if (!elems_b) {
-            handle_error_string("Error fetching elems");
-            ret = -1;
-            cache_free_elems(elems_a);
-            goto exit;
-        }
-
-        /* Oblivious comparison and swap. */
-        size_t a_start_idx = (a - local_start) % CACHE_LINESIZE;
-        size_t b_start_idx = (b - local_start) % CACHE_LINESIZE;
-        size_t elems_to_swap =
-            MIN(count,
-                    MIN(CACHE_LINESIZE - a_start_idx,
-                        CACHE_LINESIZE - b_start_idx));
-        for (size_t i = 0; i < elems_to_swap; i++) {
-            bool cond = s != (a + i >= (offset + left_marked_count) % (length / 2));
-            o_memswap(&elems_a[a_start_idx + i], &elems_b[b_start_idx + i],
-                    sizeof(*elems_a), cond);
-        }
-
-        /* Free elems. */
-        cache_free_elems(elems_a);
-        cache_free_elems(elems_b);
-
-        a += elems_to_swap;
-        b += elems_to_swap;
-        count -= elems_to_swap;
+    for (size_t i = 0; i < count; i++) {
+        bool cond = s != (a + i >= (offset + left_marked_count) % (length / 2));
+        o_memswap(&arr[a + i - local_start], &arr[b + i - local_start],
+                sizeof(*arr), cond);
     }
 
     ret = 0;
 
-exit:
     return ret;
 }
 
-static int swap_remote_range(void *arr, size_t length, size_t local_idx,
+static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
         size_t remote_idx, size_t count, size_t offset,
         size_t left_marked_count) {
     size_t local_start = get_local_start(world_rank);
@@ -250,36 +107,24 @@ static int swap_remote_range(void *arr, size_t length, size_t local_idx,
     /* Swap elems in maximum chunk sizes of SWAP_CHUNK_SIZE and iterate until no
      * count is remaining. */
     while (count) {
-        size_t elems_to_swap = MIN(count, CACHE_LINESIZE);
+        size_t elems_to_swap = MIN(count, SWAP_CHUNK_SIZE);
 
-        /* Fetch local elems. */
-        elem_t *local_elems =
-            cache_load_elems(arr, local_idx - local_start, local_start);
-        if (!local_elems) {
-            handle_error_string("Error fetching local elems from %lu",
-                    local_idx);
-            ret = -1;
-            cache_free_elems(local_elems);
-            goto exit;
-        }
-
-        /* Post receive for remote elems to encrypted buffer. */
+        /* Post receive for remote elems to buffer. */
         mpi_tls_request_t request;
         ret = mpi_tls_irecv_bytes(buffer,
                 elems_to_swap * sizeof(*buffer), remote_rank, local_idx,
                 &request);
         if (ret) {
             handle_error_string("Error receiving elem bytes");
-            cache_free_elems(local_elems);
             goto exit;
         }
 
         /* Send local elems to the remote. */
-        ret = mpi_tls_send_bytes(local_elems,
-                elems_to_swap * sizeof(*local_elems), remote_rank, remote_idx);
+        ret =
+            mpi_tls_send_bytes(arr + local_idx - local_start,
+                    elems_to_swap * sizeof(*arr), remote_rank, remote_idx);
         if (ret) {
             handle_error_string("Error sending elem bytes");
-            cache_free_elems(local_elems);
             goto exit;
         }
 
@@ -287,7 +132,6 @@ static int swap_remote_range(void *arr, size_t length, size_t local_idx,
         ret = mpi_tls_wait(&request, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string("Error waiting on receive for elem bytes");
-            cache_free_elems(local_elems);
             goto exit;
         }
 
@@ -298,10 +142,9 @@ static int swap_remote_range(void *arr, size_t length, size_t local_idx,
          * If descending, everything is reversed. */
         for (size_t i = 0; i < elems_to_swap; i++) {
             bool cond = s != (local_idx + i >= (offset + left_marked_count) % (length / 2));
-            o_memcpy(&local_elems[i], &buffer[i], sizeof(*local_elems), cond);
+            o_memcpy(&arr[local_idx + i - local_start], &buffer[i],
+                    sizeof(*arr), cond);
         }
-
-        cache_free_elems(local_elems);
 
         /* Bump pointers, decrement count, and continue. */
         local_idx += elems_to_swap;
@@ -315,7 +158,7 @@ exit:
     return ret;
 }
 
-static int swap_range(void *arr, size_t length, size_t a_start, size_t b_start,
+static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start,
         size_t count, size_t offset, size_t left_marked_count) {
     // TODO Assumption: Only either a subset of range A is local, or a subset of
     // range B is local. For local-remote swaps, the subset of the remote range
@@ -349,7 +192,7 @@ static int swap_range(void *arr, size_t length, size_t a_start, size_t b_start,
 }
 
 struct compact_args {
-    void *arr;
+    elem_t *arr;
     size_t start;
     size_t length;
     size_t offset;
@@ -367,13 +210,6 @@ static void compact(void *args_) {
         goto exit;
     }
 
-    if (args->start >= local_start
-            && args->start + args->length <= local_start + local_length
-            && args->length <= CACHE_LINESIZE) {
-        ret = compact_cache_line(args->arr, args->start, args->length,
-                args->offset);
-        goto exit;
-    }
 
     /* Get number of elements in the left half that are marked. The elements
      * contains the prefix sums, so taking the final prefix sum minus the first
@@ -391,49 +227,24 @@ static void compact(void *args_) {
     if (world_rank == mid_rank) {
         /* Send the middle prefix sum to the master rank, since we have the
          * middle element. */
-        elem_t *elems =
-            cache_load_elems(args->arr,
-                    ROUND_DOWN(mid_idx - local_start, 512),
-                local_start);
-        if (!elems) {
-            handle_error_string("Error loading elems %lu",
-                    ROUND_DOWN(mid_idx - local_start, 512) + local_start);
-            ret = -1;
-            goto exit;
-        }
-
         if (world_rank == master_rank) {
             /* We are also the master, so set the local variable. */
-            mid_prefix_sum =
-                elems[(mid_idx - local_start) % CACHE_LINESIZE].marked_prefix_sum;
+            mid_prefix_sum = args->arr[mid_idx - local_start].marked_prefix_sum;
         } else {
             /* Send it to the master. */
             ret =
                 mpi_tls_send_bytes(
-                        &elems[(mid_idx - local_start) % CACHE_LINESIZE].marked_prefix_sum,
-                        sizeof(elems->marked_prefix_sum), master_rank, tag);
+                        &args->arr[mid_idx - local_start].marked_prefix_sum,
+                        sizeof(args->arr->marked_prefix_sum), master_rank, tag);
             if (ret) {
                 handle_error_string(
                         "Error sending prefix marked count for %lu from %d to %d",
                         mid_idx, world_rank, master_rank);
-                cache_free_elems(elems);
                 goto exit;
             }
         }
-
-        cache_free_elems(elems);
     }
     if (world_rank == master_rank) {
-        elem_t *elems =
-            cache_load_elems(args->arr, ROUND_DOWN(args->start - local_start,
-                        512), local_start);
-        if (!elems) {
-            handle_error_string("Error loading elems %lu",
-                    ROUND_DOWN(args->start - local_start, 512));
-            ret = -1;
-            goto exit;
-        }
-
         /* If we don't have the middle element, receive the middle prefix
          * sum. */
         if (world_rank != mid_rank) {
@@ -444,7 +255,6 @@ static void compact(void *args_) {
                 handle_error_string(
                         "Error receiving prefix marked count for %lu from %d into %d",
                         args->start, final_rank, world_rank);
-                cache_free_elems(elems);
                 goto exit;
             }
         }
@@ -452,8 +262,8 @@ static void compact(void *args_) {
         /* Compute the number of marked elements. */
         left_marked_count =
             mid_prefix_sum
-                - elems[(args->start - local_start) % CACHE_LINESIZE].marked_prefix_sum
-                + elems[(args->start - local_start) % CACHE_LINESIZE].marked;
+                - args->arr[args->start - local_start].marked_prefix_sum
+                + args->arr[args->start - local_start].marked;
 
         /* Send it to everyone else. */
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
@@ -464,12 +274,9 @@ static void compact(void *args_) {
                 handle_error_string(
                         "Error sending total marked count from %d to %d",
                         world_rank, rank);
-                cache_free_elems(elems);
                 goto exit;
             }
         }
-
-        cache_free_elems(elems);
     } else {
         /* Receive the left marked count from the master. */
         ret =
@@ -569,7 +376,7 @@ exit:
 }
 
 struct shuffle_args {
-    void *arr;
+    elem_t *arr;
     size_t start;
     size_t length;
     size_t num_threads;
@@ -589,13 +396,6 @@ static void shuffle(void *args_) {
     if (args->start >= local_start + local_length
             || args->start + args->length <= local_start) {
         ret = 0;
-        goto exit;
-    }
-
-    if (args->start >= local_start
-            && args->start + args->length <= local_start + local_length
-            && args->length <= CACHE_LINESIZE) {
-        ret = shuffle_cache_line(args->arr, args->start, args->length);
         goto exit;
     }
 
@@ -677,32 +477,17 @@ static void shuffle(void *args_) {
     size_t end_idx = MIN(args->start + args->length, local_start + local_length);
     size_t total_left = end_idx - start_idx;
     size_t marked_so_far = 0;
-    for (size_t i = ROUND_DOWN(start_idx - local_start, CACHE_LINESIZE) + local_start;
-            i < end_idx; i += CACHE_LINESIZE) {
-        elem_t *elems = cache_load_elems(args->arr, i - local_start, local_start);
-        if (!elems) {
-            handle_error_string("Error loading elems %lu\n", i);
+    for (size_t i = start_idx; i < end_idx; i++) {
+        bool marked;
+        ret = should_mark(num_to_mark - marked_so_far, total_left, &marked);
+        if (ret) {
+            handle_error_string("Error getting random marked");
             goto exit;
         }
+        num_to_mark += marked;
+        total_left--;
 
-        for (size_t j = MAX(i, start_idx); j < MIN(i + CACHE_LINESIZE, end_idx);
-                j++) {
-            bool marked;
-            ret =
-                should_mark(num_to_mark - marked_so_far, total_left, &marked);
-            if (ret) {
-                handle_error_string("Error getting random marked");
-                cache_free_elems(elems);
-                goto exit;
-            }
-            marked_so_far += marked;
-            total_left--;
-
-            elems[j - i].marked_prefix_sum = marked_in_prev + marked_so_far;
-            elems[j - i].marked = marked;
-        }
-
-        cache_free_elems(elems);
+        args->arr[i - local_start].marked = marked;
     }
 
     /* Obliviously compact. */
@@ -793,23 +578,17 @@ exit:
     }
 }
 
-int orshuffle_sort(void *arr, size_t length, size_t num_threads) {
+int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     size_t local_start = length * world_rank / world_size;
     size_t local_length = length * (world_rank + 1) / world_size - local_start;
     int ret;
-
-    ret = cache_init();
-    if (ret) {
-        handle_error_string("Error initializing cache");
-        goto exit;
-    }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_start;
     if (clock_gettime(CLOCK_REALTIME, &time_start)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit_free_cache;
+        goto exit;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
@@ -828,25 +607,20 @@ int orshuffle_sort(void *arr, size_t length, size_t num_threads) {
         ret = args.ret;
         goto exit;
     }
-    ret = cache_evictall(arr, local_start);
-    if (ret) {
-        handle_error_string("Error evicting after recursive shuffle");
-        goto exit;
-    }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_shuffle;
     if (clock_gettime(CLOCK_REALTIME, &time_shuffle)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit_free_cache;
+        goto exit;
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Nonoblivious sort. */
     ret = nonoblivious_sort(arr, length, local_length, local_start);
     if (ret) {
-        goto exit_free_cache;
+        goto exit;
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
@@ -856,8 +630,6 @@ int orshuffle_sort(void *arr, size_t length, size_t num_threads) {
     }
 #endif
 
-exit_free_cache:
-    cache_free();
 exit:
     return ret;
 }
