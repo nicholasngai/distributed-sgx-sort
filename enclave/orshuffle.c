@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <threads.h>
 #include <time.h>
 #include <liboblivious/primitives.h>
 #include "common/crypto.h"
@@ -21,7 +21,7 @@
 
 static size_t total_length;
 
-static thread_local elem_t *buffer;
+static _Thread_local elem_t *buffer;
 
 int orshuffle_init(void) {
     int ret;

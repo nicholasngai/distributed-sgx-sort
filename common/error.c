@@ -3,8 +3,11 @@
 #include <stdio.h>
 #include <mbedtls/error.h>
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-#include <openenclave/bits/result.h>
+#include <sgx_error.h>
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+
+#define fprintf(...)
+#define vfprintf(...)
 
 void _handle_mbedtls_error(int ret, const char *msg, const char *file,
         int line) {
@@ -14,9 +17,9 @@ void _handle_mbedtls_error(int ret, const char *msg, const char *file,
 }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-void _handle_oe_error(oe_result_t result, const char *msg, const char *file,
+void _handle_sgx_error(sgx_status_t result, const char *msg, const char *file,
         int line) {
-    fprintf(stderr, "%s:%d: %s: %s\n", file, line, msg, oe_result_str(result));
+    fprintf(stderr, "%s:%d: %s: %d\n", file, line, msg, result);
 }
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 

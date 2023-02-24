@@ -14,4 +14,9 @@ typedef struct ocall_mpi_request * ocall_mpi_request_t;
 
 #define OCALL_MPI_REQUEST_NULL ((ocall_mpi_request_t) 0)
 
+struct ocall_timespec {
+    long tv_sec;
+    long tv_nsec;
+};
+
 #endif /* distributed-sgx-sort/common/ocalls.h */

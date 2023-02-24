@@ -46,9 +46,18 @@ BASELINE_TARGETS = \
 	$(BASELINE_DIR)/nonoblivious-quickselect
 BASELINE_DEPS = $(BASELINE_TARGETS:=.d)
 
-CPPFLAGS = -I. -Ithird_party/liboblivious/include
-CFLAGS = -O3 -Wall -Wextra
-LDFLAGS =
+SGX_SDK = /opt/intel/sgxsdk
+
+CPPFLAGS = -I. \
+	-I$(SGX_SDK)/include \
+	-Ithird_party/mbedtls-SGX/include \
+	-Ithird_party/liboblivious/include \
+	-DDISTRIBUTED_SGX_SORT_CACHE_COUNTER -DOE_DEBUG -DOE_SIMULATION
+CFLAGS = -O0 -Wall -Wextra -ggdb -g3
+LDFLAGS = \
+	-L$(SGX_SDK)/lib64 \
+	-Lthird_party/mbedtls-SGX/build/ocall \
+	-Lthird_party/mbedtls-SGX/build/trusted
 LDLIBS =
 
 # all target.
@@ -66,13 +75,10 @@ ENCLAVE_EDGE_SRC = $(ENCLAVE_DIR)/$(APP_NAME)_t.c
 ENCLAVE_EDGE_OBJS = $(ENCLAVE_EDGE_SRC:.c=.o)
 SGX_EDGE = $(HOST_EDGE_HEADERS) $(HOST_EDGE_SRC) $(ENCLAVE_EDGE_HEADERS) $(ENCLAVE_EDGE_SRC)
 
-INCDIR = $(shell pkg-config oehost-$(C_COMPILER) --variable=includedir)
 $(SGX_EDGE): $(APP_NAME).edl
 	$(SGX_EDGER8R) $< \
 		--untrusted-dir $(HOST_DIR) \
-		--trusted-dir $(ENCLAVE_DIR) \
-		--search-path $(INCDIR) \
-		--search-path $(INCDIR)/openenclave/edl/sgx
+		--trusted-dir $(ENCLAVE_DIR)
 
 # Dependency generation.
 
@@ -90,13 +96,13 @@ third_party/liboblivious/liboblivious.a third_party/liboblivious/liboblivious.so
 HOST_CPPFLAGS = $(CPPFLAGS)
 HOST_CFLAGS = $(CFLAGS) \
 	$(CFLAGS) \
-	$(shell pkg-config mpi --cflags) \
-	$(shell pkg-config oehost-$(C_COMPILER) --cflags)
+	$(shell pkg-config mpi --cflags)
 HOST_LDFLAGS = $(LDFLAGS)
 HOST_LDLIBS = $(LDLIBS) \
 	-lmbedcrypto \
+	-lmbedtls_SGX_u \
 	$(shell pkg-config mpi --libs) \
-	$(shell pkg-config oehost-$(C_COMPILER) --libs)
+	-lsgx_urts
 
 $(HOST_DIR)/%.o: $(HOST_DIR)/%.c
 	$(CC) $(HOST_CFLAGS) $(HOST_CPPFLAGS) -c -o $@ $<
@@ -106,15 +112,25 @@ $(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) third_party/libobl
 
 # Enclave.
 
-ENCLAVE_CPPFLAGS = $(CPPFLAGS)
-ENCLAVE_CFLAGS = $(CFLAGS) \
-	$(shell pkg-config oeenclave-$(C_COMPILER) --cflags)
+ENCLAVE_CPPFLAGS = $(CPPFLAGS) \
+	-nostdinc -I$(SGX_SDK)/include/tlibc
+ENCLAVE_CFLAGS = $(CFLAGS)
 ENCLAVE_LDFLAGS = $(LDFLAGS) \
+	-nostdlib \
 	-Lthird_party/liboblivious
 ENCLAVE_LDLIBS = $(LDLIBS) \
-	-l:liboblivious.a \
-	$(shell pkg-config oeenclave-$(C_COMPILER) --libs) \
-	$(shell pkg-config oeenclave-$(C_COMPILER) --variable=mbedtlslibs)
+	-Wl,--whole-archive -lsgx_trts -Wl,--no-whole-archive \
+	-Wl,--start-group \
+		-lmbedtls_SGX_t \
+		-l:liboblivious.a \
+		-lsgx_tstdc \
+		-lsgx_tcxx \
+		-lsgx_tcrypto \
+		-lsgx_tservice \
+	-Wl,--end-group \
+	-Wl,-Bstatic -Wl,-Bsymbolic -Wl,--no-undefined \
+	-Wl,-pie,-eenclave_entry -Wl,--export-dynamic  \
+	-Wl,--defsym,__ImageBase=0 -Wl,--gc-sections
 
 $(ENCLAVE_DIR)/%.o: $(ENCLAVE_DIR)/%.c
 	$(CC) $(ENCLAVE_CFLAGS) $(ENCLAVE_CPPFLAGS) -c -o $@ $<
@@ -123,7 +139,7 @@ $(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) third_par
 	$(CC) $(ENCLAVE_LDFLAGS) $^ $(ENCLAVE_LDLIBS) -o $@
 
 $(ENCLAVE_TARGET).signed: $(ENCLAVE_TARGET) $(ENCLAVE_KEY) $(ENCLAVE_PUBKEY) $(ENCLAVE_CONF)
-	$(SGX_SIGN) sign -e $< -k $(ENCLAVE_KEY) -c $(ENCLAVE_CONF)
+	$(SGX_SIGN) sign -enclave $< -out $@ -key $(ENCLAVE_KEY) -config $(ENCLAVE_CONF)
 
 $(ENCLAVE_KEY):
 	openssl genrsa -out $@ -3 3072

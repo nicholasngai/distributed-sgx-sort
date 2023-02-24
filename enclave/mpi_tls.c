@@ -1,5 +1,4 @@
 #include "enclave/mpi_tls.h"
-#include <arpa/inet.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -7,7 +6,7 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ssl.h>
-#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+#if !defined(OE_SIMULATION_CERT) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
 #include <openenclave/enclave.h>
 #include <openenclave/attestation/attester.h>
 #include <openenclave/attestation/sgx/evidence.h>
@@ -15,6 +14,7 @@
 #include "common/defs.h"
 #include "common/error.h"
 #include "common/ocalls.h"
+#include "common/util.h"
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include "enclave/parallel_t.h"
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
@@ -97,7 +97,7 @@ static int recv_callback(void *session_, unsigned char *buf, size_t len,
         uint64_t seq     : 48;
         uint16_t length  : 16;
     } __attribute__((packed)) *header = (void *) session->in_bio;
-    size_t length = ntohs(header->length);
+    size_t length = do_ntohs(header->length);
 
     if (session->in_bio_len < sizeof(*header)) {
         handle_error_string("Input bio is shorter than DTLS header");
@@ -225,7 +225,7 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
 #if !defined(OE_SIMULATION) && !defined(OE_SIMULATION_CERT) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
     unsigned char *pubkey_buf;
     size_t pubkey_buf_size;
-    oe_result_t result;
+    sgx_status_t result;
 
     oe_asymmetric_key_params_t key_params;
     key_params.type = OE_ASYMMETRIC_KEY_EC_SECP256P1;
@@ -234,14 +234,14 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
     key_params.user_data_size = 0;
     result = oe_get_public_key_by_policy(OE_SEAL_POLICY_UNIQUE, &key_params,
             &pubkey_buf, &pubkey_buf_size, NULL, 0);
-    if (result != OE_OK) {
-        handle_oe_error(result, "oe_get_public_key_by_policy");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "oe_get_public_key_by_policy");
         goto exit;
     }
     result = oe_get_private_key_by_policy(OE_SEAL_POLICY_UNIQUE, &key_params,
             &privkey_buf, &privkey_buf_size, NULL, 0);
-    if (result != OE_OK) {
-        handle_oe_error(result, "oe_get_private_key_by_policy");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "oe_get_private_key_by_policy");
         goto exit_free_pubkey_buf;
     }
     oe_uuid_t uuid_sgx_ecdsa = { OE_FORMAT_UUID_SGX_ECDSA };
@@ -255,8 +255,8 @@ static int load_certificate_and_key(mbedtls_x509_crt *cert,
                 "CN=Distributed SGX Sort",
             privkey_buf, privkey_buf_size, pubkey_buf, pubkey_buf_size, NULL, 0,
             &cert_buf, &cert_buf_size);
-    if (result != OE_OK) {
-        handle_oe_error(result, "oe_get_attestation_cert_buf_with_evidence_v2");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "oe_get_attestation_cert_buf_with_evidence_v2");
         goto exit_free_privkey_buf;
     }
 #else /* OE_SIMULATION || OE_SIMULATION_CERT || DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -346,18 +346,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
             continue;
         }
 
-        ret = mbedtls_ssl_get_max_out_record_payload(&sessions[i].ssl);
-        if (ret < 0) {
-            handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
-            for (int j = 0; j < i; j++) {
-                if (j == world_rank) {
-                    continue;
-                }
-                free(requests[i].in_bio);
-            }
-            goto exit_free_requests;
-        }
-        size_t max_payload_len = ret;
+        size_t max_payload_len = 16384;
         ret = mbedtls_ssl_get_record_expansion(&sessions[i].ssl);
         if (ret < 0) {
             handle_mbedtls_error(ret, "mbedtls_ssl_get_record_expansion");
@@ -441,12 +430,12 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
                 /* Try wait on handshake bytes. */
                 if (requests[i].recv_valid) {
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-                    oe_result_t result =
+                    sgx_status_t result =
                         ocall_mpi_try_wait(&ret, requests[i].in_bio,
                                 requests[i].in_bio_len, &requests[i].recv,
                                 &ready, &status);
-                    if (result != OE_OK) {
-                        handle_oe_error(ret, "ocall_mpi_try_wait");
+                    if (result != SGX_SUCCESS) {
+                        handle_sgx_error(ret, "ocall_mpi_try_wait");
                         goto exit_free_bios;
                     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -471,11 +460,11 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
                 if (!requests[i].recv_valid && !sessions[i].in_bio_len) {
                     /* Perform async receive. */
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-                    oe_result_t result =
+                    sgx_status_t result =
                         ocall_mpi_irecv_bytes(&ret, requests[i].in_bio_len, i,
                                 0, &requests[i].recv);
-                    if (result != OE_OK) {
-                        handle_oe_error(ret, "ocall_mpi_irecv_bytes");
+                    if (result != SGX_SUCCESS) {
+                        handle_sgx_error(ret, "ocall_mpi_irecv_bytes");
                         goto exit_free_bios;
                     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -495,12 +484,12 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
             /* Perform send if necessary. */
             if (sessions[i].out_bio_len < requests[i].out_bio_len) {
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-                oe_result_t result =
+                sgx_status_t result =
                     ocall_mpi_send_bytes(&ret, requests[i].out_bio,
                             requests[i].out_bio_len - sessions[i].out_bio_len,
                             i, 0);
-                if (result != OE_OK) {
-                    handle_oe_error(ret, "ocall_mpi_send_bytes");
+                if (result != SGX_SUCCESS) {
+                    handle_sgx_error(ret, "ocall_mpi_send_bytes");
                     goto exit_free_bios;
                 }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -577,12 +566,7 @@ static int send_to_bio(struct mpi_tls_session *session,
     const unsigned char *in = in_;
     int ret;
 
-    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
-    if (ret < 0) {
-        handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
-        goto exit;
-    }
-    size_t max_payload_len = ret;
+    size_t max_payload_len = 16834;
 
     spinlock_lock(&session->lock);
 
@@ -626,12 +610,7 @@ static int recv_from_bio(struct mpi_tls_session *session,
     unsigned char *out = out_;
     int ret;
 
-    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
-    if (ret < 0) {
-        handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
-        goto exit;
-    }
-    size_t max_payload_len = ret;
+    size_t max_payload_len = 16834;
 
     spinlock_lock(&session->lock);
 
@@ -685,12 +664,7 @@ int mpi_tls_send_bytes(const void *buf, size_t count, int dest, int tag) {
 
     spinlock_lock(&session->lock);
 
-    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
-    if (ret < 0) {
-        handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
-        goto exit;
-    }
-    size_t max_payload_len = ret;
+    size_t max_payload_len = 16384;
 
     spinlock_unlock(&session->lock);
 
@@ -716,9 +690,9 @@ int mpi_tls_send_bytes(const void *buf, size_t count, int dest, int tag) {
 
     /* Send bio over MPI. */
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    oe_result_t result = ocall_mpi_send_bytes(&ret, bio, bio_used, dest, tag);
-    if (result != OE_OK) {
-        handle_oe_error(ret, "ocall_mpi_send_bytes");
+    sgx_status_t result = ocall_mpi_send_bytes(&ret, bio, bio_used, dest, tag);
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(ret, "ocall_mpi_send_bytes");
         goto exit_free_bio;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -754,12 +728,7 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
 
     spinlock_lock(&session->lock);
 
-    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
-    if (ret < 0) {
-        handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
-        goto exit;
-    }
-    size_t max_payload_len = ret;
+    size_t max_payload_len = 16384;
 
     ret = mbedtls_ssl_get_record_expansion(&session->ssl);
     if (ret < 0) {
@@ -782,10 +751,10 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
 
     /* Receive bio over MPI. */
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    oe_result_t result =
+    sgx_status_t result =
         ocall_mpi_recv_bytes(&ret, bio, bio_len, src, tag, status);
-    if (result != OE_OK) {
-        handle_oe_error(ret, "ocall_mpi_recv_bytes");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(ret, "ocall_mpi_recv_bytes");
         goto exit_free_bio;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -820,12 +789,7 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
 
     spinlock_lock(&session->lock);
 
-    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
-    if (ret < 0) {
-        handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
-        goto exit;
-    }
-    size_t max_payload_len = ret;
+    size_t max_payload_len = 16384;
 
     spinlock_unlock(&session->lock);
 
@@ -854,11 +818,11 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
 
     /* Send bio over MPI. */
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    oe_result_t result =
+    sgx_status_t result =
         ocall_mpi_isend_bytes(&ret, request->bio, bio_used, dest, tag,
                 &request->mpi_request);
-    if (result != OE_OK) {
-        handle_oe_error(ret, "ocall_mpi_send_bytes");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(ret, "ocall_mpi_send_bytes");
         goto exit_free_bio;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -888,12 +852,7 @@ int mpi_tls_irecv_bytes(void *buf_, size_t count, int src, int tag,
 
     spinlock_lock(&session->lock);
 
-    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
-    if (ret < 0) {
-        handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
-        goto exit;
-    }
-    size_t max_payload_len = ret;
+    size_t max_payload_len = 16384;
 
     ret = mbedtls_ssl_get_record_expansion(&session->ssl);
     if (ret < 0) {
@@ -925,11 +884,11 @@ int mpi_tls_irecv_bytes(void *buf_, size_t count, int src, int tag,
     request->count = count;
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    oe_result_t result =
+    sgx_status_t result =
         ocall_mpi_irecv_bytes(&ret, request->bio_len, src, tag,
                 &request->mpi_request);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ocall_mpi_irecv_bytes");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "ocall_mpi_irecv_bytes");
         ret = result;
         goto exit_free_bio;
     }
@@ -980,10 +939,10 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    oe_result_t result =
+    sgx_status_t result =
         ocall_mpi_wait(&ret, wait_bio, wait_bio_len, &mpi_request, status);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ocall_mpi_wait");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "ocall_mpi_wait");
         ret = result;
         goto exit;
     }
@@ -1058,11 +1017,11 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    oe_result_t result =
+    sgx_status_t result =
         ocall_mpi_waitany(&ret, wait_bio, wait_bio_len, count, mpi_requests,
                 index, status);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ocall_mpi_wait");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "ocall_mpi_wait");
         ret = result;
         goto exit;
     }

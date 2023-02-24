@@ -5,5 +5,5 @@ else
 	C_COMPILER = gcc
 endif
 
-SGX_EDGER8R ?= oeedger8r
-SGX_SIGN ?= oesign
+SGX_EDGER8R ?= sgx_edger8r
+SGX_SIGN ?= sgx_sign

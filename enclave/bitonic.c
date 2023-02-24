@@ -2,8 +2,7 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdio.h>
-#include <threads.h>
+#include <stdlib.h>
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
 #include "common/elem_t.h"
@@ -17,7 +16,7 @@
 
 static size_t total_length;
 
-static thread_local elem_t *buffer;
+static _Thread_local elem_t *buffer;
 
 int bitonic_init(void) {
     /* Allocate buffers. */

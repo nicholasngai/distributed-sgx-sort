@@ -1,3 +1,6 @@
 [submodule "enclave/third_party/liboblivious"]
 	path = third_party/liboblivious
 	url = https://github.com/nicholasngai/liboblivious.git
+[submodule "third_party/mbedtls-SGX"]
+	path = third_party/mbedtls-SGX
+	url = https://github.com/bl4ck5un/mbedtls-SGX

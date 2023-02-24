@@ -5,8 +5,9 @@
 #include <time.h>
 #include <pthread.h>
 #include <mpi.h>
+#include <time.h>
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-#include <openenclave/host.h>
+#include <sgx_urts.h>
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 #include "common/crypto.h"
 #include "common/defs.h"
@@ -425,12 +426,30 @@ void ocall_mpi_barrier(void) {
     MPI_Barrier(MPI_COMM_WORLD);
 }
 
+int ocall_clock_gettime(struct ocall_timespec *time) {
+    struct timespec timespec;
+    int ret;
+
+    if (clock_gettime(CLOCK_REALTIME, &timespec)) {
+        ret = -1;
+        goto exit;
+    }
+
+    time->tv_sec = timespec.tv_sec;
+    time->tv_nsec = timespec.tv_nsec;
+
+    ret = 0;
+
+exit:
+    return ret;
+}
+
 static void *start_thread_work(void *enclave_) {
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    oe_enclave_t *enclave = enclave_;
-    oe_result_t result = ecall_start_work(enclave);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ecall_start_work");
+    sgx_enclave_id_t *enclave = enclave_;
+    sgx_status_t result = ecall_start_work(*enclave);
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "ecall_start_work");
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ecall_start_work();
@@ -523,25 +542,22 @@ int main(int argc, char **argv) {
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    oe_enclave_t *enclave;
-    oe_result_t result;
-    int flags = 0;
-#ifdef OE_DEBUG
-    flags |= OE_ENCLAVE_FLAG_DEBUG;
-#endif
-#ifdef OE_SIMULATION
-    flags |= OE_ENCLAVE_FLAG_SIMULATE;
-#endif
-    result = oe_create_parallel_enclave(
+    sgx_enclave_id_t enclave;
+    sgx_status_t result;
+    result = sgx_create_enclave(
             argv[1],
-            OE_ENCLAVE_TYPE_AUTO,
-            flags,
-            NULL,
+#ifdef OE_DEBUG
+            1,
+#else
             0,
-            &enclave);
+#endif
+            NULL,
+            NULL,
+            &enclave,
+            NULL);
 
-    if (result != OE_OK) {
-        handle_oe_error(result, "oe_create_parallel_enclave");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "oe_create_parallel_enclave");
         ret = result;
         goto exit_mpi_finalize;
     }
@@ -552,8 +568,8 @@ int main(int argc, char **argv) {
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     result =
         ecall_sort_init(enclave, &ret, world_rank, world_size, num_threads);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ecall_sort_init");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "ecall_sort_init");
         goto exit_terminate_enclave;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -566,7 +582,8 @@ int main(int argc, char **argv) {
 
     for (size_t i = 1; i < num_threads; i++) {
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-        ret = pthread_create(&threads[i - 1], NULL, start_thread_work, enclave);
+        ret =
+            pthread_create(&threads[i - 1], NULL, start_thread_work, &enclave);
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         ret = pthread_create(&threads[i - 1], NULL, start_thread_work, NULL);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -580,8 +597,8 @@ int main(int argc, char **argv) {
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     result = ecall_sort_alloc(enclave, &ret, length, sort_type);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ecall_sort_alloc");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "ecall_sort_alloc");
         goto exit_free_sort;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -620,7 +637,7 @@ int main(int argc, char **argv) {
             ret = -1;
             goto exit_free_sort;
     }
-    if (result != OE_OK) {
+    if (result != SGX_SUCCESS) {
         goto exit_free_sort;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -649,8 +666,8 @@ int main(int argc, char **argv) {
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     result = ecall_release_threads(enclave);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ecall_release_threads");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "ecall_release_threads");
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ecall_release_threads();
@@ -676,8 +693,8 @@ int main(int argc, char **argv) {
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     result = ecall_unrelease_threads(enclave);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ecall_release_threads");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "ecall_release_threads");
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ecall_unrelease_threads();
@@ -686,8 +703,8 @@ int main(int argc, char **argv) {
     /* Check array. */
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     result = ecall_verify_sorted(enclave, &ret);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ecall_verify_sorted");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "ecall_verify_sorted");
         goto exit_free_sort;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
@@ -711,15 +728,15 @@ int main(int argc, char **argv) {
 exit_free_sort:
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     result = ecall_sort_free(enclave);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ecall_sort_free");
+    if (result != SGX_SUCCESS) {
+        handle_sgx_error(result, "ecall_sort_free");
     }
 #else
     ecall_sort_free();
 #endif
 exit_terminate_enclave:
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    oe_terminate_enclave(enclave);
+    sgx_destroy_enclave(enclave);
 #endif
 exit_mpi_finalize:
     MPI_Finalize();

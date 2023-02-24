@@ -1,6 +1,7 @@
 #include <stdio.h>
-#include <openenclave/enclave.h>
+#include <string.h>
 #include <liboblivious/primitives.h>
+#include <mbedtls/ctr_drbg.h>
 #include "common/crypto.h"
 #include "common/defs.h"
 #include "common/elem_t.h"
@@ -57,6 +58,12 @@ exit_free_rand:
     return ret;
 }
 
+static int zero_entropy_func(void *entropy UNUSED, unsigned char *bytes,
+        size_t len) {
+    memset(bytes, '\0', len);
+    return 0;
+}
+
 int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
     total_length = total_length_;
     size_t local_length =
@@ -101,13 +108,30 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
         ret = -1;
         goto exit;
     }
-    srand(world_rank + 1);
+    int seed = world_rank + 1;
+    mbedtls_ctr_drbg_context drbg;
+    mbedtls_ctr_drbg_init(&drbg);
+    ret =
+        mbedtls_ctr_drbg_seed(&drbg, zero_entropy_func, NULL,
+                (const unsigned char *) &seed, sizeof(seed));
+    if (ret) {
+        handle_mbedtls_error(ret, "mbedtls_ctr_drbg_seed");
+        goto exit_free_drbg;
+    }
     for (size_t i = 0; i < MAX(local_length, 512); i++) {
-        arr[i].key = rand();
+        ret =
+            mbedtls_ctr_drbg_random(&drbg, (unsigned char *) &arr[i].key,
+                    sizeof(arr[i].key));
+        if (ret) {
+            handle_mbedtls_error(ret, "mbedtls_ctr_drbg_random");
+            goto exit_free_drbg;
+        }
     }
 
     ret = 0;
 
+exit_free_drbg:
+    mbedtls_ctr_drbg_free(&drbg);
 exit:
     return ret;
 }
@@ -127,7 +151,7 @@ int ecall_verify_sorted(void) {
             - (world_rank * total_length + world_size - 1) / world_size;
     uint64_t first_key = 0;
     uint64_t prev_key = 0;
-    oe_result_t result;
+    sgx_status_t result;
     int ret;
 
     for (int rank = 0; rank < world_size; rank++) {
@@ -152,8 +176,8 @@ int ecall_verify_sorted(void) {
         result =
             ocall_mpi_send_bytes(&ret, (unsigned char *) &prev_key,
                     sizeof(prev_key), world_rank + 1, 0);
-        if (result != OE_OK) {
-            handle_oe_error(result, "ocall_mpi_send_bytes");
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_mpi_send_bytes");
             ret = -1;
             goto exit;
         }
@@ -175,8 +199,8 @@ int ecall_verify_sorted(void) {
         result =
             ocall_mpi_recv_bytes(&ret, (unsigned char *) &prev_key,
                     sizeof(prev_key), world_rank - 1, 0, &status);
-        if (result != OE_OK) {
-            handle_oe_error(result, "ocall_mpi_recv_bytes");
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_mpi_recv_bytes");
             ret = -1;
             goto exit;
         }

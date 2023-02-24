@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <threads.h>
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
 #include <time.h>
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
@@ -23,7 +22,7 @@
 static size_t total_length;
 
 /* Thread-local buffer used for generic operations. */
-static thread_local elem_t *buffer;
+static _Thread_local elem_t *buffer;
 
 static int get_bucket_rank(size_t bucket) {
     size_t num_buckets =
