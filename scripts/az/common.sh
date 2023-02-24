@@ -1,7 +1,7 @@
 #!/bin/sh
 
-export SUBSCRIPTION=e3f75e2d-38e6-4192-9fcd-1b5c47bb5ddd
-export LOCATION=uswest2
+export SUBSCRIPTION=7fd7e4ed-48d3-4cab-8df3-436e7c7cfed1
+export LOCATION=eastus
 export META_GROUP=enclave_meta_group
 export GROUP=enclave_group
 export VNET=enclave-vnet
