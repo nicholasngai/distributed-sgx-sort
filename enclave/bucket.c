@@ -425,6 +425,8 @@ static int bucket_route(elem_t *arr, size_t num_levels, size_t start_bit_idx) {
         }
     }
 
+    ret = 0;
+
 exit:
     return ret;
 }

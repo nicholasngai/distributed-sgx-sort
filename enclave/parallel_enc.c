@@ -66,7 +66,7 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
 
     switch (sort_type) {
         case SORT_BITONIC:
-            arr = malloc(MAX(local_length, 512) * sizeof(*arr));
+            arr = calloc(MAX(local_length, 512), sizeof(*arr));
             break;
         case SORT_BUCKET: {
             /* The total number of buckets is the max of either double the
@@ -82,13 +82,13 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
             /* The bucket sort relies on having 2 local buffers, so we allocate
              * double the size of a single buffer (a single buffer is
              * local_num_buckets * BUCKET_SIZE elements). */
-            arr = malloc(local_num_buckets * BUCKET_SIZE * 2 * sizeof(*arr));
+            arr = calloc(local_num_buckets * BUCKET_SIZE * 2, sizeof(*arr));
             break;
         case SORT_OPAQUE:
-            arr = malloc(local_length * 2 * sizeof(*arr));
+            arr = calloc(local_length * 2, sizeof(*arr));
             break;
         case SORT_ORSHUFFLE:
-            arr = malloc(MAX(local_length * 2, 512) * sizeof(*arr));
+            arr = calloc(MAX(local_length * 2, 512), sizeof(*arr));
             break;
         case SORT_UNSET:
             handle_error_string("Invalid sort type");
