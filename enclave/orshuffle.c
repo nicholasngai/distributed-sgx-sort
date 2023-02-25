@@ -618,7 +618,8 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Nonoblivious sort. */
-    ret = nonoblivious_sort(arr, length, local_length, local_start);
+    ret =
+        nonoblivious_sort(arr, length, local_length, local_start, num_threads);
     if (ret) {
         goto exit;
     }
