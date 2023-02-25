@@ -8,6 +8,16 @@ if [ -n "${AZ+x}" ]; then
     export AZDCAP_DEBUG_LOG_LEVEL=0
     AZ=true
 else
+    if uname -r | grep -q azure; then
+        fold -s <<EOF
+It looks like you're running on Azure. If you want to automatically deallocate VMs, you should re-run this script as
+
+    AZ=true $0
+
+Hit Enter to continue without automatic deallocation or Ctrl-C to exit.
+EOF
+        read
+    fi
     AZ=false
 fi
 
