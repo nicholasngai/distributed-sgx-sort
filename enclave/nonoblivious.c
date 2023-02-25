@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include "common/defs.h"
 #include "common/elem_t.h"
@@ -13,6 +12,7 @@
 #include "common/util.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
+#include "enclave/qsort.h"
 #include "enclave/threading.h"
 
 #define BUF_SIZE 1024
@@ -21,7 +21,8 @@
 /* Compares elements by the tuple (key, ORP ID). The check for the ORP ID must
  * always be run (it must be oblivious whether the comparison result is based on
  * the key or on the ORP ID), since we leak info on duplicate keys otherwise. */
-static int mergesort_comparator(const void *a_, const void *b_) {
+static int mergesort_comparator(const void *a_, const void *b_,
+        void *aux UNUSED) {
     const elem_t *a = a_;
     const elem_t *b = b_;
     int comp_key = (a->key > b->key) - (a->key < b->key);
@@ -43,8 +44,8 @@ static void mergesort_first_pass(void *args_, size_t run_idx) {
     size_t run_end = (run_idx + 1) * args->length / args->num_threads;
 
     /* Sort using libc quicksort. */
-    qsort(args->arr + run_start, run_end - run_start, sizeof(*args->arr),
-            mergesort_comparator);
+    qsort_glibc(args->arr + run_start, run_end - run_start, sizeof(*args->arr),
+            mergesort_comparator, NULL);
 }
 
 /* Non-oblivious mergesort. */
@@ -93,7 +94,7 @@ static int mergesort(elem_t *arr, elem_t *out, size_t length,
             }
             if (lowest_run == SIZE_MAX
                     || mergesort_comparator(&arr[merge_indices[j]],
-                        &arr[lowest_idx]) < 0) {
+                        &arr[lowest_idx], NULL) < 0) {
                 lowest_run = j;
                 lowest_idx = merge_indices[j];
             }
