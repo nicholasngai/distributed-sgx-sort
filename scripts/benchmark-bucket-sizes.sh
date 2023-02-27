@@ -16,7 +16,12 @@ EOF
 )"
 
 a=bucket
+last_e=
 for e in 32 16 8 4 2 1; do
+    if "$AZ" && [ -n "$last_e" ]; then
+        deallocate_az_vm "$(( e + ENCLAVE_OFFSET ))" "$(( last_e + ENCLAVE_OFFSET ))"
+    fi
+
     # Build command template.
     hosts=''
     i=0
@@ -50,7 +55,9 @@ for e in 32 16 8 4 2 1; do
         done
     done
 
-    if "$AZ"; then
-        deallocate_az_vm "$(( e / 2 + ENCLAVE_OFFSET ))" "$(( e + ENCLAVE_OFFSET ))"
-    fi
+    last_e=$e
 done
+
+if "$AZ" && [ -n "$last_e" ]; then
+    deallocate_az_vm "$ENCLAVE_OFFSET" "$(( last_e + ENCLAVE_OFFSET ))"
+fi
