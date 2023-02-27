@@ -48,16 +48,30 @@ static size_t get_local_start(int rank) {
     return (rank * total_length + world_size - 1) / world_size;
 }
 
-static void swap_local_range(elem_t *arr, size_t a, size_t b, size_t count,
-        bool descending) {
+/* Swapping. */
+
+struct swap_local_range_args {
+    elem_t *arr;
+    size_t a;
+    size_t b;
+    size_t count;
+    bool descending;
+    size_t num_threads;
+};
+static void swap_local_range(void *args_, size_t i) {
+    struct swap_local_range_args *args = args_;
     size_t local_start = get_local_start(world_rank);
 
-    for (size_t i = 0; i < count; i++) {
+    size_t start = i * args->count / args->num_threads;
+    size_t end = (i + 1) * args->count / args->num_threads;
+    for (size_t j = start; j < end; j++) {
         bool cond =
-            (arr[a + i - local_start].key > arr[b + i - local_start].key);
-        cond = cond != descending;
-        o_memswap(&arr[a + i - local_start], &arr[b + i - local_start],
-                sizeof(*arr), cond);
+            args->arr[args->a + j - local_start].key
+                > args->arr[args->b + j - local_start].key;
+        cond = cond != args->descending;
+        o_memswap(&args->arr[args->a + j - local_start],
+                &args->arr[args->b + j - local_start], sizeof(*args->arr),
+                cond);
     }
 }
 
@@ -119,21 +133,8 @@ static void swap_remote_range(elem_t *arr, size_t local_idx, size_t remote_idx,
     }
 }
 
-static void swap(elem_t *arr, size_t a, size_t b, bool descending) {
-    int a_rank = get_index_address(a);
-    int b_rank = get_index_address(b);
-
-    if (a_rank == world_rank && b_rank == world_rank) {
-        swap_local_range(arr, a, b, 1, descending);
-    } else if (a_rank == world_rank) {
-        swap_remote_range(arr, a, b, 1, descending);
-    } else if (b_rank == world_rank) {
-        swap_remote_range(arr, b, a, 1, descending);
-    }
-}
-
 static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
-        size_t count, bool descending) {
+        size_t count, bool descending, size_t num_threads) {
     // TODO Assumption: Only either a subset of range A is local, or a subset of
     // range B is local. For local-remote swaps, the subset of the remote range
     // correspondingw with the local range is entirely contained within a single
@@ -146,7 +147,26 @@ static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
     bool b_is_local = b_start < local_end && b_start + count > local_start;
 
     if (a_is_local && b_is_local) {
-        swap_local_range(arr, a_start, b_start, count, descending);
+        struct swap_local_range_args args = {
+            .arr = arr,
+            .a = a_start,
+            .b = b_start,
+            .count = count,
+            .descending = descending,
+            .num_threads = num_threads,
+        };
+        struct thread_work work;
+        if (num_threads > 1) {
+            work.type = THREAD_WORK_ITER;
+            work.iter.func = swap_local_range;
+            work.iter.arg = &args;
+            work.iter.count = num_threads - 1;
+            thread_work_push(&work);
+        }
+        swap_local_range(&args, num_threads - 1);
+        if (num_threads > 1) {
+            thread_wait(&work);
+        }
     } else if (a_is_local) {
         size_t a_local_start = MAX(a_start, local_start);
         size_t a_local_end = MIN(a_start + count, local_end);
@@ -191,7 +211,8 @@ void sort_threaded(void *args_) {
             /* Do nothing. */
             break;
         case 2: {
-            swap(args->arr, args->start, args->start + 1, args->descending);
+            swap_range(args->arr, args->start, args->start + 1, 1,
+                    args->descending, 1);
             break;
         }
         default: {
@@ -267,7 +288,7 @@ void sort_single(elem_t *arr, size_t start, size_t length,
             /* Do nothing. */
             break;
         case 2: {
-            swap(arr, start, start + 1, descending);
+            swap_range(arr, start, start + 1, 1, descending, 1);
             break;
         }
         default: {
@@ -308,7 +329,8 @@ static void merge_threaded(void *args_) {
             /* Do nothing. */
             break;
         case 2: {
-            swap(args->arr, args->start, args->start + 1, args->descending);
+            swap_range(args->arr, args->start, args->start + 1, 1,
+                    args->descending, 1);
             break;
         }
         default: {
@@ -318,7 +340,7 @@ static void merge_threaded(void *args_) {
             size_t right_length = args->length - left_length;
             size_t right_start = args->start + left_length;
             swap_range(args->arr, args->start, right_start, left_length,
-                    args->descending);
+                    args->descending, args->num_threads);
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only merge the left. The right is completely remote. */
                 struct threaded_args left_args = {
@@ -382,7 +404,7 @@ static void merge_single(elem_t *arr, size_t start, size_t length,
             /* Do nothing. */
             break;
         case 2: {
-            swap(arr, start, start + 1, descending);
+            swap_range(arr, start, start + 1, 1, descending, 1);
             break;
         }
         default: {
@@ -391,7 +413,7 @@ static void merge_single(elem_t *arr, size_t start, size_t length,
             size_t left_length = length / 2;
             size_t right_length = length - left_length;
             size_t right_start = start + left_length;
-            swap_range(arr, start, right_start, left_length, descending);
+            swap_range(arr, start, right_start, left_length, descending, 1);
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only merge the left. The right is completely remote. */
                 merge_single(arr, start, left_length, descending);
