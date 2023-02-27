@@ -4,13 +4,17 @@
 #include <threads.h>
 #include <mbedtls/gcm.h>
 #include <mbedtls/entropy.h>
-#include <mbedtls/ctr_drbg.h>
 #include "common/error.h"
+
+#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
+#include <mbedtls/ctr_drbg.h>
+#endif
 
 #define THREAD_LOCAL_LIST_MAXLEN 64
 
 mbedtls_entropy_context entropy_ctx;
 
+#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
 struct thread_local_ctx {
     mbedtls_ctr_drbg_context drbg_ctx;
     struct thread_local_ctx **ptr;
@@ -19,6 +23,7 @@ struct thread_local_ctx {
 static struct thread_local_ctx ctxs[THREAD_LOCAL_LIST_MAXLEN];
 static size_t ctx_len;
 static thread_local struct thread_local_ctx *ctx;
+#endif
 
 int rand_init(void) {
     mbedtls_entropy_init(&entropy_ctx);
@@ -26,14 +31,17 @@ int rand_init(void) {
 }
 
 void rand_free(void) {
+#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
     for (size_t i = 0; i < ctx_len; i++) {
         mbedtls_ctr_drbg_free(&ctxs[i].drbg_ctx);
         ctxs[i].ptr = NULL;
     }
     ctx_len = 0;
+#endif
     mbedtls_entropy_free(&entropy_ctx);
 }
 
+#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
 int rand_read(void *buf, size_t n) {
     int ret = -1;
 
@@ -71,6 +79,7 @@ int rand_read(void *buf, size_t n) {
 exit:
     return ret;
 }
+#endif
 
 int aad_encrypt(const void *key, const void *plaintext, size_t plaintext_len,
         const void *aad, size_t aad_len, const void *iv, void *ciphertext,
