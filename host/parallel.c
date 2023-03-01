@@ -7,9 +7,6 @@
 #include <pthread.h>
 #include <mpi.h>
 #include <time.h>
-#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-#include <sgx_urts.h>
-#endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 #include "common/crypto.h"
 #include "common/defs.h"
 #include "common/elem_t.h"
@@ -18,7 +15,9 @@
 #include "common/sort_type.h"
 #include "enclave/bucket.h"
 #include "host/error.h"
+
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+#include <sgx_urts.h>
 #include "host/parallel_u.h"
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 

@@ -13,11 +13,12 @@
 #include "enclave/mpi_tls.h"
 #include "enclave/opaque.h"
 #include "enclave/orshuffle.h"
+#include "enclave/threading.h"
+#include "enclave/util.h"
+
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include "enclave/parallel_t.h"
 #endif
-#include "enclave/threading.h"
-#include "enclave/util.h"
 
 int world_rank;
 int world_size;
@@ -152,7 +153,6 @@ int ecall_verify_sorted(void) {
             - (world_rank * total_length + world_size - 1) / world_size;
     uint64_t first_key = 0;
     uint64_t prev_key = 0;
-    sgx_status_t result;
     int ret;
 
     for (int rank = 0; rank < world_size; rank++) {
@@ -174,7 +174,7 @@ int ecall_verify_sorted(void) {
         /* Send largest value to next elem. prev_key now contains the last item
          * in the array. */
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-        result =
+        sgx_status_t result =
             ocall_mpi_send_bytes(&ret, (unsigned char *) &prev_key,
                     sizeof(prev_key), world_rank + 1, 0);
         if (result != SGX_SUCCESS) {
@@ -197,7 +197,7 @@ int ecall_verify_sorted(void) {
         /* Receive previous elem's largest value and compare. */
         ocall_mpi_status_t status;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-        result =
+        sgx_status_t result =
             ocall_mpi_recv_bytes(&ret, (unsigned char *) &prev_key,
                     sizeof(prev_key), world_rank - 1, 0, &status);
         if (result != SGX_SUCCESS) {

@@ -8,22 +8,23 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ssl.h>
-#if !defined(OE_SIMULATION_CERT) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
-#include <openenclave/enclave.h>
-#include <openenclave/attestation/attester.h>
-#include <openenclave/attestation/sgx/evidence.h>
-#endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 #include "common/defs.h"
 #include "common/error.h"
 #include "common/ocalls.h"
 #include "common/util.h"
-#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-#include "enclave/parallel_t.h"
-#endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
+#include "enclave/synch.h"
 #include "enclave/synch.h"
 #include "enclave/util.h"
 
-#include <mbedtls/debug.h>
+#if !defined(OE_SIMULATION_CERT) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
+#include <openenclave/enclave.h>
+#include <openenclave/attestation/attester.h>
+#include <openenclave/attestation/sgx/evidence.h>
+#endif
+
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+#include "enclave/parallel_t.h"
+#endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 
 /* Include simulation cert and key data if compiling in simulation mode or
  * hostonly mode. */
