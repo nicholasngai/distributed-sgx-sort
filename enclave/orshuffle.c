@@ -75,23 +75,37 @@ exit:
 
 /* Swapping. */
 
-static int swap_local_range(elem_t *arr, size_t length, size_t a, size_t b,
-        size_t count, size_t offset, size_t left_marked_count) {
+struct swap_local_range_args {
+    elem_t *arr;
+    size_t length;
+    size_t a;
+    size_t b;
+    size_t count;
+    size_t offset;
+    size_t left_marked_count;
+    size_t num_threads;
+};
+static void swap_local_range(void *args_, size_t i) {
+    struct swap_local_range_args *args = args_;
     size_t local_start = get_local_start(world_rank);
-    int ret;
 
     bool s =
-        (offset % (length / 2) + left_marked_count >= length / 2) != (offset >= length / 2);
+        (args->offset % (args->length / 2) + args->left_marked_count
+                >= args->length / 2)
+            != (args->offset >= args->length / 2);
 
-    for (size_t i = 0; i < count; i++) {
-        bool cond = s != (a + i >= (offset + left_marked_count) % (length / 2));
-        o_memswap(&arr[a + i - local_start], &arr[b + i - local_start],
-                sizeof(*arr), cond);
+    size_t start = i * args->length / args->num_threads;
+    size_t end = (i + 1) * args->length / args->num_threads;
+    for (size_t j = start; j < end; j++) {
+        bool cond =
+            s
+                != (args->a + j
+                        >= (args->offset + args->left_marked_count)
+                            % (args->length / 2));
+        o_memswap(&args->arr[args->a + j - local_start],
+                &args->arr[args->b + j - local_start],
+                sizeof(*args->arr), cond);
     }
-
-    ret = 0;
-
-    return ret;
 }
 
 static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
@@ -159,7 +173,8 @@ exit:
 }
 
 static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start,
-        size_t count, size_t offset, size_t left_marked_count) {
+        size_t count, size_t offset, size_t left_marked_count,
+        size_t num_threads) {
     // TODO Assumption: Only either a subset of range A is local, or a subset of
     // range B is local. For local-remote swaps, the subset of the remote range
     // correspondingw with the local range is entirely contained within a single
@@ -172,8 +187,29 @@ static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start
     bool b_is_local = b_start < local_end && b_start + count > local_start;
 
     if (a_is_local && b_is_local) {
-        return swap_local_range(arr, length, a_start, b_start, count, offset,
-                left_marked_count);
+        struct swap_local_range_args args = {
+            .arr = arr,
+            .length = length,
+            .a = a_start,
+            .b = b_start,
+            .count = count,
+            .offset = offset,
+            .left_marked_count = left_marked_count,
+            .num_threads = num_threads,
+        };
+        struct thread_work work;
+        if (num_threads > 1) {
+            work.type = THREAD_WORK_ITER;
+            work.iter.func = swap_local_range;
+            work.iter.arg = &args;
+            work.iter.count = num_threads - 1;
+            thread_work_push(&work);
+        }
+        swap_local_range(&args, num_threads - 1);
+        if (num_threads > 1) {
+            thread_wait(&work);
+        }
+        return 0;
     } else if (a_is_local) {
         size_t a_local_start = MAX(a_start, local_start);
         size_t a_local_end = MIN(a_start + count, local_end);
@@ -294,7 +330,7 @@ static void compact(void *args_) {
     ret =
         swap_range(args->arr, args->length, args->start,
                 args->start + args->length / 2, args->length / 2, args->offset,
-                left_marked_count);
+                left_marked_count, args->num_threads);
     if (ret) {
         handle_error_string(
                 "Error swapping range with start %lu and length %lu",
@@ -618,7 +654,8 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Nonoblivious sort. */
-    ret = nonoblivious_sort(arr, length, local_length, local_start);
+    ret =
+        nonoblivious_sort(arr, length, local_length, local_start, num_threads);
     if (ret) {
         goto exit;
     }

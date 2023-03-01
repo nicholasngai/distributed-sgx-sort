@@ -12,6 +12,7 @@
 #include "common/util.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
+#include "enclave/qsort.h"
 #include "enclave/threading.h"
 
 #define BUF_SIZE 1024
@@ -20,7 +21,8 @@
 /* Compares elements by the tuple (key, ORP ID). The check for the ORP ID must
  * always be run (it must be oblivious whether the comparison result is based on
  * the key or on the ORP ID), since we leak info on duplicate keys otherwise. */
-static int mergesort_comparator(const void *a_, const void *b_) {
+static int mergesort_comparator(const void *a_, const void *b_,
+        void *aux UNUSED) {
     const elem_t *a = a_;
     const elem_t *b = b_;
     int comp_key = (a->key > b->key) - (a->key < b->key);
@@ -28,172 +30,83 @@ static int mergesort_comparator(const void *a_, const void *b_) {
     return (comp_key << 1) + comp_orp_id;
 }
 
-/* Sort ARR[RUN_IDX * BUF_SIZE] to ARR[MIN((RUN_IDX + 1), LENGTH)]. The results
- * will be stored in the same * location as the inputs. */
+/* Sort ARR[RUN_IDX * LENGTH / NUM_THREADS] to ARR[(RUN_IDX + 1) * LENGTH / NUM_THREADS]. The results
+ * will be stored in the same location as the inputs. */
 struct mergesort_first_pass_args {
     elem_t *arr;
     size_t length;
+    size_t num_threads;
 };
 static void mergesort_first_pass(void *args_, size_t run_idx) {
     struct mergesort_first_pass_args *args = args_;
 
-    size_t run_start = run_idx * BUF_SIZE;
-    size_t run_length = MIN(args->length - run_start, BUF_SIZE);
+    size_t run_start = run_idx * args->length / args->num_threads;
+    size_t run_end = (run_idx + 1) * args->length / args->num_threads;
 
     /* Sort using libc quicksort. */
-    qsort(args->arr + run_start, run_length, sizeof(*args->arr),
-            mergesort_comparator);
+    qsort_glibc(args->arr + run_start, run_end - run_start, sizeof(*args->arr),
+            mergesort_comparator, NULL);
 }
 
-/* Merge each BUF_SIZE runs of length RUN_LENGTH starting at element
- * ARR[RUN_IDX * RUN_LENGTH * BUF_SIZE] and writing them to a single run of
- * length RUN_LENGTH * BUF_SIZE at OUT[RUN_IDX * RUN_LENGTH * BUF_SIZE]. If
- * LENGTH - RUN_IDX * RUN_LENGTH * BUF_SIZE is less than RUN_LENGTH * BUF_SIZE,
- * then the number of runs is reduced, and the last run is truncated. */
-struct mergesort_pass_args {
-    elem_t *input;
-    elem_t *output;
-    size_t length;
-    size_t run_length;
-    int ret;
-};
-static void mergesort_pass(void *args_, size_t run_idx) {
-    struct mergesort_pass_args *args = args_;
+/* Non-oblivious mergesort. */
+static int mergesort(elem_t *arr, elem_t *out, size_t length,
+        size_t num_threads) {
     int ret;
 
-    /* Compute the current run length and start. */
-    size_t run_start = run_idx * args->run_length * BUF_SIZE;
-    size_t num_runs =
-        MIN(CEIL_DIV(args->length - run_start, args->run_length), BUF_SIZE);
-
-    /* Create index buffer. */
-    size_t *merge_indices = malloc(num_runs * sizeof(*merge_indices));
-    if (!merge_indices) {
-        perror("Allocate merge index buffer");
-        ret = errno;
-        goto exit;
-    }
-    memset(merge_indices, '\0', num_runs * sizeof(*merge_indices));
-
-    /* Merge the runs in the buffer and encrypt to the output array.
-     * Nodes for which we have reach the end of the array are marked as
-     * a dummy element, so we continue until all elems in buffer are
-     * dummy elems. */
-    size_t output_idx = 0;
-    bool all_done;
-    do {
-        /* Scan for lowest elem. */
-        // TODO Use a heap?
-        size_t lowest_run;
-        size_t lowest_idx;
-        all_done = true;
-        for (size_t j = 0; j < num_runs; j++) {
-            size_t run_idx = j * args->run_length + merge_indices[j];
-
-            if (merge_indices[j] >= args->run_length
-                    || run_start + run_idx >= args->length) {
-                continue;
-            }
-            if (all_done
-                    || mergesort_comparator(&args->input[run_start + run_idx],
-                        &args->input[run_start + lowest_idx]) < 0) {
-                lowest_run = j;
-                lowest_idx = run_idx;
-            }
-            all_done = false;
-        }
-
-        /* Break out of loop if all done. */
-        if (all_done) {
-            continue;
-        }
-
-        /* Copy lowest elem to output. */
-        memcpy(&args->output[run_start + output_idx],
-                &args->input[run_start + lowest_idx], sizeof(*args->input));
-        merge_indices[lowest_run]++;
-        output_idx++;
-    } while (!all_done);
-
-    ret = 0;
-
-    free(merge_indices);
-exit:
-    if (ret) {
-        __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
-                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-    }
-    ;
-}
-
-/* Non-oblivious sort. Based on an external mergesort algorithm. */
-static int mergesort(elem_t *arr, elem_t *out, size_t length) {
-    int ret;
-
-    /* Start by sorting runs of BUF_SIZE. */
+    /* Start by sort runs of LENGTH / NUM_THREADS. */
     struct mergesort_first_pass_args args = {
         .arr = arr,
         .length = length,
+        .num_threads = num_threads,
     };
     struct thread_work work = {
         .type = THREAD_WORK_ITER,
         .iter = {
             .func = mergesort_first_pass,
             .arg = &args,
-            .count = CEIL_DIV(length, BUF_SIZE),
+            .count = num_threads,
         },
     };
     thread_work_push(&work);
     thread_work_until_empty();
     thread_wait(&work);
 
-    /* Merge runs of increasing length in a BUF_SIZE-way merge by reading the
-     * next smallest element of run i into buffer[i], then merging and
-     * encrypting to the output buffer. */
-    elem_t *input = arr;
-    elem_t *output = out;
-    for (size_t run_length = BUF_SIZE; run_length < length;
-            run_length *= BUF_SIZE) {
-        /* BUF_SIZE-way merge. */
-        struct mergesort_pass_args args = {
-            .input = input,
-            .output = output,
-            .length = length,
-            .run_length = run_length,
-        };
-        struct thread_work work = {
-            .type = THREAD_WORK_ITER,
-            .iter = {
-                .func = mergesort_pass,
-                .arg = &args,
-                .count = CEIL_DIV(length, run_length * BUF_SIZE),
-            },
-        };
-        thread_work_push(&work);
-        thread_work_until_empty();
-        thread_wait(&work);
-        ret = args.ret;
-        if (ret) {
-            handle_error_string("Error in run-length %lu merges of mergesort",
-                    run_length);
-            goto exit;
-        }
-
-        /* Swap the input and output arrays. */
-        elem_t *temp = input;
-        input = output;
-        output = temp;
+    if (num_threads == 1) {
+        memcpy(out, arr, length * sizeof(*out));
+        return 0;
     }
 
-    /* If the final merging output (now the input since it would have been
-     * swapped) isn't the output parameter, copy to the right place. */
-    if (input != out) {
-        memcpy(out, input, length * sizeof(*out));
+    /* Compute initial mergesort indices. */
+    size_t merge_indices[num_threads];
+    for (size_t i = 0; i < num_threads; i++) {
+        merge_indices[i] = i * length / num_threads;
+    }
+
+    /* Merge runs from each thread into output. */
+    for (size_t i = 0; i < length; i++) {
+        /* Scan for lowest elem. */
+        // TODO Use a heap?
+        size_t lowest_run = SIZE_MAX;
+        size_t lowest_idx;
+        for (size_t j = 0; j < num_threads; j++) {
+            if (merge_indices[j] >= (j + 1) * length / num_threads) {
+                continue;
+            }
+            if (lowest_run == SIZE_MAX
+                    || mergesort_comparator(&arr[merge_indices[j]],
+                        &arr[lowest_idx], NULL) < 0) {
+                lowest_run = j;
+                lowest_idx = merge_indices[j];
+            }
+        }
+
+        /* Copy lowest elem to output. */
+        memcpy(&out[i], &arr[lowest_idx], sizeof(*out));
+        merge_indices[lowest_run]++;
     }
 
     ret = 0;
 
-exit:
     return ret;
 }
 
@@ -624,7 +537,7 @@ exit:
 }
 
 int nonoblivious_sort(elem_t *arr, size_t length, size_t local_length,
-        size_t local_start) {
+        size_t local_start, size_t num_threads) {
     size_t src_local_start = length * world_rank / world_size;
     size_t src_local_length =
         length * (world_rank + 1) / world_size - src_local_start;
@@ -660,7 +573,7 @@ int nonoblivious_sort(elem_t *arr, size_t length, size_t local_length,
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Sort local partitions. */
-    ret = mergesort(buf, arr, src_local_length);
+    ret = mergesort(buf, arr, src_local_length, num_threads);
     if (ret) {
         handle_error_string("Error in non-oblivious local sort");
         goto exit;

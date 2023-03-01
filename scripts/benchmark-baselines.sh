@@ -4,37 +4,17 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+. scripts/benchmark-common.sh
+
 BENCHMARK_DIR=benchmarks/baselines
 BITONIC_CHUNK_SIZE=4096
 BUCKET_SIZE=512
-
-ENCLAVE_OFFSET=0
-
-if [ ! -z "${AZ+x}" ]; then
-    export AZDCAP_DEBUG_LOG_LEVEL=0
-    AZ=true
-    last_e=
-else
-    AZ=false
-fi
 
 mkdir -p "$BENCHMARK_DIR"
 
 ./scripts/sync.sh
 
 for e in 32 16 8 4 2 1; do
-    # Deallocate previous machines.
-    if "$AZ"; then
-       if [ ! -z "$last_e" ]; then
-            i=$(( last_e - 1 ))
-            while [ "$i" -ge "$e" ]; do
-                az vm deallocate -g enclave_group -n "enclave$(( i + ENCLAVE_OFFSET ))" --no-wait
-                i=$(( i - 1 ))
-            done
-       fi
-       last_e=$e
-    fi
-
     for a in $(find ./baselines -type f -perm -111); do
         # Build command template.
         hosts=''
@@ -55,16 +35,11 @@ for e in 32 16 8 4 2 1; do
             echo "Command: $cmd"
             for i in {1..4}; do
                 $cmd
-            done | tee "$BENCHMARK_DIR/$(basename "$a")-enclaves$e-size$s.txt"
+            done | tee "$BENCHMARK_DIR/$(basename "$a")-sgx2-enclaves$e-size$s.txt"
         done
     done
-done
 
-# Deallocate remaining machines.
-if "$AZ"; then
-    i=$(( last_e - 1 ))
-    while [ "$i" -ge 0 ]; do
-        az vm deallocate -g enclave_group -n "enclave$(( i + ENCLAVE_OFFSET ))" --no-wait
-        i=$(( i - 1 ))
-    done
-fi
+    if "$AZ"; then
+        deallocate_az_vm "$(( e / 2 + ENCLAVE_OFFSET ))" "$(( e + ENCLAVE_OFFSET ))"
+    fi
+done

@@ -61,32 +61,39 @@ void bucket_free(void) {
 
 /* Bucket sort. */
 
+/* For output elements OUT[i * LENGTH / NUM_THREADS] to
+ * OUT[(i + 1) * LENGTH / NUM_THREADS], if the index j is even, copy element
+ * ARR[j / 2] to the OUT[j]. Else, mark OUT[j] as a dummy element. */
 struct assign_random_id_args {
     const elem_t *arr;
     elem_t *out;
-    size_t length;
-    size_t src_start_idx;
+    size_t arr_length;
+    size_t out_length;
     size_t result_start_idx;
-    elem_t *dummy_elem;
+    size_t num_threads;
     int ret;
 };
 static void assign_random_id(void *args_, size_t i) {
     struct assign_random_id_args *args = args_;
     int ret;
 
-    if (i % 2 == 0 && i < args->length * 2) {
-        /* Copy elem from index i / 2 and assign ORP ID. */
-        memcpy(&args->out[i], &args->arr[i / 2], sizeof(args->out[i]));
-        ret = rand_read(&args->out[i].orp_id, sizeof(args->out[i].orp_id));
-        if (ret) {
-            handle_error_string("Error assigning random ID to elem %lu",
-                    i + args->result_start_idx);
-            goto exit;
+    size_t start = i * args->out_length / args->num_threads;
+    size_t end = (i + 1) * args->out_length / args->num_threads;
+    for (size_t j = start; j < end; j++) {
+        if (j % 2 == 0 && j < args->arr_length * 2) {
+            /* Copy elem from index j / 2 and assign ORP ID. */
+            memcpy(&args->out[j], &args->arr[j / 2], sizeof(args->out[j]));
+            ret = rand_read(&args->out[j].orp_id, sizeof(args->out[j].orp_id));
+            if (ret) {
+                handle_error_string("Error assigning random ID to elem %lu",
+                        i + args->result_start_idx);
+                goto exit;
+            }
+            args->out[j].is_dummy = false;
+        } else {
+            /* Use dummy elem. */
+            args->out[j].is_dummy = true;
         }
-        args->out[i].is_dummy = false;
-    } else {
-        /* Use dummy elem. */
-        args->out[i].is_dummy = true;
     }
 
     ret = 0;
@@ -99,28 +106,22 @@ exit:
     }
 }
 
-/* Assigns random ORP IDs to the encrypted elems, whose first element is
- * encrypted with index SRC_START_IDX, in ARR and distributes them evenly over
- * the 2 * LENGTH elements in OUT, re-encrypting them according to
- * RESULT_START_IDX. Thus, ARR is assumed to be at least
+/* Assigns random ORP IDs to the elems in ARR and distributes them evenly over
+ * the 2 * LENGTH elements in OUT. Thus, ARR is assumed to be at least
  * 2 * MAX(LENGTH, BUCKET_SIZE) bytes. The result is an array with real elements
  * interspersed with dummy elements. */
 // TODO Can we do the first bucket assignment scan while generating these?
 static int assign_random_ids_and_spread(const elem_t *arr, void *out,
-        size_t length, size_t src_start_idx, size_t result_start_idx) {
+        size_t length, size_t result_start_idx, size_t num_threads) {
     int ret;
-
-    elem_t dummy_elem;
-    memset(&dummy_elem, '\0', sizeof(dummy_elem));
-    dummy_elem.is_dummy = true;
 
     struct assign_random_id_args args = {
         .arr = arr,
         .out = out,
-        .length = length,
-        .src_start_idx = src_start_idx,
+        .arr_length = length,
+        .out_length = MAX(length, BUCKET_SIZE) * 2,
         .result_start_idx = result_start_idx,
-        .dummy_elem = &dummy_elem,
+        .num_threads = num_threads,
         .ret = 0,
     };
     struct thread_work work = {
@@ -128,7 +129,7 @@ static int assign_random_ids_and_spread(const elem_t *arr, void *out,
         .iter = {
             .func = assign_random_id,
             .arg = &args,
-            .count = MAX(length, BUCKET_SIZE) * 2,
+            .count = num_threads,
         },
     };
     thread_work_push(&work);
@@ -424,6 +425,8 @@ static int bucket_route(elem_t *arr, size_t num_levels, size_t start_bit_idx) {
         }
     }
 
+    ret = 0;
+
 exit:
     return ret;
 }
@@ -633,7 +636,7 @@ exit:
     }
 }
 
-int bucket_sort(elem_t *arr, size_t length, size_t num_threads UNUSED) {
+int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     int ret;
 
     total_length = length;
@@ -659,8 +662,9 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads UNUSED) {
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Spread the elements located in the first half of our input array. */
-    ret = assign_random_ids_and_spread(arr, buf, src_local_length,
-            src_local_start, local_start);
+    ret =
+        assign_random_ids_and_spread(arr, buf, src_local_length, local_start,
+                num_threads);
     if (ret) {
         handle_error_string("Error assigning random IDs to elems");
         ret = errno;
@@ -744,7 +748,8 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads UNUSED) {
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
-    ret = nonoblivious_sort(arr, length, compress_len, local_start);
+    ret =
+        nonoblivious_sort(arr, length, compress_len, local_start, num_threads);
     if (ret) {
         handle_error_string("Error in nonoblivious sort");
         goto exit;
