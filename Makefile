@@ -49,6 +49,8 @@ BASELINE_DEPS = $(BASELINE_TARGETS:=.d)
 
 SGX_SDK = /opt/intel/sgxsdk
 
+MBEDTLS_SGX = third_party/mbedtls-SGX/build
+
 CPPFLAGS = -I. \
 	-I$(SGX_SDK)/include \
 	-Ithird_party/mbedtls-SGX/include \
@@ -57,8 +59,7 @@ CPPFLAGS = -I. \
 CFLAGS = -O0 -Wall -Wextra -ggdb -g3
 LDFLAGS = \
 	-L$(SGX_SDK)/lib64 \
-	-Lthird_party/mbedtls-SGX/build/ocall \
-	-Lthird_party/mbedtls-SGX/build/trusted
+	-Lthird_party/liboblivious
 LDLIBS =
 
 # all target.
@@ -98,7 +99,8 @@ HOST_CPPFLAGS = $(CPPFLAGS)
 HOST_CFLAGS = $(CFLAGS) \
 	$(CFLAGS) \
 	$(shell pkg-config mpi --cflags)
-HOST_LDFLAGS = $(LDFLAGS)
+HOST_LDFLAGS = $(LDFLAGS) \
+	-L$(MBEDTLS_SGX)/ocall
 HOST_LDLIBS = $(LDLIBS) \
 	-lmbedcrypto \
 	-lmbedtls_SGX_u \
@@ -118,7 +120,7 @@ ENCLAVE_CPPFLAGS = $(CPPFLAGS) \
 ENCLAVE_CFLAGS = $(CFLAGS)
 ENCLAVE_LDFLAGS = $(LDFLAGS) \
 	-nostdlib \
-	-Lthird_party/liboblivious
+	-L$(MBEDTLS_SGX)/trusted
 ENCLAVE_LDLIBS = $(LDLIBS) \
 	-Wl,--whole-archive -lsgx_trts -Wl,--no-whole-archive \
 	-Wl,--start-group \
