@@ -1,5 +1,6 @@
 #include "enclave/opaque.h"
 #include <stdbool.h>
+#include <stdlib.h>
 #include <string.h>
 #include <liboblivious/primitives.h>
 #include "common/defs.h"
