@@ -48,19 +48,22 @@ BASELINE_TARGETS = \
 BASELINE_DEPS = $(BASELINE_TARGETS:=.d)
 
 SGX_SDK = /opt/intel/sgxsdk
-
-MBEDTLS_SGX = third_party/mbedtls-SGX/build
+MBEDTLS_SGX = third_party/mbedtls-SGX
+MBEDTLS_SGX_LIBS = $(MBEDTLS_SGX)/ocall/libmbedtls_SGX_u.a $(MBEDTLS_SGX)/trusted/libmbedtls_SGX_t.a
+LIBOBLIVIOUS = third_party/liboblivious
+LIBOBLIVIOUS_LIB = $(LIBOBLIVIOUS)/liboblivious.a
+THIRD_PARTY_LIBS = $(LIBOBLIVIOUS_LIB) $(MBEDTLS_SGX_LIBS)
 
 CPPFLAGS = -I. \
 	-I$(SGX_SDK)/include \
-	-Ithird_party/mbedtls-SGX/include \
-	-Ithird_party/liboblivious/include \
-	-DDISTRIBUTED_SGX_SORT_CACHE_COUNTER -DOE_DEBUG -DOE_SIMULATION
-CFLAGS = -O0 -Wall -Wextra -ggdb -g3
+	-I$(LIBOBLIVIOUS)/include \
+	-I$(MBEDTLS_SGX)/include \
+	-DOE_SIMULATION_CERT
+CFLAGS = -O3 -Wall -Wextra
 LDFLAGS = \
-	-L$(SGX_SDK)/lib64 \
-	-Lthird_party/liboblivious
-LDLIBS =
+	-L$(LIBOBLIVIOUS)
+LDLIBS = \
+	-l:liboblivious.a
 
 # all target.
 
@@ -90,56 +93,62 @@ CPPFLAGS += -MMD
 
 # Third-party deps.
 
-third_party/liboblivious/liboblivious.a third_party/liboblivious/liboblivious.so:
-	$(MAKE) -C third_party/liboblivious
+$(LIBOBLIVIOUS_LIB):
+	$(MAKE) -C $(LIBOBLIVIOUS)
 
 # Host.
 
 HOST_CPPFLAGS = $(CPPFLAGS)
-HOST_CFLAGS = $(CFLAGS) \
-	$(CFLAGS) \
-	$(shell pkg-config mpi --cflags)
-HOST_LDFLAGS = $(LDFLAGS) \
-	-L$(MBEDTLS_SGX)/ocall
-HOST_LDLIBS = $(LDLIBS) \
+HOST_CFLAGS = \
+	$(shell pkg-config mpi --cflags) \
+	$(CFLAGS)
+HOST_LDFLAGS = \
+	-L$(SGX_SDK)/lib64 \
+	-L$(MBEDTLS_SGX)/ocall \
+	$(LDFLAGS)
+HOST_LDLIBS = \
+	$(shell pkg-config mpi --libs) \
 	-lmbedcrypto \
 	-lmbedtls_SGX_u \
-	$(shell pkg-config mpi --libs) \
-	-lsgx_urts
+	-lsgx_urts \
+	$(LDLIBS)
 
 $(HOST_DIR)/%.o: $(HOST_DIR)/%.c
 	$(CC) $(HOST_CFLAGS) $(HOST_CPPFLAGS) -c -o $@ $<
 
-$(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) third_party/liboblivious/liboblivious.a
-	$(CC) $(HOST_LDFLAGS) $^ $(HOST_LDLIBS) -o $@
+$(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) $(THIRD_PARTY_LIBS)
+	$(CC) $(HOST_LDFLAGS) $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) $(HOST_LDLIBS) -o $@
 
 # Enclave.
 
-ENCLAVE_CPPFLAGS = $(CPPFLAGS) \
-	-nostdinc -I$(SGX_SDK)/include/tlibc
+ENCLAVE_CPPFLAGS = \
+	-nostdinc -I$(SGX_SDK)/include/tlibc \
+	$(CPPFLAGS)
 ENCLAVE_CFLAGS = $(CFLAGS)
-ENCLAVE_LDFLAGS = $(LDFLAGS) \
+ENCLAVE_LDFLAGS = \
 	-nostdlib \
-	-L$(MBEDTLS_SGX)/trusted
-ENCLAVE_LDLIBS = $(LDLIBS) \
+	-L$(SGX_SDK)/lib64 \
+	-L$(MBEDTLS_SGX)/trusted \
+	$(LDFLAGS)
+ENCLAVE_LDLIBS = \
 	-Wl,--whole-archive -lsgx_trts -Wl,--no-whole-archive \
 	-Wl,--start-group \
 		-lmbedtls_SGX_t \
-		-l:liboblivious.a \
 		-lsgx_tstdc \
 		-lsgx_tcxx \
 		-lsgx_tcrypto \
 		-lsgx_tservice \
+		$(LDLIBS) \
 	-Wl,--end-group \
 	-Wl,-Bstatic -Wl,-Bsymbolic -Wl,--no-undefined \
 	-Wl,-pie,-eenclave_entry -Wl,--export-dynamic  \
-	-Wl,--defsym,__ImageBase=0 -Wl,--gc-sections
+	-Wl,--defsym,__ImageBase=0 -Wl,--gc-sections \
 
 $(ENCLAVE_DIR)/%.o: $(ENCLAVE_DIR)/%.c
 	$(CC) $(ENCLAVE_CFLAGS) $(ENCLAVE_CPPFLAGS) -c -o $@ $<
 
-$(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) third_party/liboblivious/liboblivious.a
-	$(CC) $(ENCLAVE_LDFLAGS) $^ $(ENCLAVE_LDLIBS) -o $@
+$(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) $(THIRD_PARTY_LIBS)
+	$(CC) $(ENCLAVE_LDFLAGS) $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) $(ENCLAVE_LDLIBS) -o $@
 
 $(ENCLAVE_TARGET).signed: $(ENCLAVE_TARGET) $(ENCLAVE_KEY) $(ENCLAVE_PUBKEY) $(ENCLAVE_CONF)
 	$(SGX_SIGN) sign -enclave $< -out $@ -key $(ENCLAVE_KEY) -config $(ENCLAVE_CONF)
@@ -159,34 +168,29 @@ $(COMMON_DIR)/%.o: $(COMMON_DIR)/%.c
 
 HOSTONLY_CPPFLAGS = $(HOST_CPPFLAGS) -DDISTRIBUTED_SGX_SORT_HOSTONLY
 HOSTONLY_CFLAGS = $(HOST_CFLAGS) -Wno-implicit-function-declaration -Wno-unused
-HOSTONLY_LDFLAGS = $(HOST_LDFLAGS) \
-	-Lthird_party/liboblivious
+HOSTONLY_LDFLAGS = $(HOST_LDFLAGS)
 HOSTONLY_LDLIBS = $(HOST_LDLIBS) \
-	-l:liboblivious.a \
 	-lmbedx509 \
 	-lmbedtls
 
-$(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
-	$(CC) $(HOSTONLY_CFLAGS) $(HOSTONLY_CPPFLAGS) $(HOSTONLY_LDFLAGS) $^ $(HOSTONLY_LDLIBS) -o $@
+$(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) $(THIRD_PARTY_LIBS)
+	$(CC) $(HOSTONLY_CFLAGS) $(HOSTONLY_CPPFLAGS) $(HOSTONLY_LDFLAGS) $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) $(HOSTONLY_LDLIBS) -o $@
 
 # Baselines.
 
-BASELINE_CPPFLAGS = $(CPPFLAGS)
-BASELINE_CFLAGS = $(CFLAGS) \
-	$(shell pkg-config mpi --cflags)
-BASELINE_LDFLAGS = $(LDFLAGS)
-BASELINE_LDLIBS = $(LDLIBS) \
-	-lmbedcrypto \
-	$(shell pkg-config mpi --libs)
+BASELINE_CPPFLAGS = $(HOST_CPPFLAGS)
+BASELINE_CFLAGS = $(HOST_CFLAGS)
+BASELINE_LDFLAGS = $(HOST_LDFLAGS)
+BASELINE_LDLIBS = $(HOST_LDLIBS)
 
-$(BASELINE_DIR)/%: $(BASELINE_DIR)/%.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
-	$(CC) $(BASELINE_CFLAGS) $(BASELINE_CPPFLAGS) $(BASELINE_LDFLAGS) $^ $(BASELINE_LDLIBS) -o $@
+$(BASELINE_DIR)/%: $(BASELINE_DIR)/%.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) $(THIRD_PARTY_LIBS)
+	$(CC) $(BASELINE_CFLAGS) $(BASELINE_CPPFLAGS) $(BASELINE_LDFLAGS) $< $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) $(BASELINE_LDLIBS) -o $@
 
 # Misc.
 
 .PHONY: clean
 clean:
-	$(MAKE) -C third_party/liboblivious clean
+	$(MAKE) -C $(LIBOBLIVIOUS) clean
 	rm -f $(SGX_EDGE) \
 		$(COMMON_DEPS) $(COMMON_OBJS) \
 		$(HOST_TARGET) $(HOST_DEPS) $(HOST_OBJS) \
