@@ -97,6 +97,10 @@ CPPFLAGS += -MMD
 $(LIBOBLIVIOUS_LIB):
 	$(MAKE) -C $(LIBOBLIVIOUS)
 
+$(MBEDTLS_SGX_LIBS):
+	cmake -S $(MBEDTLS_SGX) -B $(MBEDTLS_SGX)
+	$(MAKE) -C $(MBEDTLS_SGX)
+
 # Host.
 
 HOST_CPPFLAGS = $(CPPFLAGS)
@@ -109,9 +113,9 @@ HOST_LDFLAGS = \
 	$(LDFLAGS)
 HOST_LDLIBS = \
 	$(shell pkg-config mpi --libs) \
-	-lmbedcrypto \
-	-lmbedtls_SGX_u \
 	-lsgx_urts \
+	-lmbedcrypto \
+	-l:libmbedtls_SGX_u.a \
 	$(LDLIBS)
 
 $(HOST_DIR)/%.o: $(HOST_DIR)/%.c
@@ -138,11 +142,11 @@ ENCLAVE_LDFLAGS = \
 ENCLAVE_LDLIBS = \
 	-Wl,--whole-archive -lsgx_trts -Wl,--no-whole-archive \
 	-Wl,--start-group \
-		-lmbedtls_SGX_t \
 		-lsgx_tstdc \
 		-lsgx_tcxx \
 		-lsgx_tcrypto \
 		-lsgx_tservice \
+		-l:libmbedtls_SGX_t.a \
 		$(LDLIBS) \
 	-Wl,--end-group \
 	-Wl,-Bstatic -Wl,-Bsymbolic -Wl,--no-undefined \
@@ -196,6 +200,7 @@ $(BASELINE_DIR)/%: $(BASELINE_DIR)/%.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) 
 .PHONY: clean
 clean:
 	$(MAKE) -C $(LIBOBLIVIOUS) clean
+	$(MAKE) -C $(MBEDTLS_SGX) clean
 	rm -f $(SGX_EDGE) \
 		$(COMMON_DEPS) $(COMMON_OBJS) \
 		$(HOST_TARGET) $(HOST_DEPS) $(HOST_OBJS) \
