@@ -21,6 +21,7 @@
 #include "enclave/parallel_t.h"
 #endif /* DISTRUBTED_SGX_SORT_HOSTONLY */
 #include "enclave/synch.h"
+#include "enclave/util.h"
 
 #include <mbedtls/debug.h>
 

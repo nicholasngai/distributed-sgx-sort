@@ -14,6 +14,7 @@
 #include "enclave/parallel_enc.h"
 #include "enclave/qsort.h"
 #include "enclave/threading.h"
+#include "enclave/util.h"
 
 #define BUF_SIZE 1024
 #define SAMPLE_PARTITION_BUF_SIZE 512

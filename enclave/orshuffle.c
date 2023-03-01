@@ -16,6 +16,7 @@
 #include "enclave/nonoblivious.h"
 #include "enclave/parallel_enc.h"
 #include "enclave/threading.h"
+#include "enclave/util.h"
 
 #define SWAP_CHUNK_SIZE 4096
 

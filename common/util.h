@@ -66,8 +66,4 @@ static inline uint16_t do_ntohs(uint16_t netshort) {
     return hostshort;
 }
 
-#define printf(...)
-#define fprintf(...)
-#define perror(...)
-
 #endif /* distributed-sgx-sort/common/util.h */

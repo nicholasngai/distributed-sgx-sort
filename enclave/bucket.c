@@ -18,6 +18,7 @@
 #include "enclave/nonoblivious.h"
 #include "enclave/parallel_enc.h"
 #include "enclave/threading.h"
+#include "enclave/util.h"
 
 static size_t total_length;
 

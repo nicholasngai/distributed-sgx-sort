@@ -427,6 +427,18 @@ void ocall_mpi_barrier(void) {
     MPI_Barrier(MPI_COMM_WORLD);
 }
 
+void ocall_puts(int fileno, const char *s) {
+    switch (fileno) {
+    case 1:
+    default:
+        fputs(s, stdout);
+        break;
+    case 2:
+        fputs(s, stderr);
+        break;
+    }
+}
+
 int ocall_clock_gettime(struct ocall_timespec *time) {
     struct timespec timespec;
     int ret;

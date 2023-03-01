@@ -17,6 +17,7 @@
 #include "enclave/parallel_t.h"
 #endif
 #include "enclave/threading.h"
+#include "enclave/util.h"
 
 int world_rank;
 int world_size;
