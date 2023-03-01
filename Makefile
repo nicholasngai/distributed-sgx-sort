@@ -127,6 +127,8 @@ ENCLAVE_CPPFLAGS = \
 	$(CPPFLAGS)
 ENCLAVE_CFLAGS = \
 	-ffreestanding \
+	-ffunction-sections \
+	-fdata-sections \
 	$(CFLAGS)
 ENCLAVE_LDFLAGS = \
 	-nostdlib \
