@@ -47,10 +47,17 @@ BASELINE_TARGETS = \
 	$(BASELINE_DIR)/nonoblivious-quickselect
 BASELINE_DEPS = $(BASELINE_TARGETS:=.d)
 
-CPPFLAGS = -I. -Ithird_party/liboblivious/include
+LIBOBLIVIOUS = third_party/liboblivious
+LIBOBLIVIOUS_LIB = $(LIBOBLIVIOUS)/liboblivious.a
+THIRD_PARTY_LIBS = $(LIBOBLIVIOUS_LIB)
+
+CPPFLAGS = -I. \
+	-I$(LIBOBLIVIOUS)/include
 CFLAGS = -O3 -Wall -Wextra
-LDFLAGS =
-LDLIBS =
+LDFLAGS = \
+	-L$(LIBOBLIVIOUS)
+LDLIBS = \
+	-l:liboblivious.a
 
 # all target.
 
@@ -83,26 +90,27 @@ CPPFLAGS += -MMD
 
 # Third-party deps.
 
-third_party/liboblivious/liboblivious.a third_party/liboblivious/liboblivious.so:
-	$(MAKE) -C third_party/liboblivious
+$(LIBOBLIVIOUS_LIB):
+	$(MAKE) -C $(LIBOBLIVIOUS)
 
 # Host.
 
 HOST_CPPFLAGS = $(CPPFLAGS)
-HOST_CFLAGS = $(CFLAGS) \
-	$(CFLAGS) \
+HOST_CFLAGS = \
 	$(shell pkg-config mpi --cflags) \
-	$(shell pkg-config oehost-$(C_COMPILER) --cflags)
+	$(shell pkg-config oehost-$(C_COMPILER) --cflags) \
+	$(CFLAGS)
 HOST_LDFLAGS = $(LDFLAGS)
-HOST_LDLIBS = $(LDLIBS) \
-	-lmbedcrypto \
+HOST_LDLIBS = \
 	$(shell pkg-config mpi --libs) \
-	$(shell pkg-config oehost-$(C_COMPILER) --libs)
+	$(shell pkg-config oehost-$(C_COMPILER) --libs) \
+	-lmbedcrypto \
+	$(LDLIBS)
 
 $(HOST_DIR)/%.o: $(HOST_DIR)/%.c
 	$(CC) $(HOST_CFLAGS) $(HOST_CPPFLAGS) -c -o $@ $<
 
-$(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) third_party/liboblivious/liboblivious.a
+$(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) $(THIRD_PARTY_LIBS)
 	$(CC) $(HOST_LDFLAGS) $^ $(HOST_LDLIBS) -o $@
 
 # Enclave.
@@ -110,17 +118,15 @@ $(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) third_party/libobl
 ENCLAVE_CPPFLAGS = $(CPPFLAGS)
 ENCLAVE_CFLAGS = $(CFLAGS) \
 	$(shell pkg-config oeenclave-$(C_COMPILER) --cflags)
-ENCLAVE_LDFLAGS = $(LDFLAGS) \
-	-Lthird_party/liboblivious
+ENCLAVE_LDFLAGS = $(LDFLAGS)
 ENCLAVE_LDLIBS = $(LDLIBS) \
-	-l:liboblivious.a \
 	$(shell pkg-config oeenclave-$(C_COMPILER) --libs) \
 	$(shell pkg-config oeenclave-$(C_COMPILER) --variable=mbedtlslibs)
 
 $(ENCLAVE_DIR)/%.o: $(ENCLAVE_DIR)/%.c
 	$(CC) $(ENCLAVE_CFLAGS) $(ENCLAVE_CPPFLAGS) -c -o $@ $<
 
-$(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) third_party/liboblivious/liboblivious.a
+$(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) $(THIRD_PARTY_LIBS)
 	$(CC) $(ENCLAVE_LDFLAGS) $^ $(ENCLAVE_LDLIBS) -o $@
 
 $(ENCLAVE_TARGET).signed: $(ENCLAVE_TARGET) $(ENCLAVE_KEY) $(ENCLAVE_PUBKEY) $(ENCLAVE_CONF)
@@ -141,34 +147,29 @@ $(COMMON_DIR)/%.o: $(COMMON_DIR)/%.c
 
 HOSTONLY_CPPFLAGS = $(HOST_CPPFLAGS) -DDISTRIBUTED_SGX_SORT_HOSTONLY
 HOSTONLY_CFLAGS = $(HOST_CFLAGS) -Wno-implicit-function-declaration -Wno-unused
-HOSTONLY_LDFLAGS = $(HOST_LDFLAGS) \
-	-Lthird_party/liboblivious
+HOSTONLY_LDFLAGS = $(HOST_LDFLAGS)
 HOSTONLY_LDLIBS = $(HOST_LDLIBS) \
-	-l:liboblivious.a \
 	-lmbedx509 \
 	-lmbedtls
 
-$(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
+$(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) $(THIRD_PARTY_LIBS)
 	$(CC) $(HOSTONLY_CFLAGS) $(HOSTONLY_CPPFLAGS) $(HOSTONLY_LDFLAGS) $^ $(HOSTONLY_LDLIBS) -o $@
 
 # Baselines.
 
-BASELINE_CPPFLAGS = $(CPPFLAGS)
-BASELINE_CFLAGS = $(CFLAGS) \
-	$(shell pkg-config mpi --cflags)
-BASELINE_LDFLAGS = $(LDFLAGS)
-BASELINE_LDLIBS = $(LDLIBS) \
-	-lmbedcrypto \
-	$(shell pkg-config mpi --libs)
+BASELINE_CPPFLAGS = $(HOST_CPPFLAGS)
+BASELINE_CFLAGS = $(HOST_CFLAGS)
+BASELINE_LDFLAGS = $(HOST_LDFLAGS)
+BASELINE_LDLIBS = $(HOST_LDLIBS)
 
-$(BASELINE_DIR)/%: $(BASELINE_DIR)/%.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) third_party/liboblivious/liboblivious.a
+$(BASELINE_DIR)/%: $(BASELINE_DIR)/%.c $(HOST_DIR)/error.o $(COMMON_OBJS:.o=.c) $(THIRD_PARTY_LIBS)
 	$(CC) $(BASELINE_CFLAGS) $(BASELINE_CPPFLAGS) $(BASELINE_LDFLAGS) $^ $(BASELINE_LDLIBS) -o $@
 
 # Misc.
 
 .PHONY: clean
 clean:
-	$(MAKE) -C third_party/liboblivious clean
+	$(MAKE) -C $(LIBOBLIVIOUS) clean
 	rm -f $(SGX_EDGE) \
 		$(COMMON_DEPS) $(COMMON_OBJS) \
 		$(HOST_TARGET) $(HOST_DEPS) $(HOST_OBJS) \
