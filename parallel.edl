@@ -57,7 +57,7 @@ enclave {
         void ocall_mpi_barrier(void);
 
         void ocall_puts(int fileno, [in, string] const char *s);
-        int ocall_clock_gettime([out] struct ocall_timespec *time);
+        void ocall_clock_gettime([out] struct ocall_timespec *time);
     };
 
     trusted {

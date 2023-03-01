@@ -438,22 +438,16 @@ void ocall_puts(int fileno, const char *s) {
     }
 }
 
-int ocall_clock_gettime(struct ocall_timespec *time) {
+void ocall_clock_gettime(struct ocall_timespec *time) {
     struct timespec timespec;
-    int ret;
 
     if (clock_gettime(CLOCK_REALTIME, &timespec)) {
-        ret = -1;
-        goto exit;
+        perror("clock_gettime");
+        abort();
     }
 
     time->tv_sec = timespec.tv_sec;
     time->tv_nsec = timespec.tv_nsec;
-
-    ret = 0;
-
-exit:
-    return ret;
 }
 
 static void *start_thread_work(void *enclave_) {

@@ -9,12 +9,17 @@
 #include "common/defs.h"
 #include "common/elem_t.h"
 #include "common/error.h"
+#include "common/ocalls.h"
 #include "common/util.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
 #include "enclave/qsort.h"
 #include "enclave/threading.h"
 #include "enclave/util.h"
+
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+#include "enclave/parallel_t.h"
+#endif
 
 #define BUF_SIZE 1024
 #define SAMPLE_PARTITION_BUF_SIZE 512
@@ -546,12 +551,19 @@ int nonoblivious_sort(elem_t *arr, size_t length, size_t local_length,
     int ret;
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-    struct timespec time_start;
-    if (clock_gettime(CLOCK_REALTIME, &time_start)) {
-        handle_error_string("Error getting time");
-        ret = errno;
-        goto exit;
+    struct ocall_timespec time_start;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    {
+        sgx_status_t result = ocall_clock_gettime(&time_start);
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_clock_gettime");
+            ret = -1;
+            goto exit;
+        }
     }
+#else
+    ocall_clock_gettime(&time_start);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Partition permuted data such that each enclave has its own partition of
@@ -565,12 +577,19 @@ int nonoblivious_sort(elem_t *arr, size_t length, size_t local_length,
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-    struct timespec time_sample_partition;
-    if (clock_gettime(CLOCK_REALTIME, &time_sample_partition)) {
-        handle_error_string("Error getting time");
-        ret = errno;
-        goto exit;
+    struct ocall_timespec time_sample_partition;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    {
+        sgx_status_t result = ocall_clock_gettime(&time_sample_partition);
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_clock_gettime");
+            ret = -1;
+            goto exit;
+        }
     }
+#else
+    ocall_clock_gettime(&time_sample_partition);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Sort local partitions. */
@@ -581,12 +600,19 @@ int nonoblivious_sort(elem_t *arr, size_t length, size_t local_length,
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-    struct timespec time_finish;
-    if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
-        handle_error_string("Error getting time");
-        ret = errno;
-        goto exit;
+    struct ocall_timespec time_finish;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    {
+        sgx_status_t result = ocall_clock_gettime(&time_finish);
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_clock_gettime");
+            ret = -1;
+            goto exit;
+        }
     }
+#else
+    ocall_clock_gettime(&time_finish);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK

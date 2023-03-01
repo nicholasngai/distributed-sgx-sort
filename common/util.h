@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <limits.h>
-#include <time.h>
+#include "common/ocalls.h"
 
 static inline unsigned long next_pow2l(unsigned long x) {
 #ifdef __GNUC__
@@ -42,8 +42,8 @@ static inline int comp_ul(const void *a_, const void *b_) {
 }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-static inline double get_time_difference(struct timespec *start,
-        struct timespec *end) {
+static inline double get_time_difference(struct ocall_timespec *start,
+        struct ocall_timespec *end) {
     return (double) (end->tv_sec * 1000000000 + end->tv_nsec
             - (start->tv_sec * 1000000000 + start->tv_nsec))
         / 1000000000;

@@ -4,21 +4,23 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-#include <time.h>
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
 #include "common/crypto.h"
 #include "common/defs.h"
 #include "common/elem_t.h"
 #include "common/error.h"
+#include "common/ocalls.h"
 #include "common/util.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/nonoblivious.h"
 #include "enclave/parallel_enc.h"
 #include "enclave/threading.h"
 #include "enclave/util.h"
+
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+#include "enclave/parallel_t.h"
+#endif
 
 static size_t total_length;
 
@@ -210,22 +212,6 @@ static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
     /* The number of elements with corresponding bit 1. */
     size_t count1 = 0;
 
-    /* Count number of elements with corresponding bit 1 for local buckets. */
-    if (bucket1_local) {
-        for (size_t i = 0; i < BUCKET_SIZE; i++) {
-            /* Obliviously increment count. */
-            count1 +=
-                ((bucket1[i].orp_id >> bit_idx) & 1) & !bucket1[i].is_dummy;
-        }
-    }
-    if (bucket2_local) {
-        for (size_t i = 0; i < BUCKET_SIZE; i++) {
-            /* Obliviously increment count. */
-            count1 +=
-                ((bucket2[i].orp_id >> bit_idx) & 1) & !bucket2[i].is_dummy;
-        }
-    }
-
     /* If remote, send the current count and then our local buckets. Then,
      * receive the sent count and remote buckets from the other elem. */
     if (!bucket1_local || !bucket2_local) {
@@ -294,6 +280,18 @@ static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
         /* Add the received remote count to the local count to arrive at the
          * total for both buckets. */
         count1 += remote_count1;
+    }
+
+    /* Count number of elements with corresponding bit 1. */
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        /* Obliviously increment count. */
+        count1 +=
+            ((bucket1[i].orp_id >> bit_idx) & 1) & !bucket1[i].is_dummy;
+    }
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        /* Obliviously increment count. */
+        count1 +=
+            ((bucket2[i].orp_id >> bit_idx) & 1) & !bucket2[i].is_dummy;
     }
 
     /* There are count1 elements with bit 1, so we need to assign BUCKET_SIZE -
@@ -654,12 +652,19 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     elem_t *buf = arr + local_length;
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-    struct timespec time_start;
-    if (clock_gettime(CLOCK_REALTIME, &time_start)) {
-        handle_error_string("Error getting time");
-        ret = errno;
-        goto exit;
+    struct ocall_timespec time_start;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    {
+        sgx_status_t result = ocall_clock_gettime(&time_start);
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_clock_gettime");
+            ret = -1;
+            goto exit;
+        }
     }
+#else
+    ocall_clock_gettime(&time_start);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Spread the elements located in the first half of our input array. */
@@ -673,12 +678,19 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-    struct timespec time_assign_ids;
-    if (clock_gettime(CLOCK_REALTIME, &time_assign_ids)) {
-        handle_error_string("Error getting time");
-        ret = errno;
-        goto exit;
+    struct ocall_timespec time_assign_ids;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    {
+        sgx_status_t result = ocall_clock_gettime(&time_assign_ids);
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_clock_gettime");
+            ret = -1;
+            goto exit;
+        }
     }
+#else
+    ocall_clock_gettime(&time_assign_ids);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     size_t route_levels1 = log2li(world_size);
@@ -702,12 +714,19 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-    struct timespec time_merge_split;
-    if (clock_gettime(CLOCK_REALTIME, &time_merge_split)) {
-        handle_error_string("Error getting time");
-        ret = errno;
-        goto exit;
+    struct ocall_timespec time_merge_split;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    {
+        sgx_status_t result = ocall_clock_gettime(&time_merge_split);
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_clock_gettime");
+            ret = -1;
+            goto exit;
+        }
     }
+#else
+    ocall_clock_gettime(&time_merge_split);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Permute each bucket and concatenate them back together by compressing all
@@ -741,12 +760,19 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-    struct timespec time_compress;
-    if (clock_gettime(CLOCK_REALTIME, &time_compress)) {
-        handle_error_string("Error getting time");
-        ret = errno;
-        goto exit;
+    struct ocall_timespec time_compress;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    {
+        sgx_status_t result = ocall_clock_gettime(&time_compress);
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_clock_gettime");
+            ret = -1;
+            goto exit;
+        }
     }
+#else
+    ocall_clock_gettime(&time_compress);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     ret =

@@ -11,12 +11,17 @@
 #include "common/crypto.h"
 #include "common/defs.h"
 #include "common/error.h"
+#include "common/ocalls.h"
 #include "common/util.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/nonoblivious.h"
 #include "enclave/parallel_enc.h"
 #include "enclave/threading.h"
 #include "enclave/util.h"
+
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+#include "enclave/parallel_t.h"
+#endif
 
 #define SWAP_CHUNK_SIZE 4096
 
@@ -621,12 +626,19 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     int ret;
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-    struct timespec time_start;
-    if (clock_gettime(CLOCK_REALTIME, &time_start)) {
-        handle_error_string("Error getting time");
-        ret = errno;
-        goto exit;
+    struct ocall_timespec time_start;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    {
+        sgx_status_t result = ocall_clock_gettime(&time_start);
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_clock_gettime");
+            ret = -1;
+            goto exit;
+        }
     }
+#else
+    ocall_clock_gettime(&time_start);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     total_length = length;
@@ -646,12 +658,19 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
-    struct timespec time_shuffle;
-    if (clock_gettime(CLOCK_REALTIME, &time_shuffle)) {
-        handle_error_string("Error getting time");
-        ret = errno;
-        goto exit;
+    struct ocall_timespec time_shuffle;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    {
+        sgx_status_t result = ocall_clock_gettime(&time_shuffle);
+        if (result != SGX_SUCCESS) {
+            handle_sgx_error(result, "ocall_clock_gettime");
+            ret = -1;
+            goto exit;
+        }
     }
+#else
+    ocall_clock_gettime(&time_shuffle);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Nonoblivious sort. */
