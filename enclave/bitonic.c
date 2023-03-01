@@ -23,7 +23,7 @@ int bitonic_init(void) {
     /* Allocate buffers. */
     buffer = malloc(SWAP_CHUNK_SIZE * sizeof(*buffer));
     if (!buffer) {
-        perror("malloc local_buffer");
+        printf("Error allocating local buffer\n");
         goto exit;
     }
 
@@ -357,7 +357,7 @@ void bitonic_sort(elem_t *arr, size_t length, size_t num_threads) {
     total_length = length;
 
     if (1lu << log2li(length) != length) {
-        fprintf(stderr, "Length must be a multiple of 2\n");
+        printf("Length must be a multiple of 2\n");
         goto exit;
     }
 

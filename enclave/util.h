@@ -3,11 +3,6 @@
 
 #include <stdio.h>
 
-#define stdout 1
-#define stderr 2
-
-void printf(const char *format, ...);
-void fprintf(int fileno, const char *format, ...);
-void perror(const char *s);
+int printf(const char *format, ...);
 
 #endif /* distributed-sgx-sort/enclave/util.h */

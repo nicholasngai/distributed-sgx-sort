@@ -31,7 +31,8 @@ ENCLAVE_OBJS = \
 	$(ENCLAVE_DIR)/orshuffle.o \
 	$(ENCLAVE_DIR)/qsort.o \
 	$(ENCLAVE_DIR)/synch.o \
-	$(ENCLAVE_DIR)/threading.o
+	$(ENCLAVE_DIR)/threading.o \
+	$(ENCLAVE_DIR)/util.o
 ENCLAVE_DEPS = $(ENCLAVE_OBJS:.o=.d)
 ENCLAVE_KEY = $(ENCLAVE_DIR)/$(APP_NAME).pem
 ENCLAVE_PUBKEY = $(ENCLAVE_KEY:.pem=.pub)
@@ -124,7 +125,9 @@ $(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) $(THIRD_PARTY_LIBS
 ENCLAVE_CPPFLAGS = \
 	-nostdinc -I$(SGX_SDK)/include/tlibc \
 	$(CPPFLAGS)
-ENCLAVE_CFLAGS = $(CFLAGS)
+ENCLAVE_CFLAGS = \
+	-ffreestanding \
+	$(CFLAGS)
 ENCLAVE_LDFLAGS = \
 	-nostdlib \
 	-L$(SGX_SDK)/lib64 \

@@ -309,7 +309,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
     /* Initialize TLS sessions. */
     sessions = malloc(world_size * sizeof(*sessions));
     if (!sessions) {
-        perror("malloc TLS sessions");
+        printf("Error allocating TLS sessions\n");
         goto exit_free_keys;
     }
     for (int i = 0; i < world_size; i++) {
@@ -366,7 +366,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
         requests[i].out_bio_len = max_record_len;
         requests[i].in_bio = malloc(requests[i].in_bio_len);
         if (!requests[i].in_bio) {
-            perror("malloc handshake input bio");
+            printf("Error allocating handshake input bio\n");
             for (int j = 0; j < i; j++) {
                 if (j == world_rank) {
                     continue;
@@ -378,7 +378,7 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
         }
         requests[i].out_bio = malloc(requests[i].out_bio_len);
         if (!requests[i].out_bio) {
-            perror("malloc handshake output bio");
+            printf("Error allocating handshake output bio\n");
             free(requests[i].in_bio);
             for (int j = 0; j < i; j++) {
                 if (j == world_rank) {
@@ -678,7 +678,7 @@ int mpi_tls_send_bytes(const void *buf, size_t count, int dest, int tag) {
     size_t bio_len = count + sizeof(header) + max_payload_len * num_frags;
     unsigned char *bio = malloc(bio_len);
     if (!bio) {
-        perror("malloc bio");
+        printf("Error allocating bio\n");
         goto exit;
     }
 
@@ -748,7 +748,7 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
     size_t bio_len = count + sizeof(header) + max_record_len * num_frags;
     unsigned char *bio = malloc(bio_len);
     if (!bio) {
-        perror("malloc bio");
+        printf("Error allocating bio\n");
         goto exit;
     }
 
@@ -803,7 +803,7 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
     request->bio_len = count + sizeof(header) + max_payload_len * num_frags;
     request->bio = malloc(request->bio_len);
     if (!request->bio) {
-        perror("malloc bio");
+        printf("Error allocating bio\n");
         goto exit;
     }
 
@@ -878,7 +878,7 @@ int mpi_tls_irecv_bytes(void *buf_, size_t count, int src, int tag,
     request->bio_len = count + sizeof(header) + max_record_len * num_frags;
     request->bio = calloc(1, request->bio_len);
     if (!request->bio) {
-        perror("malloc bio");
+        printf("Error allocating bio\n");
         goto exit;
     }
 

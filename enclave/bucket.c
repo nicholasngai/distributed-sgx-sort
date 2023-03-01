@@ -45,7 +45,7 @@ int bucket_init(void) {
     /* Allocate buffer. */
     buffer = malloc(BUCKET_SIZE * 2 * sizeof(*buffer));
     if (!buffer) {
-        perror("Error allocating buffer");
+        printf("Error allocating buffer\n");
         goto exit;
     }
 

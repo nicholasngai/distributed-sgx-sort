@@ -29,7 +29,7 @@ int orshuffle_init(void) {
 
     buffer = malloc(SWAP_CHUNK_SIZE * sizeof(*buffer));
     if (!buffer) {
-        perror("malloc buffer");
+        printf("Error allocating local buffer\n");
         ret = errno;
         goto exit;
     }

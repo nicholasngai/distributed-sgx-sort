@@ -105,7 +105,7 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
         }
     }
     if (!arr) {
-        perror("malloc arr");
+        printf("Error allocating array\n");
         ret = -1;
         goto exit;
     }
