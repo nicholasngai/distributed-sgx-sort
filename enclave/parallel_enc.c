@@ -100,6 +100,7 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
             alloc_size = local_length * 2;
             break;
         case SORT_UNSET:
+        default:
             handle_error_string("Invalid sort type");
             ret = -1;
             goto exit;

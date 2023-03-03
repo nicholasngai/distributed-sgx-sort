@@ -94,8 +94,8 @@ static void swap_local_range(void *args_, size_t i) {
                 >= args->length / 2)
             != (args->offset >= args->length / 2);
 
-    size_t start = i * args->length / args->num_threads;
-    size_t end = (i + 1) * args->length / args->num_threads;
+    size_t start = i * args->count / args->num_threads;
+    size_t end = (i + 1) * args->count / args->num_threads;
     for (size_t j = start; j < end; j++) {
         bool cond =
             s
@@ -520,10 +520,12 @@ static void shuffle(void *args_) {
             handle_error_string("Error getting random marked");
             goto exit;
         }
-        num_to_mark += marked;
+        marked_so_far += marked;
         total_left--;
 
         args->arr[i - local_start].marked = marked;
+        args->arr[i - local_start].marked_prefix_sum =
+            marked_in_prev + marked_so_far;
     }
 
     /* Obliviously compact. */
@@ -541,7 +543,7 @@ static void shuffle(void *args_) {
         goto exit;
     }
 
-    /* Recursively compact. */
+    /* Recursively shuffle. */
     struct shuffle_args left_args = {
         .arr = args->arr,
         .start = args->start,
