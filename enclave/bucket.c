@@ -191,18 +191,14 @@ static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
         goto exit;
     }
 
-    int local_bucket_idx = bucket1_local ? bucket1_idx : bucket2_idx;
-    int nonlocal_bucket_idx = bucket1_local ? bucket2_idx : bucket1_idx;
-    int nonlocal_rank = bucket1_local ? bucket2_rank : bucket1_rank;
-
     /* Load bucket 1 elems if local. */
-    elem_t *bucket1;
+    elem_t *bucket1 = NULL;
     if (bucket1_local) {
         bucket1 = arr + (bucket1_idx - local_bucket_start) * BUCKET_SIZE;
     }
 
     /* Load bucket 2 elems if local. */
-    elem_t *bucket2;
+    elem_t *bucket2 = NULL;
     if (bucket2_local) {
         bucket2 = arr + (bucket2_idx - local_bucket_start) * BUCKET_SIZE;
     }
@@ -228,7 +224,11 @@ static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
 
     /* If remote, send the current count and then our local buckets. Then,
      * receive the sent count and remote buckets from the other elem. */
-    if (!bucket1_local || !bucket2_local) {
+    if (!bucket1 || !bucket2) {
+        int local_bucket_idx = bucket1_local ? bucket1_idx : bucket2_idx;
+        int nonlocal_bucket_idx = bucket1_local ? bucket2_idx : bucket1_idx;
+        int nonlocal_rank = bucket1_local ? bucket2_rank : bucket1_rank;
+
         /* Post receive for count. */
         mpi_tls_request_t count_request;
         size_t remote_count1;
@@ -249,7 +249,7 @@ static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
                     world_rank, nonlocal_rank);
             goto exit;
         }
-        if (bucket1_local) {
+        if (bucket1) {
             bucket2 = buffer;
         } else {
             bucket1 = buffer;

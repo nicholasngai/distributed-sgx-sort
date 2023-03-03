@@ -87,21 +87,19 @@ static int mergesort(elem_t *arr, elem_t *out, size_t length,
         /* Scan for lowest elem. */
         // TODO Use a heap?
         size_t lowest_run = SIZE_MAX;
-        size_t lowest_idx;
         for (size_t j = 0; j < num_threads; j++) {
             if (merge_indices[j] >= (j + 1) * length / num_threads) {
                 continue;
             }
             if (lowest_run == SIZE_MAX
                     || mergesort_comparator(&arr[merge_indices[j]],
-                        &arr[lowest_idx], NULL) < 0) {
+                        &arr[merge_indices[lowest_run]], NULL) < 0) {
                 lowest_run = j;
-                lowest_idx = merge_indices[j];
             }
         }
 
         /* Copy lowest elem to output. */
-        memcpy(&out[i], &arr[lowest_idx], sizeof(*out));
+        memcpy(&out[i], &arr[merge_indices[lowest_run]], sizeof(*out));
         merge_indices[lowest_run]++;
     }
 

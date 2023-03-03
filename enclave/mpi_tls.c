@@ -969,6 +969,10 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
         wait_bio = request->bio;
         wait_bio_len = request->bio_len;
         break;
+    default:
+        handle_error_string("Invalid request type");
+        ret = -1;
+        goto exit;
     }
 
     ocall_mpi_request_t mpi_request;
