@@ -1,3 +1,4 @@
+#include <stdbool.h>
 #include <stdio.h>
 #include <liboblivious/primitives.h>
 #include "common/crypto.h"
@@ -65,9 +66,13 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
             - (world_rank * total_length + world_size - 1) / world_size;
     int ret;
 
+    /* Allocate the array size based on sort size. */
+    size_t data_size;
+    size_t alloc_size;
     switch (sort_type) {
         case SORT_BITONIC:
-            arr = calloc(MAX(local_length, 512), sizeof(*arr));
+            data_size = local_length;
+            alloc_size = local_length;
             break;
         case SORT_BUCKET: {
             /* The total number of buckets is the max of either double the
@@ -83,13 +88,16 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
             /* The bucket sort relies on having 2 local buffers, so we allocate
              * double the size of a single buffer (a single buffer is
              * local_num_buckets * BUCKET_SIZE elements). */
-            arr = calloc(local_num_buckets * BUCKET_SIZE * 2, sizeof(*arr));
+            data_size = MAX(local_length, 512);
+            alloc_size = local_num_buckets * BUCKET_SIZE * 2;
             break;
         case SORT_OPAQUE:
-            arr = calloc(local_length * 2, sizeof(*arr));
+            data_size = local_length;
+            alloc_size = local_length * 2;
             break;
         case SORT_ORSHUFFLE:
-            arr = calloc(MAX(local_length * 2, 512), sizeof(*arr));
+            data_size = local_length;
+            alloc_size = local_length * 2;
             break;
         case SORT_UNSET:
             handle_error_string("Invalid sort type");
@@ -97,14 +105,45 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
             goto exit;
         }
     }
+    arr = malloc(alloc_size * sizeof(*arr));
     if (!arr) {
         perror("malloc arr");
         ret = -1;
         goto exit;
     }
+
+    /* Fill the array with random keys. */
     srand(world_rank + 1);
-    for (size_t i = 0; i < MAX(local_length, 512); i++) {
+    for (size_t i = 0; i < data_size; i++) {
         arr[i].key = rand();
+    }
+
+    /* Zero out unused space to make Valgrind happy. */
+    for (size_t i = 0; i < alloc_size; i++) {
+        memset(arr[i].unused, '\0', sizeof(arr[i].unused));
+    }
+
+    /* Zero out fields not used by sorts to make Valgrind happy. */
+    if (sort_type != SORT_BUCKET) {
+        for (size_t i = 0; i < alloc_size; i++) {
+            arr[i].orp_id = 0;
+            arr[i].is_dummy = false;
+        }
+    }
+    if (sort_type != SORT_ORSHUFFLE) {
+        for (size_t i = 0; i < alloc_size; i++) {
+            arr[i].marked = false;
+            arr[i].marked_prefix_sum = 0;
+        }
+    }
+
+    /* Bucket sort uses the extra elements as dummy elements but doesn't care
+     * about the key or ORP ID, so zero those out to make Valgrind happy. */
+    if (sort_type == SORT_BUCKET) {
+        for (size_t i = data_size; i < alloc_size; i++) {
+            arr[i].key = 0;
+            arr[i].orp_id = 0;
+        }
     }
 
     ret = 0;
