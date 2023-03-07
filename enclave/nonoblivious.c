@@ -534,12 +534,11 @@ exit:
     return ret;
 }
 
-int nonoblivious_sort(elem_t *arr, size_t length, size_t local_length,
-        size_t local_start, size_t num_threads) {
+int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
+        size_t local_length, size_t local_start, size_t num_threads) {
     size_t src_local_start = length * world_rank / world_size;
     size_t src_local_length =
         length * (world_rank + 1) / world_size - src_local_start;
-    elem_t *buf = arr + local_length;
     int ret;
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK

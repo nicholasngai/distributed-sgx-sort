@@ -750,7 +750,8 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     ret =
-        nonoblivious_sort(arr, length, compress_len, local_start, num_threads);
+        nonoblivious_sort(arr, buf, length, compress_len, local_start,
+                num_threads);
     if (ret) {
         handle_error_string("Error in nonoblivious sort");
         goto exit;

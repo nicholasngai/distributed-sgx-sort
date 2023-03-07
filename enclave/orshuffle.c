@@ -657,7 +657,8 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
 
     /* Nonoblivious sort. */
     ret =
-        nonoblivious_sort(arr, length, local_length, local_start, num_threads);
+        nonoblivious_sort(arr, arr + local_length, length, local_length,
+                local_start, num_threads);
     if (ret) {
         goto exit;
     }
