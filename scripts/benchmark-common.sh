@@ -30,3 +30,19 @@ deallocate_az_vm() {
         i=$(( i + 1 ))
     done
 }
+
+get_mem_usage() {
+    algorithm=$1
+    num_enclaves=$2
+    elem_size=$3
+    num_elems=$4
+
+    case "$algorithm" in
+        bitonic)
+            echo $(( elem_size * num_elems / num_enclaves ))
+            ;;
+        bucket|orshuffle)
+            echo $(( elem_size * num_elems * 4 / num_enclaves ))
+            ;;
+    esac
+}
