@@ -368,11 +368,8 @@ static int distributed_sample_partition(elem_t *restrict arr,
         size_t *restrict out_length) {
     int ret;
 
-    if (world_size == 1) {
-        memcpy(out, arr, local_length * sizeof(*out));
-        *out_length = local_length;
-        return 0;
-    }
+    /* This should never be called if this is a single-enclave sort. */
+    assert(world_size > 1);
 
     struct sample samples[world_size - 1];
     size_t sample_idxs[world_size];
@@ -572,6 +569,9 @@ static int balance(elem_t *arr, elem_t *out, size_t total_length,
     mpi_tls_request_t *recv_requests = requests + world_size;
     int ret;
 
+    /* This should never be called if this is a single-enclave sort. */
+    assert(world_size > 1);
+
     /* Get all cumulative lengths across ranks. RANK_LENGTHS[i] holds the number
      * of elements in ranks 0 to i - 1. */
     size_t rank_cum_idxs[world_size + 1];
@@ -657,6 +657,7 @@ static int balance(elem_t *arr, elem_t *out, size_t total_length,
         recv_idxs[i] =
             MAX(MIN(rank_cum_idxs[i], local_end), local_start) - local_start;
     }
+    assert(world_size > 1);
     memcpy(send_final_idxs, send_idxs + 1,
             (world_size - 1) * sizeof(*send_final_idxs));
     send_final_idxs[world_size - 1] = in_length;
@@ -794,6 +795,45 @@ int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
         (world_rank + 1) * length / world_size
             - world_rank * length / world_size;
     int ret;
+
+    if (world_size == 1) {
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+        struct timespec time_start;
+        if (clock_gettime(CLOCK_REALTIME, &time_start)) {
+            handle_error_string("Error getting time");
+            ret = errno;
+            goto exit;
+        }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
+        /* Sort local partitions. */
+        ret = mergesort(arr, buf, length, num_threads);
+        if (ret) {
+            handle_error_string("Error in non-oblivious local sort");
+            goto exit;
+        }
+
+        /* Copy local sort output to final output. */
+        memcpy(arr, buf, length * sizeof(*arr));
+
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+        struct timespec time_finish;
+        if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
+            handle_error_string("Error getting time");
+            ret = errno;
+            goto exit;
+        }
+
+        if (world_rank == 0) {
+            printf("sample_partition : %f\n", 0.0);
+            printf("local_sort       : %f\n",
+                    get_time_difference(&time_start, &time_finish));
+            printf("balance          : %f\n", 0.0);
+        }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
+        goto exit;
+    }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_start;
