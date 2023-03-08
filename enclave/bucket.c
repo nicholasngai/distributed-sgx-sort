@@ -395,8 +395,7 @@ exit:
 
 /* Distribute and receive elements from buckets in ARR to buckets in OUT.
  * Bucket i is sent to enclave i % E. */
-static int distributed_bucket_route(elem_t *arr, void *out_) {
-    unsigned char *out = out_;
+static int distributed_bucket_route(elem_t *arr, elem_t *out) {
     size_t local_bucket_start = get_local_bucket_start(world_rank);
     size_t num_local_buckets =
         get_local_bucket_start(world_rank + 1) - local_bucket_start;
