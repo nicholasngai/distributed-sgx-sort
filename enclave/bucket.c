@@ -655,7 +655,7 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     }
 
     size_t route_levels2 = log2li(num_local_buckets);
-    ret = bucket_route(buf, route_levels2, route_levels1 + route_levels2);
+    ret = bucket_route(arr, route_levels2, route_levels1 + route_levels2);
     if (ret) {
         handle_error_string("Error routing elements through butterfly network");
         goto exit;
@@ -676,8 +676,8 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     size_t compress_len = 0;
     {
         struct permute_and_compress_args args = {
-            .arr = buf,
-            .out = arr,
+            .arr = arr,
+            .out = buf,
             .start_idx = local_start,
             .compress_idx = &compress_len,
             .ret = 0,
@@ -710,14 +710,11 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Nonoblivious sort. */
-    ret = nonoblivious_sort(arr, buf, length, compress_len, num_threads);
+    ret = nonoblivious_sort(buf, arr, length, compress_len, num_threads);
     if (ret) {
         handle_error_string("Error in nonoblivious sort");
         goto exit;
     }
-
-    /* Copy the output to the final output. */
-    memcpy(arr, buf, src_local_length * sizeof(*arr));
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     if (world_rank == 0) {
