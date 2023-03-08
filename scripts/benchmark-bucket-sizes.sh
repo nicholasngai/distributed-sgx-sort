@@ -30,7 +30,11 @@ for e in 32 16 8 4 2 1; do
         i=$(( i + 1 ))
     done
     hosts="${hosts%,}"
-    cmd_template="mpiexec -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed $a"
+    cmd_template="mpiexec -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed"
+
+    warm_up="$cmd_template bitonic 256"
+    echo "Warming up: $warm_up"
+    $warm_up
 
     for b in 512 1024 2048 4096 8192 16384 32768 65536 131072 262144 524288 1048576 2097152 4194304; do
         echo "Bucket size: $b"
@@ -42,11 +46,7 @@ for e in 32 16 8 4 2 1; do
 
         for s in 256 4096 65536 1048576 16777216; do
             for t in 1 2 4; do
-                warm_up="$cmd_template 256"
-                echo "Warming up: $warm_up"
-                $warm_up
-
-                cmd="$cmd_template $s $t"
+                cmd="$cmd_template $a $s $t"
                 echo "Command: $cmd"
                 for i in {1..4}; do
                     $cmd

@@ -22,21 +22,21 @@ for e in 32 16 8 4 2 1; do
         deallocate_az_vm "$(( e + ENCLAVE_OFFSET ))" "$(( last_e + ENCLAVE_OFFSET ))"
     fi
 
+    # Build command template.
+    hosts=''
+    i=0
+    while [ "$i" -lt "$e" ]; do
+        hosts="${hosts}enclave$(( i + ENCLAVE_OFFSET )),"
+        i=$(( i + 1 ))
+    done
+    hosts="${hosts%,}"
+    cmd_template="mpiexec -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed"
+
+    warm_up="$cmd_template bitonic 4096 1"
+    echo "Warming up: $warm_up"
+    $warm_up
+
     for a in bitonic bucket orshuffle; do
-        # Build command template.
-        hosts=''
-        i=0
-        while [ "$i" -lt "$e" ]; do
-            hosts="${hosts}enclave$(( i + ENCLAVE_OFFSET )),"
-            i=$(( i + 1 ))
-        done
-        hosts="${hosts%,}"
-        cmd_template="mpiexec -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed $a"
-
-        warm_up="$cmd_template 4096"
-        echo "Warming up: $warm_up"
-        $warm_up
-
         for s in 1048576 4194304 16777216 67108864 268435456 1073741824; do
             if [ "$(get_mem_usage "$a" "$e" "$b" "$s")" -gt "$MAX_MEM_SIZE" ]; then
                 echo "Skipping $a with E = $e and N = $s due to size"
@@ -55,7 +55,7 @@ for e in 32 16 8 4 2 1; do
                     exit -1
                 fi
 
-                cmd="$cmd_template $s $t"
+                cmd="$cmd_template $a $s $t"
                 echo "Command: $cmd"
                 for i in {1..4}; do
                     $cmd

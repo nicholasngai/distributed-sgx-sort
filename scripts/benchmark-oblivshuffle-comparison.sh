@@ -21,7 +21,11 @@ s=1048576
 t=1
 
 # Build command template.
-cmd_template="mpiexec -hosts enclave$ENCLAVE_OFFSET ./host/parallel ./enclave/parallel_enc.signed $a"
+cmd_template="mpiexec -hosts enclave$ENCLAVE_OFFSET ./host/parallel ./enclave/parallel_enc.signed"
+
+warm_up="$cmd_template bitonic 256"
+echo "Warming up: $warm_up"
+$warm_up
 
 for b in 256 512 1024 2048 4096; do
     echo "Elem size: $b"
@@ -31,11 +35,7 @@ for b in 256 512 1024 2048 4096; do
     make -j
     ./scripts/sync.sh
 
-    warm_up="$cmd_template 256"
-    echo "Warming up: $warm_up"
-    $warm_up
-
-    cmd="$cmd_template $s $t"
+    cmd="$cmd_template $a $s $t"
     echo "Command: $cmd"
     for i in {1..4}; do
         $cmd
