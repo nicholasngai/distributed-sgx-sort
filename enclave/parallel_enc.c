@@ -95,7 +95,7 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
             break;
         case SORT_ORSHUFFLE:
             data_size = local_length;
-            alloc_size = local_length * 2;
+            alloc_size = local_length * 4;
             break;
         case SORT_UNSET:
         default:
