@@ -129,6 +129,24 @@ static int quickselect_helper(elem_t *arr, size_t length,
         goto exit;
     }
 
+    /* If we've run out of elements for quickselect, we just have to take the
+     * leftmost item if possible, or 0 otherwise. */
+    if (left == right) {
+        if (left > length) {
+            for (size_t i = 0; i < num_targets; i++) {
+                samples[i].key = 0;
+                samples[i].orp_id = 0;
+            }
+        } else {
+            for (size_t i = 0; i < num_targets; i++) {
+                samples[i].key = arr[left].key;
+                samples[i].orp_id = arr[left].orp_id;
+            }
+        }
+        ret = 0;
+        goto exit;
+    }
+
     /* Use first elem as pivot. This is a random selection since this
      * quickselect or quickpartition should happen after immediatley after
      * ORP. */

@@ -655,12 +655,12 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     }
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
-    /* Nonoblivious sort. This requires LOCAL_LENGTH * 2 elements for the
-     * array and buffer, so use the second half of the array given to us (which
-     * should be of length LOCAL_LENGTH * 4). */
+    /* Nonoblivious sort. This requires MAX(LOCAL_LENGTH * 2, 512) elements for
+     * both the array and buffer, so use the second half of the array given to
+     * us (which should be of length MAX(LOCAL_LENGTH * 2, 512) * 2). */
     ret =
-        nonoblivious_sort(arr, arr + local_length * 2, length, local_length,
-                num_threads);
+        nonoblivious_sort(arr, arr + MAX(local_length * 2, 512), length,
+                local_length, num_threads);
     if (ret) {
         goto exit;
     }
