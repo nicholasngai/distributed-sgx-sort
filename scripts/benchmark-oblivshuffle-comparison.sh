@@ -23,7 +23,7 @@ t=1
 # Build command template.
 cmd_template="mpiexec -hosts enclave$ENCLAVE_OFFSET ./host/parallel ./enclave/parallel_enc.signed"
 
-warm_up="$cmd_template bitonic 256"
+warm_up="$cmd_template bitonic 256 1"
 echo "Warming up: $warm_up"
 $warm_up
 
@@ -35,11 +35,9 @@ for b in 256 512 1024 2048 4096; do
     make -j
     ./scripts/sync.sh
 
-    cmd="$cmd_template $a $s $t"
+    cmd="$cmd_template $a $s $t $REPEAT"
     echo "Command: $cmd"
-    for i in {1..4}; do
-        $cmd
-    done | tee "$BENCHMARK_DIR/$a-sgx2-enclaves$e-elemsize$b-size$s-threads$t.txt"
+    $cmd | tee "$BENCHMARK_DIR/$a-sgx2-enclaves$e-elemsize$b-size$s-threads$t.txt"
 done
 
 if "$AZ"; then

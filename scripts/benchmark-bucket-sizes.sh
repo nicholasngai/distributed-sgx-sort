@@ -32,7 +32,7 @@ for e in 32 16 8 4 2 1; do
     hosts="${hosts%,}"
     cmd_template="mpiexec -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed"
 
-    warm_up="$cmd_template bitonic 256"
+    warm_up="$cmd_template bitonic 256 1"
     echo "Warming up: $warm_up"
     $warm_up
 
@@ -46,11 +46,9 @@ for e in 32 16 8 4 2 1; do
 
         for s in 256 4096 65536 1048576 16777216; do
             for t in 1 2 4; do
-                cmd="$cmd_template $a $s $t"
+                cmd="$cmd_template $a $s $t $REPEAT"
                 echo "Command: $cmd"
-                for i in {1..4}; do
-                    $cmd
-                done | tee "$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$b-elemsize128-size$s-threads$t.txt"
+                $cmd | tee "$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$b-elemsize128-size$s-threads$t.txt"
             done
         done
     done

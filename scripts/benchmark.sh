@@ -55,11 +55,9 @@ for e in 32 16 8 4 2 1; do
                     exit -1
                 fi
 
-                cmd="$cmd_template $a $s $t"
+                cmd="$cmd_template $a $s $t $REPEAT"
                 echo "Command: $cmd"
-                for i in {1..4}; do
-                    $cmd
-                done | tee "$output_filename"
+                $cmd | tee "$output_filename"
             done
         done
     done

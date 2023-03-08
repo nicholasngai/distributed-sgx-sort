@@ -1,5 +1,7 @@
 #!/bin/sh
 
+REPEAT=4
+
 if [ -z "${ENCLAVE_OFFSET+x}" ]; then
     ENCLAVE_OFFSET=0
 fi

@@ -440,16 +440,17 @@ static void *start_thread_work(void *enclave_) {
 
 int main(int argc, char **argv) {
     int ret = -1;
-    size_t num_threads = 1;
+    size_t num_threads = -1;
+    size_t num_runs = 1;
 
     /* Read arguments. */
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    if (argc < 4) {
-        printf("usage: %s enclave_image {bitonic|bucket|opaque|orshuffle} array_size [num_threads]\n", argv[0]);
+    if (argc < 5) {
+        printf("usage: %s enclave_image {bitonic|bucket|opaque|orshuffle} array_size num_threads [num_runs]\n", argv[0]);
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    if (argc < 3) {
-        printf("usage: %s {bitonic|bucket|opaque|orshuffle} array_size [num_threads]\n", argv[0]);
+    if (argc < 4) {
+        printf("usage: %s {bitonic|bucket|opaque|orshuffle} array_size num_threads [num_runs]\n", argv[0]);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         return 0;
     }
@@ -489,22 +490,33 @@ int main(int argc, char **argv) {
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    ssize_t n = atoll(argv[4]);
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    ssize_t n = atoll(argv[3]);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    if (n < 0) {
+        printf("Invalid number of threads\n");
+        return ret;
+    }
+    num_threads = n;
+
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    if (argc >= 6) {
+        ssize_t n = atoll(argv[5]);
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (argc >= 5) {
         ssize_t n = atoll(argv[4]);
-#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    if (argc >= 4) {
-        ssize_t n = atoll(argv[3]);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         if (n < 0) {
-            printf("Invalid number of threads\n");
+            printf("Invalid number of runs\n");
             return ret;
         }
-        num_threads = n;
+        num_runs = n;
+    }
 
-        if (sort_type == SORT_OPAQUE && n > 1) {
-            printf("Opaque sort does not support more than 1 thread\n");
-            return ret;
-        }
+    if (sort_type == SORT_OPAQUE && n > 1) {
+        printf("Opaque sort does not support more than 1 thread\n");
+        return ret;
     }
 
     /* Init MPI. */
@@ -576,75 +588,97 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* Init random array. */
+    for (size_t i = 0; i < num_runs; i++) {
+        /* Init random array. */
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    result = ecall_sort_alloc(enclave, &ret, length, sort_type);
-    if (result != OE_OK) {
-        handle_oe_error(result, "ecall_sort_alloc");
-        goto exit_free_sort;
-    }
+        result = ecall_sort_alloc(enclave, &ret, length, sort_type);
+        if (result != OE_OK) {
+            handle_oe_error(result, "ecall_sort_alloc");
+            goto exit_free_sort;
+        }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ret = ecall_sort_alloc(length, sort_type);
+        ret = ecall_sort_alloc(length, sort_type);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    if (ret) {
-        handle_error_string("Error allocating array in enclave");
-        goto exit_free_sort;
-    }
+        if (ret) {
+            handle_error_string("Error allocating array in enclave");
+            goto exit_free_sort;
+        }
 
-    /* Time sort and join. */
+        /* Time sort and join. */
 
-    struct timespec start;
-    ret = timespec_get(&start, TIME_UTC);
-    if (!ret) {
-        perror("starting timespec_get");
-        goto exit_free_sort;
-    }
+        struct timespec start;
+        ret = timespec_get(&start, TIME_UTC);
+        if (!ret) {
+            perror("starting timespec_get");
+            goto exit_free_sort;
+        }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    switch (sort_type) {
-        case SORT_BITONIC:
-            result = ecall_bitonic_sort(enclave, &ret);
-            break;
-        case SORT_BUCKET:
-            result = ecall_bucket_sort(enclave, &ret);
-            break;
-        case SORT_OPAQUE:
-            result = ecall_opaque_sort(enclave, &ret);
-            break;
-        case SORT_ORSHUFFLE:
-            result = ecall_orshuffle_sort(enclave, &ret);
-            break;
-        case SORT_UNSET:
-            handle_error_string("Invalid sort type");
-            ret = -1;
+        switch (sort_type) {
+            case SORT_BITONIC:
+                result = ecall_bitonic_sort(enclave, &ret);
+                break;
+            case SORT_BUCKET:
+                result = ecall_bucket_sort(enclave, &ret);
+                break;
+            case SORT_OPAQUE:
+                result = ecall_opaque_sort(enclave, &ret);
+                break;
+            case SORT_ORSHUFFLE:
+                result = ecall_orshuffle_sort(enclave, &ret);
+                break;
+            case SORT_UNSET:
+                handle_error_string("Invalid sort type");
+                ret = -1;
+                goto exit_free_sort;
+        }
+        if (result != OE_OK) {
             goto exit_free_sort;
-    }
-    if (result != OE_OK) {
-        goto exit_free_sort;
-    }
+        }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    switch (sort_type) {
-        case SORT_BITONIC:
-            ret = ecall_bitonic_sort();
-            break;
-        case SORT_BUCKET:
-            ret = ecall_bucket_sort();
-            break;
-        case SORT_OPAQUE:
-            ret = ecall_opaque_sort();
-            break;
-        case SORT_ORSHUFFLE:
-            ret = ecall_orshuffle_sort();
-            break;
-        case SORT_UNSET:
-            handle_error_string("Invalid sort type");
-            ret = -1;
-            goto exit_free_sort;
-    }
+        switch (sort_type) {
+            case SORT_BITONIC:
+                ret = ecall_bitonic_sort();
+                break;
+            case SORT_BUCKET:
+                ret = ecall_bucket_sort();
+                break;
+            case SORT_OPAQUE:
+                ret = ecall_opaque_sort();
+                break;
+            case SORT_ORSHUFFLE:
+                ret = ecall_orshuffle_sort();
+                break;
+            case SORT_UNSET:
+                handle_error_string("Invalid sort type");
+                ret = -1;
+                goto exit_free_sort;
+        }
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    if (ret) {
-        goto exit_free_sort;
+        if (ret) {
+            handle_error_string("Enclave exited with return code %d", ret);
+            goto exit_free_sort;
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+
+        struct timespec end;
+        ret = timespec_get(&end, TIME_UTC);
+        if (!ret) {
+            perror("ending timespec_get");
+            goto exit_free_sort;
+        }
+
+        /* Print time taken. */
+
+        if (world_rank == 0) {
+            double seconds_taken =
+                (double) ((end.tv_sec * 1000000000 + end.tv_nsec)
+                        - (start.tv_sec * 1000000000 + start.tv_nsec))
+                / 1000000000;
+            printf("%f\n", seconds_taken);
+        }
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
@@ -655,23 +689,8 @@ int main(int argc, char **argv) {
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ecall_release_threads();
 #endif
-
     for (size_t i = 1; i < num_threads; i++) {
         pthread_join(threads[i - 1], NULL);
-    }
-
-    if (ret) {
-        handle_error_string("Enclave exited with return code %d", ret);
-        goto exit_free_sort;
-    }
-
-    MPI_Barrier(MPI_COMM_WORLD);
-
-    struct timespec end;
-    ret = timespec_get(&end, TIME_UTC);
-    if (!ret) {
-        perror("ending timespec_get");
-        goto exit_free_sort;
     }
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
@@ -696,16 +715,6 @@ int main(int argc, char **argv) {
     if (ret) {
         handle_error_string("Error verifying sort");
         goto exit_free_sort;
-    }
-
-    /* Print time taken. */
-
-    if (world_rank == 0) {
-        double seconds_taken =
-            (double) ((end.tv_sec * 1000000000 + end.tv_nsec)
-                    - (start.tv_sec * 1000000000 + start.tv_nsec))
-            / 1000000000;
-        printf("%f\n", seconds_taken);
     }
 
 exit_free_sort:
