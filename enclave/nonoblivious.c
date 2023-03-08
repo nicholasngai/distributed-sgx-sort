@@ -425,7 +425,7 @@ static int distributed_sample_partition(elem_t *restrict arr,
     /* Copy own partition's elements to the output. */
     *out_length = sample_idxs[world_rank] - send_idxs[world_rank];
     memcpy(out, arr + send_idxs[world_rank], *out_length * sizeof(*out));
-    send_idxs[world_rank] = sample_idxs[world_rank] + 1;
+    send_idxs[world_rank] = sample_idxs[world_rank];
 
     /* Construct initial requests. REQUESTS is used for all send requests except
      * for REQUESTS[WORLD_RANK], which is our receive request. */
@@ -456,6 +456,13 @@ static int distributed_sample_partition(elem_t *restrict arr,
                 goto exit;
             }
             send_idxs[i] += elems_to_send;
+
+            /* If this block sent less than SAMPLE_PARTITION_BUF_SIZE elements,
+             * then the receiver will take this as the end of our stream, so
+             * increment SEND_IDXS[i] by 1 to indicate we're truly done. */
+            if (elems_to_send < SAMPLE_PARTITION_BUF_SIZE) {
+                send_idxs[i]++;
+            }
         }
     }
 
@@ -498,18 +505,12 @@ static int distributed_sample_partition(elem_t *restrict arr,
         } else {
             /* Send request completed. */
 
-            /* If the send index is equal to the sample index and the number of
-             * elements we had to send is a multiple of
-             * SAMPLE_PARTITION_BUF_SIZE, we need to send an extra message of
-             * length 0 to indicate the end of our partition. We indicate that
-             * we've sent this sentinel message by setting the send index
-             * GREATER than the sample index. */
-            bool keep_rank =
-                send_idxs[index] < sample_idxs[index]
-                    || (send_idxs[index] == sample_idxs[index]
-                            && (sample_idxs[index]
-                                    - (index > 0 ? sample_idxs[index - 1] : 0))
-                                % SAMPLE_PARTITION_BUF_SIZE == 0);
+            /* If the send index is equal to the sample index, we need to send
+             * an extra message of length 0 to indicate the end of our
+             * partition. We indicate that we've already sent a sentinel message
+             * of length < SAMPLE_PARTITION_BUF_SIZE message by setting
+             * the send index GREATER than the sample index. */
+            bool keep_rank = send_idxs[index] <= sample_idxs[index];
             if (keep_rank) {
                 size_t elems_to_send =
                     MIN(sample_idxs[index] - send_idxs[index],
@@ -526,11 +527,11 @@ static int distributed_sample_partition(elem_t *restrict arr,
                 }
                 send_idxs[index] += elems_to_send;
 
-                /* If this block sent less than ELEMS_TO_SEND elements, then the
-                 * receiver will take this as the end of our stream, so
-                 * increment SAMPLE_IDXS[INDEX] by 1 to indicate we're truly
-                 * done. */
-                if (elems_to_send == 0) {
+                /* If this block sent less than SAMPLE_PARTITION_BUF_SIZE
+                 * elements, then the receiver will take this as the end of our
+                 * stream, so increment SEND_IDXS[INDEX] by 1 to indicate
+                 * we're truly done. */
+                if (elems_to_send < SAMPLE_PARTITION_BUF_SIZE) {
                     send_idxs[index]++;
                 }
             } else {
