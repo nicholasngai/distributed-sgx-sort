@@ -717,12 +717,14 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     /* Nonoblivious sort. This requires MAX(LOCAL_LENGTH * 2, 512) elements for
      * both the array and buffer, so use the second half of the array given to
      * us (which should be of length MAX(LOCAL_LENGTH * 2, 512) * 2). */
-    ret =
-        nonoblivious_sort(arr, arr + MAX(local_length * 2, 512), length,
-                local_length, num_threads);
+    elem_t *buf = arr + MAX(local_length * 2, 512);
+    ret = nonoblivious_sort(arr, buf, length, local_length, num_threads);
     if (ret) {
         goto exit;
     }
+
+    /* Copy the output to the final output. */
+    memcpy(arr, buf, local_length * sizeof(*arr));
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     if (world_rank == 0) {

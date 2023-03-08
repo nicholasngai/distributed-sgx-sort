@@ -789,11 +789,8 @@ exit:
     return ret;
 }
 
-int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
+int nonoblivious_sort(elem_t *arr, elem_t *out, size_t length,
         size_t local_length, size_t num_threads) {
-    size_t src_local_length =
-        (world_rank + 1) * length / world_size
-            - world_rank * length / world_size;
     int ret;
 
     if (world_size == 1) {
@@ -807,14 +804,14 @@ int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
         /* Sort local partitions. */
-        ret = mergesort(arr, buf, length, num_threads);
+        ret = mergesort(arr, out, length, num_threads);
         if (ret) {
             handle_error_string("Error in non-oblivious local sort");
             goto exit;
         }
 
         /* Copy local sort output to final output. */
-        memcpy(arr, buf, length * sizeof(*arr));
+        memcpy(arr, out, length * sizeof(*arr));
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
         struct timespec time_finish;
@@ -848,7 +845,7 @@ int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
      * element, e.g. enclave 0 has the lowest elements, then enclave 1, etc. */
     size_t partition_length;
     ret =
-        distributed_sample_partition(arr, buf, local_length, &partition_length);
+        distributed_sample_partition(arr, out, local_length, &partition_length);
     if (ret) {
         handle_error_string("Error in distributed sample partitioning");
         goto exit;
@@ -864,7 +861,7 @@ int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Sort local partitions. */
-    ret = mergesort(buf, arr, partition_length, num_threads);
+    ret = mergesort(out, arr, partition_length, num_threads);
     if (ret) {
         handle_error_string("Error in non-oblivious local sort");
         goto exit;
@@ -880,14 +877,11 @@ int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Balance partitions. */
-    ret = balance(arr, buf, length, partition_length);
+    ret = balance(arr, out, length, partition_length);
     if (ret) {
         handle_error_string("Error in non-oblivious balancing");
         goto exit;
     }
-
-    /* Copy the balanced output back to the final output. */
-    memcpy(arr, buf, src_local_length * sizeof(*arr));
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_finish;

@@ -717,6 +717,9 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
+    /* Copy the output to the final output. */
+    memcpy(arr, buf, src_local_length * sizeof(*arr));
+
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     if (world_rank == 0) {
         printf("assign_ids       : %f\n",
