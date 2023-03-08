@@ -616,6 +616,40 @@ exit:
     }
 }
 
+/* For assign random ORP IDs to ARR[i * LENGTH / NUM_THREADS] to
+ * ARR[(i + 1) * LENGTH / NUM_THREADS]. */
+struct assign_random_id_args {
+    elem_t *arr;
+    size_t length;
+    size_t start_idx;
+    size_t num_threads;
+    int ret;
+};
+static void assign_random_id(void *args_, size_t i) {
+    struct assign_random_id_args *args = args_;
+    int ret;
+
+    size_t start = i * args->length / args->num_threads;
+    size_t end = (i + 1) * args->length / args->num_threads;
+    for (size_t j = start; j < end; j++) {
+        ret = rand_read(&args->arr[j].orp_id, sizeof(args->arr[j].orp_id));
+        if (ret) {
+            handle_error_string("Error assigning random ID to elem %lu",
+                    i + args->start_idx);
+            goto exit;
+        }
+    }
+
+    ret = 0;
+
+exit:
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret,
+                false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
+}
+
 int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     size_t local_start = length * world_rank / world_size;
     size_t local_length = length * (world_rank + 1) / world_size - local_start;
@@ -632,17 +666,42 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
 
     total_length = length;
 
-    struct shuffle_args args = {
+    struct shuffle_args shuffle_args = {
         .arr = arr,
         .start = 0,
         .length = length,
         .num_threads = num_threads,
         .ret = 0,
     };
-    shuffle(&args);
-    if (args.ret) {
+    shuffle(&shuffle_args);
+    if (shuffle_args.ret) {
         handle_error_string("Error in recursive shuffle");
-        ret = args.ret;
+        ret = shuffle_args.ret;
+        goto exit;
+    }
+
+    /* Assign random IDs to ensure uniqueness. */
+    struct assign_random_id_args assign_random_id_args = {
+        .arr = arr,
+        .length = local_length,
+        .start_idx = local_start,
+        .num_threads = num_threads,
+        .ret = 0,
+    };
+    struct thread_work work = {
+        .type = THREAD_WORK_ITER,
+        .iter = {
+            .func = assign_random_id,
+            .arg = &assign_random_id_args,
+            .count = num_threads,
+        },
+    };
+    thread_work_push(&work);
+    thread_work_until_empty();
+    thread_wait(&work);
+    if (assign_random_id_args.ret) {
+        handle_error_string("Error assigning random ORP IDs");
+        ret = assign_random_id_args.ret;
         goto exit;
     }
 
