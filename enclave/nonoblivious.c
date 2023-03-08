@@ -119,9 +119,9 @@ static int elem_sample_comparator(const elem_t *a, const struct sample *b) {
     return (comp_key << 1) + comp_orp_id;
 }
 
-static int distributed_quickselect_helper(elem_t *arr, size_t local_length,
-        size_t local_start, size_t *targets, struct sample *samples,
-        size_t *sample_idxs, size_t num_targets, size_t left, size_t right) {
+static int quickselect_helper(elem_t *arr, size_t length,
+        const size_t *targets, struct sample *samples, size_t num_targets,
+        size_t left, size_t right) {
     int ret;
 
     if (!num_targets) {
@@ -129,86 +129,35 @@ static int distributed_quickselect_helper(elem_t *arr, size_t local_length,
         goto exit;
     }
 
-    /* Get the next master by choosing the lowest elem with a non-empty
-     * slice. */
-    bool ready = true;
-    bool not_ready = false;
-    int master_rank = -1;
-    for (int i = 0; i < world_size; i++) {
-        if (i != world_rank) {
-            bool *flag = left < right ? &ready : &not_ready;
-            ret =
-                mpi_tls_send_bytes(flag, sizeof(*flag), i, QUICKSELECT_MPI_TAG);
-            if (ret) {
-                handle_error_string("Error sending ready flag to %d from %d",
-                        i, world_rank);
-                goto exit;
-            }
-        }
-    }
-    for (int i = 0; i < world_size; i++) {
-        bool is_ready;
-        if (i != world_rank) {
-            ret =
-                mpi_tls_recv_bytes(&is_ready, sizeof(is_ready), i,
-                        QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
-            if (ret) {
-                handle_error_string(
-                        "Error receiving ready flag from %d into %d", i,
-                        world_rank);
-                goto exit;
+    /* If we've run out of elements for quickselect, we just have to take the
+     * leftmost item if possible, or 0 otherwise. */
+    if (left == right) {
+        if (left > length) {
+            for (size_t i = 0; i < num_targets; i++) {
+                samples[i].key = 0;
+                samples[i].orp_id = 0;
             }
         } else {
-            is_ready = left < right;
+            for (size_t i = 0; i < num_targets; i++) {
+                samples[i].key = arr[left].key;
+                samples[i].orp_id = arr[left].orp_id;
+            }
         }
-
-        if (is_ready && (master_rank == -1 || i < master_rank)) {
-            master_rank = i;
-        }
-    }
-
-    if (master_rank == -1) {
-        handle_error_string("All ranks reported empty slice");
-        ret = -1;
+        ret = 0;
         goto exit;
     }
 
-    /* Get pivot. */
-    struct sample pivot;
-    if (world_rank == master_rank) {
-        /* Use first elem as pivot. This is a random selection since this
-         * samplesort should happen after ORP. */
-        pivot.key = arr[left].key;
-        pivot.orp_id = arr[left].orp_id;
-
-        /* Send pivot to all other elems. */
-        for (int i = 0; i < world_size; i++) {
-            if (i != world_rank) {
-                ret =
-                    mpi_tls_send_bytes(&pivot, sizeof(pivot), i,
-                            QUICKSELECT_MPI_TAG);
-                if (ret) {
-                    handle_error_string("Error sending pivot to %d from %d", i,
-                            world_rank);
-                    goto exit;
-                }
-            }
-        }
-    } else {
-        /* Receive pivot from master. */
-        ret =
-            mpi_tls_recv_bytes(&pivot, sizeof(pivot), master_rank,
-                    QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
-        if (ret) {
-            handle_error_string("Error receiving pivot into %d from %d",
-                    world_rank, master_rank);
-            goto exit;
-        }
-    }
+    /* Use first elem as pivot. This is a random selection since this
+     * quickselect or quickpartition should happen after immediatley after
+     * ORP. */
+    struct sample pivot = {
+        .key = arr[left].key,
+        .orp_id = arr[left].key,
+    };
 
     /* Partition data based on pivot. */
     // TODO It's possible to do this in-place.
-    size_t partition_left = left + (world_rank == master_rank);
+    size_t partition_left = left + 1;
     size_t partition_right = right;
     enum {
         PARTITION_SCAN_LEFT,
@@ -249,90 +198,29 @@ static int distributed_quickselect_helper(elem_t *arr, size_t local_length,
         }
     }
 
-    /* Finish partitioning by swapping the pivot into the center, if we are the
-     * master. */
-    if (world_rank == master_rank) {
-        elem_t temp;
-        memcpy(&temp, &arr[partition_right - 1], sizeof(temp));
-        memcpy(&arr[partition_right - 1], &arr[left], sizeof(*arr));
-        memcpy(&arr[left], &temp, sizeof(*arr));
-
-        partition_right--;
-    }
-
-    /* Sum size of partitions across all ranks and get next updated split,
-     * either cur_split or cur_split + SUM(partition_left). */
-    size_t cur_pivot;
-    if (world_rank == master_rank) {
-        cur_pivot = partition_right;
-
-        for (int i = 0; i < world_size; i++) {
-            if (i != world_rank) {
-                size_t remote_partition_right;
-                ret =
-                    mpi_tls_recv_bytes(&remote_partition_right,
-                            sizeof(remote_partition_right), i,
-                            QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
-                if (ret) {
-                    handle_error_string(
-                            "Error receiving partition size from %d into %d",
-                            i, world_rank);
-                    goto exit;
-                }
-                cur_pivot += remote_partition_right;
-            }
-        }
-
-        for (int i = 0; i < world_size; i++) {
-            if (i != world_rank) {
-                ret =
-                    mpi_tls_send_bytes(&cur_pivot, sizeof(cur_pivot), i,
-                            QUICKSELECT_MPI_TAG);
-                if (ret) {
-                    handle_error_string(
-                            "Error sending current pivot to %d from %d", i,
-                            world_rank);
-                    goto exit;
-                }
-            }
-        }
-    } else {
-        ret =
-            mpi_tls_send_bytes(&partition_right, sizeof(partition_right),
-                    master_rank, QUICKSELECT_MPI_TAG);
-        if (ret) {
-            handle_error_string(
-                    "Error sending partition size from %d to %d",
-                    world_rank, master_rank);
-            goto exit;
-        }
-
-        ret =
-            mpi_tls_recv_bytes(&cur_pivot, sizeof(cur_pivot), master_rank,
-                    QUICKSELECT_MPI_TAG, MPI_TLS_STATUS_IGNORE);
-        if (ret) {
-            handle_error_string(
-                    "Error receiving current pivot into %d from %d",
-                    world_rank, master_rank);
-            goto exit;
-        }
-    }
+    /* Finish partitioning by swapping the pivot into the center. */
+    elem_t temp;
+    memcpy(&temp, &arr[partition_right - 1], sizeof(temp));
+    memcpy(&arr[partition_right - 1], &arr[left], sizeof(*arr));
+    memcpy(&arr[left], &temp, sizeof(*arr));
+    partition_right--;
 
     /* Check which directions we need to iterate in, based on the current pivot
      * index. If there are smaller targets, then iterate on the left half. If
      * there are larger targets, then iterate on the right half. If there is a
      * matching target, then set the sample in the output. */
     size_t *geq_target =
-        bsearch_ge(&cur_pivot, targets, num_targets, sizeof(*targets), comp_ul);
+        bsearch_ge(&partition_right, targets, num_targets, sizeof(*targets),
+                comp_ul);
     size_t geq_target_idx = (size_t) (geq_target - targets);
-    bool found_target = geq_target_idx < num_targets && *geq_target == cur_pivot;
+    bool found_target =
+        geq_target_idx < num_targets && *geq_target == partition_right;
     size_t gt_target_idx = geq_target_idx + found_target;
 
-    /* If we found a target, set the sample and its index. */
+    /* If we found a target, set the sample. */
     if (found_target) {
         size_t i = geq_target - targets;
         samples[i] = pivot;
-        sample_idxs[i] = partition_right;
     }
 
     /* Set up next iteration(s) if we have targets on either side. If the next
@@ -341,16 +229,15 @@ static int distributed_quickselect_helper(elem_t *arr, size_t local_length,
      * slice. */
     /* Targets less than pivot. */
     ret =
-        distributed_quickselect_helper(arr, local_length, local_start, targets,
-                samples, sample_idxs, geq_target_idx, left, partition_right);
+        quickselect_helper(arr, length, targets, samples, geq_target_idx,
+                left, partition_right);
     if (ret) {
         goto exit;
     }
     /* Targets greater than pivot. */
     ret =
-        distributed_quickselect_helper(arr, local_length, local_start,
-                targets + gt_target_idx, samples + gt_target_idx,
-                sample_idxs + gt_target_idx, num_targets - gt_target_idx,
+        quickselect_helper(arr, length, targets + gt_target_idx,
+                samples + gt_target_idx, num_targets - gt_target_idx,
                 partition_left, right);
     if (ret) {
         goto exit;
@@ -360,17 +247,112 @@ exit:
     return ret;
 }
 
-/* Performs a distruted version of the quickselect algorithm to find NUM_TARGETS
- * target elements in TARGETS contained in ARR, which contains LOCAL_LENGTH
- * elements in the local, with the first element encrypted with index
- * LOCAL_START. Resulting samples are stored in SAMPLES. TARGETS must be a
+/* Performs a quickselect algorithm to find NUM_TARGETS target element indices
+ * (i.e. the i'th smallest element) in TARGETS contained in ARR, which contains
+ * LENGTH elements. Resulting samples are stored in SAMPLES. TARGETS must be a
  * sorted array. */
-static int distributed_quickselect(elem_t *arr, size_t local_length,
-        size_t local_start, size_t *targets, struct sample *samples,
-        size_t *sample_idxs, size_t num_targets) {
+static int quickselect(elem_t *arr, size_t length, size_t *targets,
+        struct sample *samples, size_t num_targets) {
     int ret =
-        distributed_quickselect_helper(arr, local_length, local_start, targets,
-                samples, sample_idxs, num_targets, 0, local_length);
+        quickselect_helper(arr, length, targets, samples, num_targets, 0,
+                length);
+    if (ret) {
+        handle_error_string("Error in distributed quickselect");
+        goto exit;
+    }
+
+exit:
+    return ret;
+}
+
+static int quickpartition_helper(elem_t *arr, size_t length,
+        const struct sample *pivots, size_t *pivot_idxs, size_t num_pivots,
+        size_t left, size_t right) {
+    int ret;
+
+    if (!num_pivots) {
+        ret = 0;
+        goto exit;
+    }
+
+    /* Use the middle sample as pivot. */
+    const struct sample *pivot = &pivots[num_pivots / 2];
+
+    /* Partition data based on pivot. */
+    // TODO It's possible to do this in-place.
+    size_t partition_left = left;
+    size_t partition_right = right;
+    enum {
+        PARTITION_SCAN_LEFT,
+        PARTITION_SCAN_RIGHT,
+    } partition_state = PARTITION_SCAN_LEFT;
+    while (partition_left < partition_right) {
+        switch (partition_state) {
+        case PARTITION_SCAN_LEFT:
+            /* Scan left for elements greater than the pivot. If found, start
+             * scanning right. */
+            if (elem_sample_comparator(&arr[partition_left], pivot) > 0) {
+                partition_state = PARTITION_SCAN_RIGHT;
+            } else {
+                partition_left++;
+            }
+
+            break;
+
+        case PARTITION_SCAN_RIGHT:
+            /* Scan right for elements less than the pivot. */
+
+            /* If found, swap and start scanning left. */
+            if (elem_sample_comparator(&arr[partition_right - 1], pivot) < 0) {
+                elem_t temp;
+                memcpy(&temp, &arr[partition_right - 1], sizeof(temp));
+                memcpy(&arr[partition_right - 1], &arr[partition_left],
+                        sizeof(*arr));
+                memcpy(&arr[partition_left], &temp, sizeof(*arr));
+
+                partition_state = PARTITION_SCAN_LEFT;
+                partition_left++;
+                partition_right--;
+            } else {
+                partition_right--;
+            }
+
+            break;
+        }
+    }
+
+    /* Set the index of the pivot. */
+    pivot_idxs[num_pivots / 2] = partition_right;
+
+    /* Recurse. */
+    /* Targets less than pivot. */
+    ret =
+        quickpartition_helper(arr, length, pivots, pivot_idxs, num_pivots / 2,
+                left, partition_right);
+    if (ret) {
+        goto exit;
+    }
+    /* Targets greater than pivot. */
+    ret =
+        quickpartition_helper(arr, length, pivots + num_pivots / 2 + 1,
+                pivot_idxs + num_pivots / 2 + 1,
+                num_pivots - (num_pivots / 2 + 1), partition_left, right);
+    if (ret) {
+        goto exit;
+    }
+
+exit:
+    return ret;
+}
+
+/* Use a variation of the quickselect algorithm to partition elements according
+ * to NUM_PIVOTS pivots in PIVOTS contained in ARR, which contains LENGTH
+ * elements. Resulting indices are PIVOT_IDXS. PIVOTS must be a sorted array. */
+static int quickpartition(elem_t *arr, size_t length,
+        const struct sample *pivots, size_t *pivot_idxs, size_t num_pivots) {
+    int ret =
+        quickpartition_helper(arr, length, pivots, pivot_idxs, num_pivots, 0,
+                length);
     if (ret) {
         handle_error_string("Error in distributed quickselect");
         goto exit;
@@ -381,95 +363,128 @@ exit:
 }
 
 /* Performs a non-oblivious samplesort across all enclaves. */
-static int distributed_sample_partition(elem_t *arr, elem_t *out,
-        size_t local_length, size_t local_start, size_t total_length) {
-    size_t src_local_start = total_length * world_rank / world_size;
-    size_t src_local_length =
-        total_length * (world_rank + 1) / world_size - src_local_start;
+static int distributed_sample_partition(elem_t *restrict arr,
+        elem_t *restrict out, size_t local_length,
+        size_t *restrict out_length) {
     int ret;
 
-    if (world_size == 1) {
-        memcpy(out, arr, total_length * sizeof(*out));
-        return 0;
-    }
+    /* This should never be called if this is a single-enclave sort. */
+    assert(world_size > 1);
 
-    /* Construct samples to and pass to quickselect. We want an even
-     * distribution of elements across all ranks. */
-    size_t sample_targets[world_size - 1];
-    for (size_t i = 0; i < (size_t) world_size - 1; i++) {
-        sample_targets[i] = total_length * (i + 1) / world_size;
-    }
     struct sample samples[world_size - 1];
     size_t sample_idxs[world_size];
-    size_t sample_scan_idxs[world_size];
+    size_t send_idxs[world_size];
     mpi_tls_request_t requests[world_size];
-    size_t requests_len = world_size;
-    ret =
-        distributed_quickselect(arr, local_length, local_start, sample_targets,
-                samples, sample_idxs, world_size - 1);
-    if (ret) {
-        handle_error_string("Error in distributed quickselect");
-        goto exit;
+
+    /* Partition the data. Rank 0 partitions/samples from its own array using
+     * quickselect and sends the samples to everyone else. All other ranks then
+     * partition using those samples with quickpartition. */
+    if (world_rank == 0) {
+        /* Construct targets to and pass to quickselect. */
+        for (size_t i = 0; i < (size_t) world_size - 1; i++) {
+            sample_idxs[i] = local_length * (i + 1) / world_size;
+        }
+        ret =
+            quickselect(arr, local_length, sample_idxs, samples,
+                    world_size - 1);
+        if (ret) {
+            handle_error_string("Error in quickselect");
+            goto exit;
+        }
+        sample_idxs[world_size - 1] = local_length;
+
+        /* Send the samples to everyone else. */
+        for (int i = 0; i < world_size; i++) {
+            if (i == world_rank) {
+                continue;
+            }
+            ret =
+                mpi_tls_send_bytes(samples, sizeof(samples),
+                        i, QUICKSELECT_MPI_TAG);
+            if (ret) {
+                handle_error_string("Error sending samples from %d to %d", 0,
+                        i);
+                goto exit;
+            }
+        }
+    } else {
+        /* Receive the samples from rank 0. */
+        ret =
+            mpi_tls_recv_bytes(samples, sizeof(samples), 0, QUICKSELECT_MPI_TAG,
+                    MPI_TLS_STATUS_IGNORE);
+        if (ret) {
+            handle_error_string("Error receiving samples from %d into %d", 0,
+                    world_rank);
+            goto exit;
+        }
+
+        /* Partition with quickpartition. */
+        ret =
+            quickpartition(arr, local_length, samples, sample_idxs,
+                    world_size - 1);
+        if (ret) {
+            handle_error_string("Error in quickpartition");
+            goto exit;
+        }
+        sample_idxs[world_size - 1] = local_length;
     }
-    memcpy(&sample_scan_idxs[1], sample_idxs,
-            (world_size - 1) * sizeof(*sample_scan_idxs));
-    sample_idxs[world_size - 1] = local_length;
-    sample_scan_idxs[0] = 0;
+
+    /* Sending starts at the previous sample index (or 0). */
+    memcpy(send_idxs + 1, sample_idxs, (world_size - 1) * sizeof(*send_idxs));
+    send_idxs[0] = 0;
 
     /* Send elements to their corresponding enclaves. The elements in the array
-     * should already be partitioned. */
+     * have already bee partitioned, so it's just a matter of sending them over
+     * in chunks. */
 
     /* Copy own partition's elements to the output. */
-    size_t num_received =
-        sample_idxs[world_rank] - sample_scan_idxs[world_rank];
-    memcpy(out, arr + sample_scan_idxs[world_rank],
-            num_received * sizeof(*out));
-    sample_scan_idxs[world_rank] = sample_idxs[world_rank];
+    *out_length = sample_idxs[world_rank] - send_idxs[world_rank];
+    memcpy(out, arr + send_idxs[world_rank], *out_length * sizeof(*out));
+    send_idxs[world_rank] = sample_idxs[world_rank];
 
     /* Construct initial requests. REQUESTS is used for all send requests except
      * for REQUESTS[WORLD_RANK], which is our receive request. */
     for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
-            size_t elems_to_recv =
-                MIN(src_local_length - num_received, SAMPLE_PARTITION_BUF_SIZE);
-            if (elems_to_recv > 0) {
-                ret =
-                    mpi_tls_irecv_bytes(out + num_received,
-                            elems_to_recv * sizeof(*out), MPI_TLS_ANY_SOURCE,
-                            SAMPLE_PARTITION_MPI_TAG, &requests[i]);
-                if (ret) {
-                    handle_error_string("Error receiving partitioned data");
-                    goto exit;
-                }
-            } else {
-                requests[i].type = MPI_TLS_NULL;
-                requests_len--;
+            ret =
+                mpi_tls_irecv_bytes(out + *out_length,
+                        SAMPLE_PARTITION_BUF_SIZE * sizeof(*out),
+                        MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
+                        &requests[i]);
+            if (ret) {
+                handle_error_string("Error receiving partitioned data");
+                goto exit;
             }
         } else {
-            if (sample_scan_idxs[i] < sample_idxs[i]) {
-                size_t elems_to_send =
-                    MIN(sample_idxs[i] - sample_scan_idxs[i],
-                            SAMPLE_PARTITION_BUF_SIZE);
+            /* This could be 0, but we would need to send an empty message to
+             * signal the end of our partition. */
+            size_t elems_to_send =
+                MIN(sample_idxs[i] - send_idxs[i], SAMPLE_PARTITION_BUF_SIZE);
 
-                /* Asynchronously send to enclave. */
-                ret =
-                    mpi_tls_isend_bytes(arr + sample_scan_idxs[i],
-                            elems_to_send * sizeof(*arr), i,
-                            SAMPLE_PARTITION_MPI_TAG, &requests[i]);
-                if (ret) {
-                    handle_error_string("Error sending partitioned data");
-                    goto exit;
-                }
-                sample_scan_idxs[i] += elems_to_send;
-            } else {
-                requests[i].type = MPI_TLS_NULL;
-                requests_len--;
+            /* Asynchronously send to enclave. */
+            ret =
+                mpi_tls_isend_bytes(arr + send_idxs[i],
+                        elems_to_send * sizeof(*arr), i,
+                        SAMPLE_PARTITION_MPI_TAG, &requests[i]);
+            if (ret) {
+                handle_error_string("Error sending partitioned data");
+                goto exit;
+            }
+            send_idxs[i] += elems_to_send;
+
+            /* If this block sent less than SAMPLE_PARTITION_BUF_SIZE elements,
+             * then the receiver will take this as the end of our stream, so
+             * increment SEND_IDXS[i] by 1 to indicate we're truly done. */
+            if (elems_to_send < SAMPLE_PARTITION_BUF_SIZE) {
+                send_idxs[i]++;
             }
         }
     }
 
     /* Get completed requests in a loop. */
-    while (requests_len) {
+    size_t ranks_still_receiving = world_size - 1;
+    size_t ranks_still_sending = world_size - 1;
+    while (ranks_still_sending || ranks_still_receiving) {
         size_t index;
         mpi_tls_status_t status;
         ret = mpi_tls_waitany(world_size, requests, &index, &status);
@@ -477,69 +492,348 @@ static int distributed_sample_partition(elem_t *arr, elem_t *out,
             handle_error_string("Error waiting on partition requests");
             goto exit;
         }
-        bool keep_rank;
+
         if (index == (size_t) world_rank) {
             /* Receive request completed. */
             size_t req_num_received = status.count / sizeof(*out);
-            num_received += req_num_received;
+            *out_length += req_num_received;
 
-            size_t elems_to_recv =
-                MIN(src_local_length - num_received, SAMPLE_PARTITION_BUF_SIZE);
-            keep_rank = elems_to_recv > 0;
-            if (keep_rank) {
+            /* If the number of elements received is less than
+             * SAMPLE_PARTITION_BUF_SIZE, that rank has finished sending. */
+            if (req_num_received < SAMPLE_PARTITION_BUF_SIZE) {
+                ranks_still_receiving--;
+            }
+
+            if (ranks_still_receiving > 0) {
                 ret =
-                    mpi_tls_irecv_bytes(out + num_received,
-                            elems_to_recv * sizeof(*out), MPI_TLS_ANY_SOURCE,
-                            SAMPLE_PARTITION_MPI_TAG, &requests[index]);
+                    mpi_tls_irecv_bytes(out + *out_length,
+                            SAMPLE_PARTITION_BUF_SIZE * sizeof(*out),
+                            MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
+                            &requests[index]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
                     goto exit;
                 }
+            } else {
+                requests[index].type = MPI_TLS_NULL;
             }
         } else {
             /* Send request completed. */
 
-            keep_rank =
-                sample_idxs[index] - sample_scan_idxs[index] > 0;
-
+            /* If the send index is equal to the sample index, we need to send
+             * an extra message of length 0 to indicate the end of our
+             * partition. We indicate that we've already sent a sentinel message
+             * of length < SAMPLE_PARTITION_BUF_SIZE message by setting
+             * the send index GREATER than the sample index. */
+            bool keep_rank = send_idxs[index] <= sample_idxs[index];
             if (keep_rank) {
                 size_t elems_to_send =
-                    MIN(sample_idxs[index]
-                                - sample_scan_idxs[index],
+                    MIN(sample_idxs[index] - send_idxs[index],
                             SAMPLE_PARTITION_BUF_SIZE);
 
                 /* Asynchronously send to enclave. */
                 ret =
-                    mpi_tls_isend_bytes(arr + sample_scan_idxs[index],
+                    mpi_tls_isend_bytes(arr + send_idxs[index],
                             elems_to_send * sizeof(*arr), index,
                             SAMPLE_PARTITION_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
                     goto exit;
                 }
-                sample_scan_idxs[index] += elems_to_send;
-            }
-        }
+                send_idxs[index] += elems_to_send;
 
-        if (!keep_rank) {
-            /* Remove the request from the array. */
-            requests[index].type = MPI_TLS_NULL;
-            requests_len--;
+                /* If this block sent less than SAMPLE_PARTITION_BUF_SIZE
+                 * elements, then the receiver will take this as the end of our
+                 * stream, so increment SEND_IDXS[INDEX] by 1 to indicate
+                 * we're truly done. */
+                if (elems_to_send < SAMPLE_PARTITION_BUF_SIZE) {
+                    send_idxs[index]++;
+                }
+            } else {
+                requests[index].type = MPI_TLS_NULL;
+                ranks_still_sending--;
+            }
         }
     }
 
-    assert(num_received == src_local_length);
+exit:
+    return ret;
+}
+
+/* Balance the elements across enclaves after the unbalanced partitioning step
+ * and sorting step. */
+static int balance(elem_t *arr, elem_t *out, size_t total_length,
+        size_t in_length) {
+    mpi_tls_request_t requests[world_size * 2];
+    mpi_tls_request_t *send_requests = requests;
+    mpi_tls_request_t *recv_requests = requests + world_size;
+    int ret;
+
+    /* This should never be called if this is a single-enclave sort. */
+    assert(world_size > 1);
+
+    /* Get all cumulative lengths across ranks. RANK_LENGTHS[i] holds the number
+     * of elements in ranks 0 to i - 1. */
+    size_t rank_cum_idxs[world_size + 1];
+    size_t send_idxs[world_size];
+    size_t recv_idxs[world_size];
+    size_t send_final_idxs[world_size];
+    size_t recv_final_idxs[world_size];
+    if (world_rank == 0) {
+        /* Receive individual lengths from everyone. */
+        rank_cum_idxs[0] = in_length;
+        for (int i = 0; i < world_size - 1; i++) {
+            size_t rank_length;
+            mpi_tls_status_t status;
+            ret =
+                mpi_tls_recv_bytes(&rank_length, sizeof(rank_length),
+                        MPI_TLS_ANY_SOURCE, BALANCE_MPI_TAG, &status);
+            if (ret) {
+                handle_error_string("Error receiving rank length into %d", 0);
+                goto exit;
+            }
+            rank_cum_idxs[status.source] = rank_length;
+        }
+
+        /* Compute cumulative lengths. */
+        size_t cur_length = 0;
+        for (int i = 0; i < world_size; i++) {
+            size_t prev_length = cur_length;
+            cur_length += rank_cum_idxs[i];
+            rank_cum_idxs[i] = prev_length;
+        }
+        rank_cum_idxs[world_size] = total_length;
+
+        /* Send cumulative lengths to everyone. */
+        for (int i = 0; i < world_size; i++) {
+            if (i == world_rank) {
+                continue;
+            }
+            ret =
+                mpi_tls_send_bytes(rank_cum_idxs, sizeof(rank_cum_idxs), i,
+                        BALANCE_MPI_TAG);
+            if (ret) {
+                handle_error_string(
+                        "Error sending cumulative lengths from %d to %d", 0, i);
+                goto exit;
+            }
+        }
+    } else {
+        /* Send length to rank 0. */
+        ret =
+            mpi_tls_send_bytes(&in_length, sizeof(in_length), 0,
+                    BALANCE_MPI_TAG);
+        if (ret) {
+            handle_error_string("Error sending rank length from %d to %d", 0,
+                    world_rank);
+            goto exit;
+        }
+
+        /* Receive cumulative lengths from rank 0. */
+        ret =
+            mpi_tls_recv_bytes(rank_cum_idxs, sizeof(rank_cum_idxs), 0,
+                    BALANCE_MPI_TAG, NULL);
+        if (ret) {
+            handle_error_string(
+                    "Error receiving cumulative lengths from %d into %d", 0,
+                    world_rank);
+            goto exit;
+        }
+    }
+
+    /* Compute at which indices we need to send the elements we currently have
+     * to each rank and at which indices we need to receive elements from other
+     * ranks. */
+    size_t local_start = world_rank * total_length / world_size;
+    size_t local_end = (world_rank + 1) * total_length / world_size;
+    size_t local_length = local_end - local_start;
+    for (int i = 0; i < world_size; i++) {
+        size_t i_local_start = i * total_length / world_size;
+        send_idxs[i] =
+            MAX(
+                    MIN(i_local_start, rank_cum_idxs[world_rank + 1]),
+                    rank_cum_idxs[world_rank])
+                - rank_cum_idxs[world_rank];
+        recv_idxs[i] =
+            MAX(MIN(rank_cum_idxs[i], local_end), local_start) - local_start;
+    }
+    assert(world_size > 1);
+    memcpy(send_final_idxs, send_idxs + 1,
+            (world_size - 1) * sizeof(*send_final_idxs));
+    send_final_idxs[world_size - 1] = in_length;
+    memcpy(recv_final_idxs, recv_idxs + 1,
+            (world_size - 1) * sizeof(*recv_final_idxs));
+    recv_final_idxs[world_size - 1] = local_length;
+
+    /* Construct initial requests. */
+    size_t num_requests = 0;
+    for (int i = 0; i < world_size; i++) {
+        /* Copy our input to our output for ourselves and continue. */
+        if (i == world_rank) {
+            size_t elems_to_copy = send_final_idxs[i] - send_idxs[i];
+            assert(elems_to_copy == recv_final_idxs[i] - recv_idxs[i]);
+            if (elems_to_copy) {
+                memcpy(out + recv_idxs[i], arr + send_idxs[i],
+                        elems_to_copy * sizeof(*out));
+                send_idxs[i] += elems_to_copy;
+                recv_idxs[i] += elems_to_copy;
+            }
+            send_requests[i].type = MPI_TLS_NULL;
+            recv_requests[i].type = MPI_TLS_NULL;
+            continue;
+        }
+
+        /* Construct send requests. */
+        if (send_idxs[i] < send_final_idxs[i]) {
+            size_t elems_to_send =
+                MIN(send_final_idxs[i] - send_idxs[i],
+                        SAMPLE_PARTITION_BUF_SIZE);
+            ret =
+                mpi_tls_isend_bytes(arr + send_idxs[i],
+                        elems_to_send * sizeof(*arr), i, BALANCE_MPI_TAG,
+                        &send_requests[i]);
+            if (ret) {
+                handle_error_string(
+                        "Error sending balance elements from %d to %d",
+                        world_rank, i);
+                goto exit;
+            }
+            send_idxs[i] += elems_to_send;
+            num_requests++;
+        } else {
+            send_requests[i].type = MPI_TLS_NULL;
+        }
+
+        /* Construct receive requests. */
+        if (recv_idxs[i] < recv_final_idxs[i]) {
+            size_t elems_to_recv =
+                MIN(recv_final_idxs[i] - recv_idxs[i],
+                        SAMPLE_PARTITION_BUF_SIZE);
+            ret =
+                mpi_tls_irecv_bytes(out + recv_idxs[i],
+                        elems_to_recv * sizeof(*out), i, BALANCE_MPI_TAG,
+                        &recv_requests[i]);
+            if (ret) {
+                handle_error_string(
+                        "Error receiving balance elements from %d into %d",
+                        i, world_rank);
+                goto exit;
+            }
+            recv_idxs[i] += elems_to_recv;
+            num_requests++;
+        } else {
+            recv_requests[i].type = MPI_TLS_NULL;
+        }
+    }
+
+    /* Repeatedly wait and send. */
+    while (num_requests) {
+        size_t index;
+        mpi_tls_status_t status;
+        ret = mpi_tls_waitany(world_size * 2, requests, &index, &status);
+        if (ret) {
+            handle_error_string("Error waiting on balance MPI requests");
+            goto exit;
+        }
+
+        if (index < (size_t) world_size) {
+            /* This was a send request. */
+            int rank = index;
+            if (send_idxs[rank] < send_final_idxs[rank]) {
+                size_t elems_to_send =
+                    MIN(send_final_idxs[rank] - send_idxs[rank],
+                            SAMPLE_PARTITION_BUF_SIZE);
+                ret =
+                    mpi_tls_isend_bytes(arr + send_idxs[rank],
+                            elems_to_send * sizeof(*out), rank,
+                            BALANCE_MPI_TAG, &send_requests[rank]);
+                if (ret) {
+                    handle_error_string(
+                            "Error receiving balance elements from %d into %d",
+                            rank, world_rank);
+                    goto exit;
+                }
+                send_idxs[rank] += elems_to_send;
+            } else {
+                send_requests[rank].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        } else {
+            int rank = index - world_size;
+            /* This was a receive request. */
+            if (recv_idxs[rank] < recv_final_idxs[rank]) {
+                size_t elems_to_recv =
+                    MIN(recv_final_idxs[rank] - recv_idxs[rank],
+                            SAMPLE_PARTITION_BUF_SIZE);
+                ret =
+                    mpi_tls_irecv_bytes(out + recv_idxs[rank],
+                            elems_to_recv * sizeof(*out), rank,
+                            BALANCE_MPI_TAG, &recv_requests[rank]);
+                if (ret) {
+                    handle_error_string(
+                            "Error receiving balance elements from %d into %d",
+                            rank, world_rank);
+                    goto exit;
+                }
+                recv_idxs[rank] += elems_to_recv;
+            } else {
+                recv_requests[rank].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        }
+    }
+
+    ret = 0;
 
 exit:
     return ret;
 }
 
 int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
-        size_t local_length, size_t local_start, size_t num_threads) {
-    size_t src_local_start = length * world_rank / world_size;
+        size_t local_length, size_t num_threads) {
     size_t src_local_length =
-        length * (world_rank + 1) / world_size - src_local_start;
+        (world_rank + 1) * length / world_size
+            - world_rank * length / world_size;
     int ret;
+
+    if (world_size == 1) {
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+        struct timespec time_start;
+        if (clock_gettime(CLOCK_REALTIME, &time_start)) {
+            handle_error_string("Error getting time");
+            ret = errno;
+            goto exit;
+        }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
+        /* Sort local partitions. */
+        ret = mergesort(arr, buf, length, num_threads);
+        if (ret) {
+            handle_error_string("Error in non-oblivious local sort");
+            goto exit;
+        }
+
+        /* Copy local sort output to final output. */
+        memcpy(arr, buf, length * sizeof(*arr));
+
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+        struct timespec time_finish;
+        if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
+            handle_error_string("Error getting time");
+            ret = errno;
+            goto exit;
+        }
+
+        if (world_rank == 0) {
+            printf("sample_partition : %f\n", 0.0);
+            printf("local_sort       : %f\n",
+                    get_time_difference(&time_start, &time_finish));
+            printf("balance          : %f\n", 0.0);
+        }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
+        goto exit;
+    }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_start;
@@ -552,9 +846,9 @@ int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
 
     /* Partition permuted data such that each enclave has its own partition of
      * element, e.g. enclave 0 has the lowest elements, then enclave 1, etc. */
+    size_t partition_length;
     ret =
-        distributed_sample_partition(arr, buf, local_length, local_start,
-                length);
+        distributed_sample_partition(arr, buf, local_length, &partition_length);
     if (ret) {
         handle_error_string("Error in distributed sample partitioning");
         goto exit;
@@ -570,11 +864,30 @@ int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
 #endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Sort local partitions. */
-    ret = mergesort(buf, arr, src_local_length, num_threads);
+    ret = mergesort(buf, arr, partition_length, num_threads);
     if (ret) {
         handle_error_string("Error in non-oblivious local sort");
         goto exit;
     }
+
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    struct timespec time_local_sort;
+    if (clock_gettime(CLOCK_REALTIME, &time_local_sort)) {
+        handle_error_string("Error getting time");
+        ret = errno;
+        goto exit;
+    }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
+    /* Balance partitions. */
+    ret = balance(arr, buf, length, partition_length);
+    if (ret) {
+        handle_error_string("Error in non-oblivious balancing");
+        goto exit;
+    }
+
+    /* Copy the balanced output back to the final output. */
+    memcpy(arr, buf, src_local_length * sizeof(*arr));
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_finish;
@@ -590,7 +903,9 @@ int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
         printf("sample_partition : %f\n",
                 get_time_difference(&time_start, &time_sample_partition));
         printf("local_sort       : %f\n",
-                get_time_difference(&time_sample_partition, &time_finish));
+                get_time_difference(&time_sample_partition, &time_local_sort));
+        printf("balance          : %f\n",
+                get_time_difference(&time_local_sort, &time_finish));
     }
 #endif
 
