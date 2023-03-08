@@ -1,4 +1,5 @@
 #include "enclave/nonoblivious.h"
+#include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -543,8 +544,236 @@ exit:
     return ret;
 }
 
+/* Balance the elements across enclaves after the unbalanced partitioning step
+ * and sorting step. */
+static int balance(elem_t *arr, elem_t *out, size_t total_length,
+        size_t in_length) {
+    mpi_tls_request_t requests[world_size * 2];
+    mpi_tls_request_t *send_requests = requests;
+    mpi_tls_request_t *recv_requests = requests + world_size;
+    int ret;
+
+    /* Get all cumulative lengths across ranks. RANK_LENGTHS[i] holds the number
+     * of elements in ranks 0 to i - 1. */
+    size_t rank_cum_idxs[world_size + 1];
+    size_t send_idxs[world_size];
+    size_t recv_idxs[world_size];
+    size_t send_final_idxs[world_size];
+    size_t recv_final_idxs[world_size];
+    if (world_rank == 0) {
+        /* Receive individual lengths from everyone. */
+        rank_cum_idxs[0] = in_length;
+        for (int i = 0; i < world_size - 1; i++) {
+            size_t rank_length;
+            mpi_tls_status_t status;
+            ret =
+                mpi_tls_recv_bytes(&rank_length, sizeof(rank_length),
+                        MPI_TLS_ANY_SOURCE, BALANCE_MPI_TAG, &status);
+            if (ret) {
+                handle_error_string("Error receiving rank length into %d", 0);
+                goto exit;
+            }
+            rank_cum_idxs[status.source] = rank_length;
+        }
+
+        /* Compute cumulative lengths. */
+        size_t cur_length = 0;
+        for (int i = 0; i < world_size; i++) {
+            size_t prev_length = cur_length;
+            cur_length += rank_cum_idxs[i];
+            rank_cum_idxs[i] = prev_length;
+        }
+        rank_cum_idxs[world_size] = total_length;
+
+        /* Send cumulative lengths to everyone. */
+        for (int i = 0; i < world_size; i++) {
+            if (i == world_rank) {
+                continue;
+            }
+            ret =
+                mpi_tls_send_bytes(rank_cum_idxs, sizeof(rank_cum_idxs), i,
+                        BALANCE_MPI_TAG);
+            if (ret) {
+                handle_error_string(
+                        "Error sending cumulative lengths from %d to %d", 0, i);
+                goto exit;
+            }
+        }
+    } else {
+        /* Send length to rank 0. */
+        ret =
+            mpi_tls_send_bytes(&in_length, sizeof(in_length), 0,
+                    BALANCE_MPI_TAG);
+        if (ret) {
+            handle_error_string("Error sending rank length from %d to %d", 0,
+                    world_rank);
+            goto exit;
+        }
+
+        /* Receive cumulative lengths from rank 0. */
+        ret =
+            mpi_tls_recv_bytes(rank_cum_idxs, sizeof(rank_cum_idxs), 0,
+                    BALANCE_MPI_TAG, NULL);
+        if (ret) {
+            handle_error_string(
+                    "Error receiving cumulative lengths from %d into %d", 0,
+                    world_rank);
+            goto exit;
+        }
+    }
+
+    /* Compute at which indices we need to send the elements we currently have
+     * to each rank and at which indices we need to receive elements from other
+     * ranks. */
+    size_t local_start = world_rank * total_length / world_size;
+    size_t local_end = (world_rank + 1) * total_length / world_size;
+    size_t local_length = local_end - local_start;
+    for (int i = 0; i < world_size; i++) {
+        size_t i_local_start = i * total_length / world_size;
+        send_idxs[i] =
+            MAX(
+                    MIN(i_local_start, rank_cum_idxs[world_rank + 1]),
+                    rank_cum_idxs[world_rank])
+                - rank_cum_idxs[world_rank];
+        recv_idxs[i] =
+            MAX(MIN(rank_cum_idxs[i], local_end), local_start) - local_start;
+    }
+    memcpy(send_final_idxs, send_idxs + 1,
+            (world_size - 1) * sizeof(*send_final_idxs));
+    send_final_idxs[world_size - 1] = in_length;
+    memcpy(recv_final_idxs, recv_idxs + 1,
+            (world_size - 1) * sizeof(*recv_final_idxs));
+    recv_final_idxs[world_size - 1] = local_length;
+
+    /* Construct initial requests. */
+    size_t num_requests = 0;
+    for (int i = 0; i < world_size; i++) {
+        /* Copy our input to our output for ourselves and continue. */
+        if (i == world_rank) {
+            size_t elems_to_copy = send_final_idxs[i] - send_idxs[i];
+            assert(elems_to_copy == recv_final_idxs[i] - recv_idxs[i]);
+            if (elems_to_copy) {
+                memcpy(out + recv_idxs[i], arr + send_idxs[i],
+                        elems_to_copy * sizeof(*out));
+                send_idxs[i] += elems_to_copy;
+                recv_idxs[i] += elems_to_copy;
+            }
+            send_requests[i].type = MPI_TLS_NULL;
+            recv_requests[i].type = MPI_TLS_NULL;
+            continue;
+        }
+
+        /* Construct send requests. */
+        if (send_idxs[i] < send_final_idxs[i]) {
+            size_t elems_to_send =
+                MIN(send_final_idxs[i] - send_idxs[i],
+                        SAMPLE_PARTITION_BUF_SIZE);
+            ret =
+                mpi_tls_isend_bytes(arr + send_idxs[i],
+                        elems_to_send * sizeof(*arr), i, BALANCE_MPI_TAG,
+                        &send_requests[i]);
+            if (ret) {
+                handle_error_string(
+                        "Error sending balance elements from %d to %d",
+                        world_rank, i);
+                goto exit;
+            }
+            send_idxs[i] += elems_to_send;
+            num_requests++;
+        } else {
+            send_requests[i].type = MPI_TLS_NULL;
+        }
+
+        /* Construct receive requests. */
+        if (recv_idxs[i] < recv_final_idxs[i]) {
+            size_t elems_to_recv =
+                MIN(recv_final_idxs[i] - recv_idxs[i],
+                        SAMPLE_PARTITION_BUF_SIZE);
+            ret =
+                mpi_tls_irecv_bytes(out + recv_idxs[i],
+                        elems_to_recv * sizeof(*out), i, BALANCE_MPI_TAG,
+                        &recv_requests[i]);
+            if (ret) {
+                handle_error_string(
+                        "Error receiving balance elements from %d into %d",
+                        i, world_rank);
+                goto exit;
+            }
+            recv_idxs[i] += elems_to_recv;
+            num_requests++;
+        } else {
+            recv_requests[i].type = MPI_TLS_NULL;
+        }
+    }
+
+    /* Repeatedly wait and send. */
+    while (num_requests) {
+        size_t index;
+        mpi_tls_status_t status;
+        ret = mpi_tls_waitany(world_size * 2, requests, &index, &status);
+        if (ret) {
+            handle_error_string("Error waiting on balance MPI requests");
+            goto exit;
+        }
+
+        if (index < (size_t) world_size) {
+            /* This was a send request. */
+            int rank = index;
+            if (send_idxs[rank] < send_final_idxs[rank]) {
+                size_t elems_to_send =
+                    MIN(send_final_idxs[rank] - send_idxs[rank],
+                            SAMPLE_PARTITION_BUF_SIZE);
+                ret =
+                    mpi_tls_isend_bytes(arr + send_idxs[rank],
+                            elems_to_send * sizeof(*out), rank,
+                            BALANCE_MPI_TAG, &send_requests[rank]);
+                if (ret) {
+                    handle_error_string(
+                            "Error receiving balance elements from %d into %d",
+                            rank, world_rank);
+                    goto exit;
+                }
+                send_idxs[rank] += elems_to_send;
+            } else {
+                send_requests[rank].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        } else {
+            int rank = index - world_size;
+            /* This was a receive request. */
+            if (recv_idxs[rank] < recv_final_idxs[rank]) {
+                size_t elems_to_recv =
+                    MIN(recv_final_idxs[rank] - recv_idxs[rank],
+                            SAMPLE_PARTITION_BUF_SIZE);
+                ret =
+                    mpi_tls_irecv_bytes(out + recv_idxs[rank],
+                            elems_to_recv * sizeof(*out), rank,
+                            BALANCE_MPI_TAG, &recv_requests[rank]);
+                if (ret) {
+                    handle_error_string(
+                            "Error receiving balance elements from %d into %d",
+                            rank, world_rank);
+                    goto exit;
+                }
+                recv_idxs[rank] += elems_to_recv;
+            } else {
+                recv_requests[rank].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        }
+    }
+
+    ret = 0;
+
+exit:
+    return ret;
+}
+
 int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
         size_t local_length, size_t num_threads) {
+    size_t src_local_length =
+        (world_rank + 1) * length / world_size
+            - world_rank * length / world_size;
     int ret;
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
@@ -583,6 +812,25 @@ int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
     }
 
 #ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    struct timespec time_local_sort;
+    if (clock_gettime(CLOCK_REALTIME, &time_local_sort)) {
+        handle_error_string("Error getting time");
+        ret = errno;
+        goto exit;
+    }
+#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
+
+    /* Balance partitions. */
+    ret = balance(arr, buf, length, partition_length);
+    if (ret) {
+        handle_error_string("Error in non-oblivious balancing");
+        goto exit;
+    }
+
+    /* Copy the balanced output back to the final output. */
+    memcpy(arr, buf, src_local_length * sizeof(*arr));
+
+#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_finish;
     if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
         handle_error_string("Error getting time");
@@ -596,7 +844,9 @@ int nonoblivious_sort(elem_t *arr, elem_t *buf, size_t length,
         printf("sample_partition : %f\n",
                 get_time_difference(&time_start, &time_sample_partition));
         printf("local_sort       : %f\n",
-                get_time_difference(&time_sample_partition, &time_finish));
+                get_time_difference(&time_sample_partition, &time_local_sort));
+        printf("balance          : %f\n",
+                get_time_difference(&time_local_sort, &time_finish));
     }
 #endif
 
