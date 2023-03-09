@@ -60,7 +60,8 @@ enclave {
 
     trusted {
         public int ecall_sort_init(int world_rank, int world_size, size_t num_threads);
-        public int ecall_sort_alloc(size_t total_length, enum sort_type sort_type);
+        public int ecall_sort_alloc_arr(size_t total_length, enum sort_type sort_type);
+        public void ecall_sort_free_arr(void);
         public void ecall_sort_free(void);
         public int ecall_verify_sorted(void);
         public void ecall_start_work(void);

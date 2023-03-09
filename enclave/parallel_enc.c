@@ -58,7 +58,7 @@ exit_free_rand:
     return ret;
 }
 
-int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
+int ecall_sort_alloc_arr(size_t total_length_, enum sort_type sort_type) {
     total_length = total_length_;
     size_t local_length =
         ((world_rank + 1) * total_length + world_size - 1) / world_size
@@ -121,13 +121,13 @@ exit:
     return ret;
 }
 
+void ecall_sort_free_arr(void) {
+    free(arr);
+}
+
 void ecall_sort_free(void) {
     mpi_tls_free();
     rand_free();
-    if (arr) {
-        free(arr);
-        arr = NULL;
-    }
 }
 
 int ecall_verify_sorted(void) {
