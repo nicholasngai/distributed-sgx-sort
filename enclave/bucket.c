@@ -655,7 +655,7 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     }
 
     size_t route_levels2 = log2li(num_local_buckets);
-    ret = bucket_route(arr, route_levels2, route_levels1 + route_levels2);
+    ret = bucket_route(arr, route_levels2, route_levels1);
     if (ret) {
         handle_error_string("Error routing elements through butterfly network");
         goto exit;
