@@ -154,8 +154,9 @@ static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
          * lower, then we swap if the local element is lower. Likewise, if the
          * local index is higher, than we swap if the local element is higher.
          * If descending, everything is reversed. */
+        size_t min_idx = MIN(local_idx, remote_idx);
         for (size_t i = 0; i < elems_to_swap; i++) {
-            bool cond = s != (local_idx + i >= (offset + left_marked_count) % (length / 2));
+            bool cond = s != (min_idx + i >= (offset + left_marked_count) % (length / 2));
             o_memcpy(&arr[local_idx + i - local_start], &buffer[i],
                     sizeof(*arr), cond);
         }
@@ -326,18 +327,6 @@ static void compact(void *args_) {
         }
     }
 
-    /* Swap. */
-    ret =
-        swap_range(args->arr, args->length, args->start,
-                args->start + args->length / 2, args->length / 2, args->offset,
-                left_marked_count, args->num_threads);
-    if (ret) {
-        handle_error_string(
-                "Error swapping range with start %lu and length %lu",
-                args->start, args->start + args->length / 2);
-        goto exit;
-    }
-
     /* Recursively compact. */
     struct compact_args left_args = {
         .arr = args->arr,
@@ -401,6 +390,18 @@ static void compact(void *args_) {
             ret = right_args.ret;
             goto exit;
         }
+    }
+
+    /* Swap. */
+    ret =
+        swap_range(args->arr, args->length, args->start,
+                args->start + args->length / 2, args->length / 2, args->offset,
+                left_marked_count, args->num_threads);
+    if (ret) {
+        handle_error_string(
+                "Error swapping range with start %lu and length %lu",
+                args->start, args->start + args->length / 2);
+        goto exit;
     }
 
 exit:
@@ -476,7 +477,7 @@ static void shuffle(void *args_) {
             }
         }
 
-        marked_in_prev = 0;
+        marked_in_prev = enclave_mark_counts[master_rank];
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
             struct mark_count_payload payload = {
                 .num_to_mark = enclave_mark_counts[rank],
