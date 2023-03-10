@@ -147,12 +147,20 @@ $(COMMON_DIR)/%.o: $(COMMON_DIR)/%.c
 
 # Host-only binary for profiling.
 
-HOSTONLY_CPPFLAGS = $(HOST_CPPFLAGS) -DDISTRIBUTED_SGX_SORT_HOSTONLY
-HOSTONLY_CFLAGS = $(HOST_CFLAGS) -Wno-implicit-function-declaration -Wno-unused
-HOSTONLY_LDFLAGS = $(HOST_LDFLAGS)
-HOSTONLY_LDLIBS = $(HOST_LDLIBS) \
+HOSTONLY_CPPFLAGS = \
+	-DDISTRIBUTED_SGX_SORT_HOSTONLY \
+	$(CPPFLAGS)
+HOSTONLY_CFLAGS = \
+	$(shell pkg-config mpi --cflags) \
+	-Wno-implicit-function-declaration -Wno-unused \
+	$(CFLAGS)
+HOSTONLY_LDFLAGS = $(LDFLAGS)
+HOSTONLY_LDLIBS = \
+	$(shell pkg-config mpi --libs) \
+	-lmbedcrypto \
 	-lmbedx509 \
-	-lmbedtls
+	-lmbedtls \
+	$(LDLIBS)
 
 $(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) $(THIRD_PARTY_LIBS)
 	$(CC) $(HOSTONLY_CFLAGS) $(HOSTONLY_CPPFLAGS) $(HOSTONLY_LDFLAGS) $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) $(HOSTONLY_LDLIBS) -o $@
