@@ -5,9 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <threads.h>
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
 #include <time.h>
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
 #include "common/crypto.h"
@@ -613,14 +611,12 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
 
     elem_t *buf = arr + local_length;
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_start;
     if (clock_gettime(CLOCK_REALTIME, &time_start)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Spread the elements located in the first half of our input array. */
     ret =
@@ -632,14 +628,12 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_assign_ids;
     if (clock_gettime(CLOCK_REALTIME, &time_assign_ids)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     size_t route_levels1 = log2li(world_size);
     ret = bucket_route(buf, route_levels1, 0);
@@ -661,14 +655,12 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_merge_split;
     if (clock_gettime(CLOCK_REALTIME, &time_merge_split)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Permute each bucket and concatenate them back together by compressing all
      * real elems together. We also assign new ORP IDs so that all elements have
@@ -700,14 +692,12 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         }
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_compress;
     if (clock_gettime(CLOCK_REALTIME, &time_compress)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Nonoblivious sort. */
     ret = nonoblivious_sort(buf, arr, length, compress_len, num_threads);
@@ -716,7 +706,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     if (world_rank == 0) {
         printf("assign_ids       : %f\n",
                 get_time_difference(&time_start, &time_assign_ids));
@@ -725,7 +714,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         printf("compression      : %f\n",
                 get_time_difference(&time_merge_split, &time_compress));
     }
-#endif
 
 exit:
     return ret;

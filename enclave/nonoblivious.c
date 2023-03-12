@@ -794,14 +794,12 @@ int nonoblivious_sort(elem_t *arr, elem_t *out, size_t length,
     int ret;
 
     if (world_size == 1) {
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
         struct timespec time_start;
         if (clock_gettime(CLOCK_REALTIME, &time_start)) {
             handle_error_string("Error getting time");
             ret = errno;
             goto exit;
         }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
         /* Sort local partitions. */
         ret = mergesort(arr, out, length, num_threads);
@@ -813,7 +811,6 @@ int nonoblivious_sort(elem_t *arr, elem_t *out, size_t length,
         /* Copy local sort output to final output. */
         memcpy(arr, out, length * sizeof(*arr));
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
         struct timespec time_finish;
         if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
             handle_error_string("Error getting time");
@@ -827,19 +824,16 @@ int nonoblivious_sort(elem_t *arr, elem_t *out, size_t length,
                     get_time_difference(&time_start, &time_finish));
             printf("balance          : %f\n", 0.0);
         }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_start;
     if (clock_gettime(CLOCK_REALTIME, &time_start)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Partition permuted data such that each enclave has its own partition of
      * element, e.g. enclave 0 has the lowest elements, then enclave 1, etc. */
@@ -851,14 +845,12 @@ int nonoblivious_sort(elem_t *arr, elem_t *out, size_t length,
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_sample_partition;
     if (clock_gettime(CLOCK_REALTIME, &time_sample_partition)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Sort local partitions. */
     ret = mergesort(out, arr, partition_length, num_threads);
@@ -867,14 +859,12 @@ int nonoblivious_sort(elem_t *arr, elem_t *out, size_t length,
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_local_sort;
     if (clock_gettime(CLOCK_REALTIME, &time_local_sort)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Balance partitions. */
     ret = balance(arr, out, length, partition_length);
@@ -883,16 +873,13 @@ int nonoblivious_sort(elem_t *arr, elem_t *out, size_t length,
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_finish;
     if (clock_gettime(CLOCK_REALTIME, &time_finish)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     if (world_rank == 0) {
         printf("sample_partition : %f\n",
                 get_time_difference(&time_start, &time_sample_partition));
@@ -901,7 +888,6 @@ int nonoblivious_sort(elem_t *arr, elem_t *out, size_t length,
         printf("balance          : %f\n",
                 get_time_difference(&time_local_sort, &time_finish));
     }
-#endif
 
 exit:
     return ret;

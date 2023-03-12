@@ -656,14 +656,12 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     size_t local_length = length * (world_rank + 1) / world_size - local_start;
     int ret;
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_start;
     if (clock_gettime(CLOCK_REALTIME, &time_start)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     total_length = length;
 
@@ -706,14 +704,12 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct timespec time_shuffle;
     if (clock_gettime(CLOCK_REALTIME, &time_shuffle)) {
         handle_error_string("Error getting time");
         ret = errno;
         goto exit;
     }
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Nonoblivious sort. This requires MAX(LOCAL_LENGTH * 2, 512) elements for
      * both the array and buffer, so use the second half of the array given to
@@ -727,12 +723,10 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     /* Copy the output to the final output. */
     memcpy(arr, buf, local_length * sizeof(*arr));
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     if (world_rank == 0) {
         printf("shuffle          : %f\n",
                 get_time_difference(&time_start, &time_shuffle));
     }
-#endif
 
 exit:
     return ret;
