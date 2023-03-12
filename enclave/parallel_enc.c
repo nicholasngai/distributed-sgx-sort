@@ -123,6 +123,7 @@ exit:
 
 void ecall_sort_free_arr(void) {
     free(arr);
+    mpi_tls_bytes_sent = 0;
 }
 
 void ecall_sort_free(void) {
@@ -362,4 +363,8 @@ exit_free_sort:
     orshuffle_free();
 exit:
     return ret;
+}
+
+void ecall_get_stats(struct ocall_enclave_stats *stats) {
+    stats->mpi_tls_bytes_sent = mpi_tls_bytes_sent;
 }

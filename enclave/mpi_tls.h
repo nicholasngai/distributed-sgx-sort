@@ -23,6 +23,9 @@ typedef struct mpi_tls_request {
 
 typedef ocall_mpi_status_t mpi_tls_status_t;
 
+/* Bandwidth measurement. */
+extern size_t mpi_tls_bytes_sent;
+
 #define MPI_TLS_ANY_SOURCE (-2)
 #define MPI_TLS_ANY_TAG (-3)
 #define MPI_TLS_STATUS_IGNORE ((mpi_tls_status_t *) 0)

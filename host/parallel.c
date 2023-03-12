@@ -3,6 +3,7 @@
 #include <pthread.h>
 #include <mpi.h>
 #include "common/error.h"
+#include "common/ocalls.h"
 #include "common/sort_type.h"
 #include "host/error.h"
 
@@ -155,6 +156,25 @@ int time_sort(enum sort_type sort_type, size_t length) {
                     - (start.tv_sec * 1000000000 + start.tv_nsec))
             / 1000000000;
         printf("%f\n", seconds_taken);
+    }
+
+    /* Print stats. */
+    struct ocall_enclave_stats stats;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    result = ecall_get_stats(enclave, &stats);
+    if (result != OE_OK) {
+        handle_oe_error(result, "ecall_get_stats");
+        goto exit_free_arr;
+    }
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    ecall_get_stats(&stats);
+#endif
+    for (int i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            printf("[stats] %2d: mpi_tls_bytes_sent = %zu\n", world_rank,
+                    stats.mpi_tls_bytes_sent);
+        }
+        MPI_Barrier(MPI_COMM_WORLD);
     }
 
     /* Check array. */

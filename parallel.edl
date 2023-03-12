@@ -71,5 +71,6 @@ enclave {
         public int ecall_bucket_sort(void);
         public int ecall_opaque_sort(void);
         public int ecall_orshuffle_sort(void);
+        public void ecall_get_stats([out] struct ocall_enclave_stats *stats);
     };
 };
