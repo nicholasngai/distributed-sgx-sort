@@ -52,6 +52,6 @@ get_mem_usage() {
 set_elem_size() {
     elem_size=$1
     find . -name '*.[ch]' -print0 | xargs -0 sed -Ei "s/^#define (ELEM_SIZE) .*\$/#define \\1 $elem_size/"
-    make -j
-    ./scripts/sync.sh
+    make -j >/dev/null
+    ./scripts/sync.sh >/dev/null
 }
