@@ -10,11 +10,6 @@ BENCHMARK_DIR=benchmarks
 
 mkdir -p "$BENCHMARK_DIR"
 
-set_elem_size() {
-    elem_size=$1
-    find . -name '*.[ch]' -print0 | xargs -0 sed -Ei "s/^#define (ELEM_SIZE) .*\$/#define \\1 $elem_size/"
-}
-
 a=orshuffle
 e=1
 s=1048576
@@ -31,9 +26,6 @@ for b in 256 512 1024 2048 4096; do
     echo "Elem size: $b"
 
     set_elem_size $b
-
-    make -j
-    ./scripts/sync.sh
 
     cmd="$cmd_template $a $s $t $REPEAT"
     echo "Command: $cmd"
