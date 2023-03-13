@@ -25,11 +25,17 @@ $warm_up
 for b in 256 512 1024 2048 4096; do
     echo "Elem size: $b"
 
+    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-elemsize$b-size$s-threads$t.txt"
+    if [ -f "$output_filename" ]; then
+        echo "Output file $output_filename already exists; skipping"
+        continue
+    fi
+
     set_elem_size $b
 
     cmd="$cmd_template $a $s $t $REPEAT"
     echo "Command: $cmd"
-    $cmd | tee "$BENCHMARK_DIR/$a-sgx2-enclaves$e-elemsize$b-size$s-threads$t.txt"
+    $cmd | tee "$output_filename"
 done
 
 if "$AZ"; then

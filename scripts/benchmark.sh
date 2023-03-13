@@ -55,6 +55,11 @@ for e in 32 16 8 4 2 1; do
                     exit -1
                 fi
 
+                if [ -f "$output_filename" ]; then
+                    echo "Output file $output_filename already exists; skipping"
+                    continue
+                fi
+
                 cmd="$cmd_template $a $s $t $REPEAT"
                 echo "Command: $cmd"
                 $cmd | tee "$output_filename"

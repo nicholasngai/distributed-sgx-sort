@@ -31,11 +31,16 @@ for e in 32 16 8 4 2 1; do
 
     for a in $(find ./baselines -type f -perm -111); do
         for s in 256 4096 65536 1048576 16777216; do
+            output_filename="$BENCHMARK_DIR/$(basename "$a")-sgx2-enclaves$e-size$s.txt"
+            if [ -f "$output_filename" ]; then
+                echo "Output file $output_filename already exists; skipping"
+            fi
+
             cmd="$cmd_template $a $k"
             echo "Command: $cmd"
             for i in {1..4}; do
                 $cmd
-            done | tee "$BENCHMARK_DIR/$(basename "$a")-sgx2-enclaves$e-size$s.txt"
+            done | tee "$output_filename"
         done
     done
 

@@ -46,9 +46,15 @@ for e in 32 16 8 4 2 1; do
 
         for s in 256 4096 65536 1048576 16777216; do
             for t in 1 2 4; do
+                output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$b-elemsize128-size$s-threads$t.txt"
+                if [ -f "$output_filename" ]; then
+                    echo "Output file $output_filename already exists; skipping"
+                    continue
+                fi
+
                 cmd="$cmd_template $a $s $t $REPEAT"
                 echo "Command: $cmd"
-                $cmd | tee "$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$b-elemsize128-size$s-threads$t.txt"
+                $cmd | tee "$output_filename"
             done
         done
     done
