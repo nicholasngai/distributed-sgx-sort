@@ -7,7 +7,6 @@ APP_NAME = parallel
 COMMON_DIR = common
 COMMON_OBJS = \
 	$(COMMON_DIR)/crypto.o \
-	$(COMMON_DIR)/elem_t.o \
 	$(COMMON_DIR)/error.o \
 	$(COMMON_DIR)/util.o
 COMMON_DEPS = $(COMMON_OBJS:.o=.d)

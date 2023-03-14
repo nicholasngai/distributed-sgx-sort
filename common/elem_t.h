@@ -5,11 +5,8 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include "crypto.h"
 
 #define ELEM_SIZE 128
-#define SIZEOF_ENCRYPTED_NODE (ELEM_SIZE + IV_LEN + TAG_LEN)
-
 #define ELEM_STRUCT_SIZE 32
 
 typedef struct elem {
@@ -27,8 +24,5 @@ typedef struct elem {
 } elem_t;
 
 static_assert(sizeof(elem_t) == ELEM_SIZE, "Element should be 128 bytes");
-
-int elem_encrypt(const void *key, const elem_t *elem, void *dst_, size_t idx);
-int elem_decrypt(const void *key, elem_t *elem, const void *src_, size_t idx);
 
 #endif /* common/elem_t.h */
