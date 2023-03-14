@@ -42,8 +42,8 @@ static inline int rand_read(void *buf_, size_t n) {
                 "rdrand %2;"
                 "jnc 0b;"
                 "mov %2, (%0);"
-                "add %4, %0;"
-                "sub %4, %1;"
+                "add %3, %0;"
+                "sub %3, %1;"
                 "jnz 0b;"
                 "1:"
                 : "+r" (buf), "+rm" (n), "=&r" (t)
