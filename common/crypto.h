@@ -1,6 +1,8 @@
 #ifndef DISTRIBUTED_SGX_SORT_COMMON_CRYPTO_H
 #define DISTRIBUTED_SGX_SORT_COMMON_CRYPTO_H
 
+#include <limits.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
 #include <threads.h>
@@ -26,6 +28,8 @@ struct thread_local_ctx {
 #endif
     unsigned char rand_bytes_pool[RAND_BYTES_POOL_LEN];
     size_t rand_bytes_pool_idx;
+    unsigned long rand_bits;
+    size_t rand_bits_left;
     struct thread_local_ctx **ptr;
 };
 
@@ -62,6 +66,7 @@ static inline int crypto_ensure_thread_local_ctx_init(void) {
 #endif
 
         ctx->rand_bytes_pool_idx = RAND_BYTES_POOL_LEN;
+        ctx->rand_bits_left = 0;
     }
 
     ret = 0;
@@ -183,6 +188,29 @@ static inline int rand_read(void *buf_, size_t n) {
         n -= n;
         ctx->rand_bytes_pool_idx += n;
     }
+
+exit:
+    return ret;
+}
+
+static inline int rand_bit(bool *bit) {
+    int ret;
+
+    ret = crypto_ensure_thread_local_ctx_init();
+    if (ret) {
+        goto exit;
+    }
+
+    if (ctx->rand_bits_left == 0) {
+        ret = rand_read(&ctx->rand_bits, sizeof(ctx->rand_bits));
+        if (ret) {
+            goto exit;
+        }
+        ctx->rand_bits_left = sizeof(ctx->rand_bits) * CHAR_BIT;
+    }
+
+    *bit = ctx->rand_bits & 1;
+    ctx->rand_bits >>= 1;
 
 exit:
     return ret;

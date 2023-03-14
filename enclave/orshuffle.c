@@ -450,12 +450,13 @@ static void shuffle(void *args_) {
     if (args->start >= local_start
             && args->start + args->length <= local_start + local_length
             && args->length == 2) {
-        unsigned char c;
-        rand_read(&c, sizeof(c));
-        bool cond = c & 1;
+        bool cond;
+        ret = rand_bit(&cond);
+        if (ret) {
+            goto exit;
+        }
         o_memswap(&args->arr[args->start], &args->arr[args->start + 1],
                 sizeof(*args->arr), cond);
-        ret = 0;
         goto exit;
     }
 
