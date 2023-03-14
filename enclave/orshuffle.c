@@ -58,16 +58,14 @@ static size_t get_local_start(int rank) {
 static int should_mark(size_t left_to_mark, size_t total_left, bool *result) {
     int ret;
 
-    size_t r;
-    do {
-        ret = rand_read(&r, sizeof(r));
-        if (ret) {
-            handle_error_string("Error reading random value");
-            goto exit;
-        }
-    } while (r >= SIZE_MAX - SIZE_MAX % total_left);
+    uint32_t r;
+    ret = rand_read(&r, sizeof(r));
+    if (ret) {
+        handle_error_string("Error reading random value");
+        goto exit;
+    }
 
-    *result = r % total_left < left_to_mark;
+    *result = ((uint64_t) r * total_left) >> 32 >= left_to_mark;
 
 exit:
     return ret;
