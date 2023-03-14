@@ -1,8 +1,9 @@
 #include "crypto.h"
 #include <stddef.h>
+#include <string.h>
 #include <threads.h>
-#include <mbedtls/gcm.h>
 #include <mbedtls/entropy.h>
+#include <mbedtls/gcm.h>
 #include "common/defs.h"
 #include "common/error.h"
 
@@ -11,6 +12,7 @@
 #endif
 
 #define THREAD_LOCAL_LIST_MAXLEN 64
+#define RAND_BYTES_POOL_LEN 1048576
 
 mbedtls_entropy_context entropy_ctx;
 
@@ -18,6 +20,8 @@ struct thread_local_ctx {
 #ifdef DISTRIBUTED_SGX_SORT_NORDRAND
     mbedtls_ctr_drbg_context drbg_ctx;
 #endif
+    unsigned char rand_bytes_pool[RAND_BYTES_POOL_LEN];
+    size_t rand_bytes_pool_idx;
     struct thread_local_ctx **ptr;
 };
 
@@ -25,7 +29,7 @@ static struct thread_local_ctx ctxs[THREAD_LOCAL_LIST_MAXLEN];
 static size_t ctx_len;
 static thread_local struct thread_local_ctx *ctx;
 
-static int UNUSED ensure_thread_local_ctx_init(void) {
+static int ensure_thread_local_ctx_init(void) {
     int ret;
 
     if (!ctx || !ctx->ptr) {
@@ -52,6 +56,8 @@ static int UNUSED ensure_thread_local_ctx_init(void) {
             goto exit;
         }
 #endif
+
+        ctx->rand_bytes_pool_idx = RAND_BYTES_POOL_LEN;
     }
 
     ret = 0;
@@ -76,8 +82,10 @@ void rand_free(void) {
     mbedtls_entropy_free(&entropy_ctx);
 }
 
+static int get_random_bytes(void *buf_, size_t n) {
+    unsigned char *buf = buf_;
+
 #ifdef DISTRIBUTED_SGX_SORT_NORDRAND
-int rand_read(void *buf, size_t n) {
     int ret;
 
     ret = ensure_thread_local_ctx_init();
@@ -85,18 +93,109 @@ int rand_read(void *buf, size_t n) {
         goto exit;
     }
 
-    ret = mbedtls_ctr_drbg_random(&ctx->drbg_ctx, buf, n);
-    if (ret) {
-        handle_mbedtls_error(ret, "mbedtls_ctr_drbg_random");
-        goto exit;
+    while (n) {
+        size_t bytes_to_get = MIN(n, MBEDTLS_CTR_DRBG_MAX_REQUEST);
+        ret = mbedtls_ctr_drbg_random(&ctx->drbg_ctx, buf, bytes_to_get);
+        if (ret) {
+            handle_mbedtls_error(ret, "mbedtls_ctr_drbg_random");
+            goto exit;
+        }
+        buf += bytes_to_get;
+        n -= bytes_to_get;
     }
 
     ret = 0;
 
 exit:
     return ret;
-}
+#else
+    if (n % sizeof(unsigned long) || n == sizeof(unsigned long)) {
+        unsigned long r;
+        __asm__ __volatile__ ("0:"
+                "rdrand %0;"
+                "jnc 0b;"
+                : "=r" (r)
+                :
+                : "cc");
+
+        size_t copy_bytes = n % sizeof(r) > 0 ? n % sizeof(r) : sizeof(r);
+        memcpy(buf, &r, copy_bytes);
+        buf += copy_bytes;
+        n -= copy_bytes;
+    }
+
+    if (n) {
+        unsigned long t;
+        __asm__ __volatile__ (
+                "0:"
+                "rdrand %2;"
+                "jnc 0b;"
+                "mov %2, (%0);"
+                "add %3, %0;"
+                "sub %3, %1;"
+                "jnz 0b;"
+                "1:"
+                : "+r" (buf), "+rm" (n), "=&r" (t)
+                : "i" (sizeof(unsigned long))
+                : "memory", "cc");
+    }
+
+    return 0;
 #endif
+}
+
+int rand_read(void *buf_, size_t n) {
+    unsigned char *buf = buf_;
+    int ret;
+
+    ret = ensure_thread_local_ctx_init();
+    if (ret) {
+        goto exit;
+    }
+
+    /* For multiples of RAND_BYTES_POOL_LEN, get random bytes and put them
+     * directly in the buffer, bypassing the pool. */
+    if (n >= RAND_BYTES_POOL_LEN) {
+        size_t bytes_to_get = n - n % RAND_BYTES_POOL_LEN;
+        ret = get_random_bytes(buf, bytes_to_get);
+        if (ret) {
+            handle_error_string("Error getting new random bytes");
+            goto exit;
+        }
+        buf += bytes_to_get;
+        n -= bytes_to_get;
+    }
+
+    /* For remaining bytes < RAND_BYTES_POOL_LEN, copy any bytes we have
+     * remaining in the pool. */
+    size_t bytes_to_get =
+        MIN(n, RAND_BYTES_POOL_LEN - ctx->rand_bytes_pool_idx);
+    memcpy(buf, ctx->rand_bytes_pool + ctx->rand_bytes_pool_idx, bytes_to_get);
+    buf += bytes_to_get;
+    n -= bytes_to_get;
+    ctx->rand_bytes_pool_idx += bytes_to_get;
+
+    /* If there are still bytes left, replenish the pool and copy the remainder.
+     * This should only be the case once since n < RAND_BYTES_POOL_LEN. */
+    if (n) {
+        ret =
+            get_random_bytes(ctx->rand_bytes_pool,
+                    sizeof(ctx->rand_bytes_pool));
+        if (ret) {
+            handle_error_string("Error getting new random bytes");
+            goto exit;
+        }
+        ctx->rand_bytes_pool_idx = 0;
+
+        memcpy(buf, ctx->rand_bytes_pool, n);
+        buf += n;
+        n -= n;
+        ctx->rand_bytes_pool_idx += n;
+    }
+
+exit:
+    return ret;
+}
 
 int aad_encrypt(const void *key, const void *plaintext, size_t plaintext_len,
         const void *aad, size_t aad_len, const void *iv, void *ciphertext,
