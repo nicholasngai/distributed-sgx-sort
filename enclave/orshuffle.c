@@ -245,9 +245,22 @@ static void compact(void *args_) {
     if (args->length < 2) {
         ret = 0;
         goto exit;
-    } else if (args->length == 2) {
-        bool cond = (!args->arr[0].marked & args->arr[1].marked) != (bool) args->offset;
-        o_memswap(&args->arr[0], &args->arr[1], sizeof(*args->arr), cond);
+    }
+
+    if (args->start >= local_start
+            && args->start + args->length <= local_start + local_length
+            && args->length == 2) {
+        bool cond =
+            (!args->arr[args->start].marked & args->arr[args->start + 1].marked)
+                != (bool) args->offset;
+        o_memswap(&args->arr[args->start], &args->arr[args->start + 1],
+                sizeof(*args->arr), cond);
+        ret = 0;
+        goto exit;
+    }
+
+    if (args->start >= local_start + local_length
+            || args->start + args->length <= local_start) {
         ret = 0;
         goto exit;
     }
@@ -432,11 +445,16 @@ static void shuffle(void *args_) {
     if (args->length < 2) {
         ret = 0;
         goto exit;
-    } else if (args->length == 2) {
+    }
+
+    if (args->start >= local_start
+            && args->start + args->length <= local_start + local_length
+            && args->length == 2) {
         unsigned char c;
         rand_read(&c, sizeof(c));
         bool cond = c & 1;
-        o_memswap(&args->arr[0], &args->arr[1], sizeof(*args->arr), cond);
+        o_memswap(&args->arr[args->start], &args->arr[args->start + 1],
+                sizeof(*args->arr), cond);
         ret = 0;
         goto exit;
     }
