@@ -245,8 +245,12 @@ static void compact(void *args_) {
     if (args->length < 2) {
         ret = 0;
         goto exit;
+    } else if (args->length == 2) {
+        bool cond = (!args->arr[0].marked & args->arr[1].marked) != (bool) args->offset;
+        o_memswap(&args->arr[0], &args->arr[1], sizeof(*args->arr), cond);
+        ret = 0;
+        goto exit;
     }
-
 
     /* Get number of elements in the left half that are marked. The elements
      * contains the prefix sums, so taking the final prefix sum minus the first
@@ -426,6 +430,13 @@ static void shuffle(void *args_) {
     int ret;
 
     if (args->length < 2) {
+        ret = 0;
+        goto exit;
+    } else if (args->length == 2) {
+        unsigned char c;
+        rand_read(&c, sizeof(c));
+        bool cond = c & 1;
+        o_memswap(&args->arr[0], &args->arr[1], sizeof(*args->arr), cond);
         ret = 0;
         goto exit;
     }
