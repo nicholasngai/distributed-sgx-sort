@@ -2,13 +2,10 @@
 #include <stddef.h>
 #include <string.h>
 #include <threads.h>
+#include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/gcm.h>
 #include "common/error.h"
-
-#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
-#include <mbedtls/ctr_drbg.h>
-#endif
 
 mbedtls_entropy_context entropy_ctx;
 
@@ -23,9 +20,7 @@ int rand_init(void) {
 
 void rand_free(void) {
     for (size_t i = 0; i < ctx_len; i++) {
-#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
         mbedtls_ctr_drbg_free(&ctxs[i].drbg_ctx);
-#endif
         ctxs[i].ptr = NULL;
     }
     ctx_len = 0;

@@ -6,13 +6,10 @@
 #include <stddef.h>
 #include <string.h>
 #include <threads.h>
+#include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include "common/defs.h"
 #include "common/error.h"
-
-#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
-#include <mbedtls/ctr_drbg.h>
-#endif
 
 #define IV_LEN 12
 #define TAG_LEN 16
@@ -23,9 +20,7 @@
 extern mbedtls_entropy_context entropy_ctx;
 
 struct thread_local_ctx {
-#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
     mbedtls_ctr_drbg_context drbg_ctx;
-#endif
     unsigned char rand_bytes_pool[RAND_BYTES_POOL_LEN];
     size_t rand_bytes_pool_idx;
     unsigned long rand_bits;
@@ -52,7 +47,6 @@ static inline int crypto_ensure_thread_local_ctx_init(void) {
         ctx = &ctxs[idx];
         ctx->ptr = &ctx;
 
-#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
         mbedtls_ctr_drbg_init(&ctx->drbg_ctx);
         ret =
             mbedtls_ctr_drbg_seed(&ctx->drbg_ctx, mbedtls_entropy_func,
@@ -63,7 +57,6 @@ static inline int crypto_ensure_thread_local_ctx_init(void) {
             __atomic_fetch_sub(&ctx_len, 1, __ATOMIC_RELAXED);
             goto exit;
         }
-#endif
 
         ctx->rand_bytes_pool_idx = RAND_BYTES_POOL_LEN;
         ctx->rand_bits_left = 0;
@@ -81,7 +74,6 @@ void rand_free(void);
 static inline int rand_get_random_bytes(void *buf_, size_t n) {
     unsigned char *buf = buf_;
 
-#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
     int ret;
 
     ret = crypto_ensure_thread_local_ctx_init();
@@ -104,40 +96,6 @@ static inline int rand_get_random_bytes(void *buf_, size_t n) {
 
 exit:
     return ret;
-#else
-    if (n % sizeof(unsigned long) || n == sizeof(unsigned long)) {
-        unsigned long r;
-        __asm__ __volatile__ ("0:"
-                "rdrand %0;"
-                "jnc 0b;"
-                : "=r" (r)
-                :
-                : "cc");
-
-        size_t copy_bytes = n % sizeof(r) > 0 ? n % sizeof(r) : sizeof(r);
-        memcpy(buf, &r, copy_bytes);
-        buf += copy_bytes;
-        n -= copy_bytes;
-    }
-
-    if (n) {
-        unsigned long t;
-        __asm__ __volatile__ (
-                "0:"
-                "rdrand %2;"
-                "jnc 0b;"
-                "mov %2, (%0);"
-                "add %3, %0;"
-                "sub %3, %1;"
-                "jnz 0b;"
-                "1:"
-                : "+r" (buf), "+rm" (n), "=&r" (t)
-                : "i" (sizeof(unsigned long))
-                : "memory", "cc");
-    }
-
-    return 0;
-#endif
 }
 
 static inline int rand_read(void *buf_, size_t n) {
