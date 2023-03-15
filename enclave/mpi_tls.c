@@ -186,9 +186,6 @@ static int init_session(struct mpi_tls_session *session, bool is_server,
         goto exit_free_config;
     }
     mbedtls_ssl_conf_dtls_cookies(&session->conf, NULL, NULL, NULL);
-    // TODO Figure out how to enable this again.
-    mbedtls_ssl_conf_dtls_anti_replay(&session->conf,
-            MBEDTLS_SSL_ANTI_REPLAY_DISABLED);
     mbedtls_ssl_conf_ciphersuites(&session->conf, ciphersuites);
 
     /* Initialize SSL. */
