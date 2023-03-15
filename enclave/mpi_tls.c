@@ -28,8 +28,13 @@
 #endif /* OE_SIMULATION || OE_SIMULATION_CERT || DISTRIBUTED_SGX_SORT_HOSTONLY */
 
 struct mpi_tls_session {
-    int other_rank;
+    /* Keys for encryption/authentication. */
+    unsigned char send_key[KEY_LEN];
+    unsigned char recv_key[KEY_LEN];
+};
 
+struct mpi_tls_handshake_session {
+    int other_rank;
     mbedtls_ssl_config conf;
     mbedtls_ssl_context ssl;
     mbedtls_ctr_drbg_context drbg;
@@ -38,9 +43,7 @@ struct mpi_tls_session {
     size_t recv_buf_len;
     size_t recv_buf_cap;
 
-    /* Keys for encryption/authentication. */
-    unsigned char send_key[KEY_LEN];
-    unsigned char recv_key[KEY_LEN];
+    struct mpi_tls_session *session;
 };
 
 static int world_rank;
@@ -64,23 +67,24 @@ static int verify_callback(void *data UNUSED, mbedtls_x509_crt *crt UNUSED,
 }
 
 /* Send callback, used only for the handshake. */
-static int send_callback(void *session_, const unsigned char *buf, size_t len) {
-    struct mpi_tls_session *session = session_;
+static int send_callback(void *hs_session_, const unsigned char *buf,
+        size_t len) {
+    struct mpi_tls_handshake_session *hs_session = hs_session_;
     int ret;
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result =
-        ocall_mpi_send_bytes(&ret, buf, len, session->other_rank, 0);
+        ocall_mpi_send_bytes(&ret, buf, len, hs_session->other_rank, 0);
     if (result != OE_OK) {
         ret = MBEDTLS_ERR_SSL_INTERNAL_ERROR;
         handle_oe_error(result, "ocall_mpi_send_bytes");
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ret = ocall_mpi_send_bytes(buf, len, session->other_rank, 0);
+    ret = ocall_mpi_send_bytes(buf, len, hs_session->other_rank, 0);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error sending TLS handshake bytes from %d to %d",
-                world_rank, session->other_rank);
+                world_rank, hs_session->other_rank);
         ret = MBEDTLS_ERR_SSL_INTERNAL_ERROR;
         goto exit;
     }
@@ -94,19 +98,20 @@ exit:
 }
 
 /* Receive callback, used only for the handshake. */
-static int recv_callback(void *session_, unsigned char *buf, size_t len,
+static int recv_callback(void *hs_session_, unsigned char *buf, size_t len,
         uint32_t timeout UNUSED) {
-    struct mpi_tls_session *session = session_;
+    struct mpi_tls_handshake_session *hs_session = hs_session_;
     size_t bytes_received = 0;
     int ret;
 
     /* If there are still bytes in the receive buffer, copy those first. */
-    if (session->recv_buf_idx < session->recv_buf_len) {
+    if (hs_session->recv_buf_idx < hs_session->recv_buf_len) {
         size_t bytes_to_copy =
-            MIN(len, session->recv_buf_len - session->recv_buf_idx);
-        memcpy(buf, session->recv_buf + session->recv_buf_idx, bytes_to_copy);
+            MIN(len, hs_session->recv_buf_len - hs_session->recv_buf_idx);
+        memcpy(buf, hs_session->recv_buf + hs_session->recv_buf_idx,
+                bytes_to_copy);
         buf += bytes_to_copy;
-        session->recv_buf_idx += bytes_to_copy;
+        hs_session->recv_buf_idx += bytes_to_copy;
         len -= bytes_to_copy;
         bytes_received += bytes_to_copy;
     }
@@ -116,35 +121,36 @@ static int recv_callback(void *session_, unsigned char *buf, size_t len,
         ocall_mpi_status_t status;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
         oe_result_t result =
-            ocall_mpi_recv_bytes(&ret, session->recv_buf, session->recv_buf_cap,
-                    session->other_rank, 0, &status);
+            ocall_mpi_recv_bytes(&ret, hs_session->recv_buf,
+                    hs_session->recv_buf_cap, hs_session->other_rank, 0,
+                    &status);
         if (result != OE_OK) {
             ret = MBEDTLS_ERR_SSL_INTERNAL_ERROR;
             handle_oe_error(result, "ocall_mpi_recv_bytes");
         }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         ret =
-            ocall_mpi_recv_bytes(session->recv_buf, session->recv_buf_cap,
-                    session->other_rank, 0, &status);
+            ocall_mpi_recv_bytes(hs_session->recv_buf, hs_session->recv_buf_cap,
+                    hs_session->other_rank, 0, &status);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         if (ret) {
             handle_error_string(
                     "Error receiving TLS handshake bytes from %d into %d",
-                    session->other_rank, world_rank);
+                    hs_session->other_rank, world_rank);
             ret = MBEDTLS_ERR_SSL_INTERNAL_ERROR;
             goto exit;
         }
 
-        session->recv_buf_idx = 0;
-        session->recv_buf_len = status.count;
+        hs_session->recv_buf_idx = 0;
+        hs_session->recv_buf_len = status.count;
 
-        if (session->recv_buf_idx < session->recv_buf_len) {
+        if (hs_session->recv_buf_idx < hs_session->recv_buf_len) {
             size_t bytes_to_copy =
-                MIN(len, session->recv_buf_len - session->recv_buf_idx);
-            memcpy(buf, session->recv_buf + session->recv_buf_idx,
+                MIN(len, hs_session->recv_buf_len - hs_session->recv_buf_idx);
+            memcpy(buf, hs_session->recv_buf + hs_session->recv_buf_idx,
                     bytes_to_copy);
             buf += bytes_to_copy;
-            session->recv_buf_idx += bytes_to_copy;
+            hs_session->recv_buf_idx += bytes_to_copy;
             len -= bytes_to_copy;
             bytes_received += bytes_to_copy;
         }
@@ -156,26 +162,26 @@ exit:
     return ret;
 }
 
-static int export_keys_callback(void *session_,
+static int export_keys_callback(void *hs_session_,
         const unsigned char *master_secret UNUSED,
         const unsigned char *key_block, size_t mac_len, size_t key_len,
         size_t iv_len UNUSED) {
-    struct mpi_tls_session *session = session_;
+    struct mpi_tls_handshake_session *hs_session = hs_session_;
     int ret;
 
-    assert(key_len == sizeof(session->send_key));
-    assert(key_len == sizeof(session->recv_key));
+    assert(key_len == sizeof(hs_session->session->send_key));
+    assert(key_len == sizeof(hs_session->session->recv_key));
 
-    if (session->other_rank > world_rank) {
-        memcpy(session->send_key, key_block + mac_len * 2,
-                sizeof(session->send_key));
-        memcpy(session->recv_key, key_block + mac_len * 2 + key_len,
-                sizeof(session->recv_key));
+    if (hs_session->other_rank > world_rank) {
+        memcpy(hs_session->session->send_key, key_block + mac_len * 2,
+                sizeof(hs_session->session->send_key));
+        memcpy(hs_session->session->recv_key, key_block + mac_len * 2 + key_len,
+                sizeof(hs_session->session->recv_key));
     } else {
-        memcpy(session->send_key, key_block + mac_len * 2 + key_len,
-                sizeof(session->send_key));
-        memcpy(session->recv_key, key_block + mac_len * 2,
-                sizeof(session->recv_key));
+        memcpy(hs_session->session->send_key, key_block + mac_len * 2 + key_len,
+                sizeof(hs_session->session->send_key));
+        memcpy(hs_session->session->recv_key, key_block + mac_len * 2,
+                sizeof(hs_session->session->recv_key));
     }
 
     ret = 0;
@@ -183,17 +189,19 @@ static int export_keys_callback(void *session_,
     return ret;
 }
 
-static int init_session(struct mpi_tls_session *session, int other_rank,
-        mbedtls_x509_crt *cert, mbedtls_pk_context *privkey,
-        mbedtls_entropy_context *entropy) {
+static int init_handshake_session(struct mpi_tls_handshake_session *hs_session,
+        int other_rank, struct mpi_tls_session *session, mbedtls_x509_crt *cert,
+        mbedtls_pk_context *privkey, mbedtls_entropy_context *entropy) {
     int ret;
 
-    session->other_rank = other_rank;
+    hs_session->other_rank = other_rank;
+    hs_session->session = session;
 
     /* Initialize DRBG. */
-    mbedtls_ctr_drbg_init(&session->drbg);
-    ret = mbedtls_ctr_drbg_seed(&session->drbg, mbedtls_entropy_func, entropy,
-            NULL, 0);
+    mbedtls_ctr_drbg_init(&hs_session->drbg);
+    ret =
+        mbedtls_ctr_drbg_seed(&hs_session->drbg, mbedtls_entropy_func, entropy,
+                NULL, 0);
     if (ret) {
         handle_mbedtls_error(ret, "mbedtls_ctr_drbg_init");
         goto exit_free_drbg;
@@ -203,8 +211,8 @@ static int init_session(struct mpi_tls_session *session, int other_rank,
      * ranks. */
     // TODO Think about downgrade attacks. All clients will be on the same
     // version, anyway.
-    mbedtls_ssl_config_init(&session->conf);
-    ret = mbedtls_ssl_config_defaults(&session->conf,
+    mbedtls_ssl_config_init(&hs_session->conf);
+    ret = mbedtls_ssl_config_defaults(&hs_session->conf,
             other_rank > world_rank
                 ? MBEDTLS_SSL_IS_SERVER
                 : MBEDTLS_SSL_IS_CLIENT,
@@ -213,64 +221,65 @@ static int init_session(struct mpi_tls_session *session, int other_rank,
         handle_mbedtls_error(ret, "mbedtls_ssl_config_defaults");
         goto exit_free_config;
     }
-    mbedtls_ssl_conf_rng(&session->conf, mbedtls_ctr_drbg_random, &session->drbg);
-    mbedtls_ssl_conf_authmode(&session->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
-    mbedtls_ssl_conf_verify(&session->conf, verify_callback, NULL);
-    mbedtls_ssl_conf_ca_chain(&session->conf, cert->next, NULL);
-    ret = mbedtls_ssl_conf_own_cert(&session->conf, cert, privkey);
+    mbedtls_ssl_conf_rng(&hs_session->conf, mbedtls_ctr_drbg_random,
+            &hs_session->drbg);
+    mbedtls_ssl_conf_authmode(&hs_session->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
+    mbedtls_ssl_conf_verify(&hs_session->conf, verify_callback, NULL);
+    mbedtls_ssl_conf_ca_chain(&hs_session->conf, cert->next, NULL);
+    ret = mbedtls_ssl_conf_own_cert(&hs_session->conf, cert, privkey);
     if (ret) {
         handle_mbedtls_error(ret, "mbedtls_ssl_conf_own_cert");
         goto exit_free_config;
     }
-    mbedtls_ssl_conf_ciphersuites(&session->conf, ciphersuites);
-    mbedtls_ssl_conf_export_keys_cb(&session->conf, export_keys_callback,
-            session);
+    mbedtls_ssl_conf_ciphersuites(&hs_session->conf, ciphersuites);
+    mbedtls_ssl_conf_export_keys_cb(&hs_session->conf, export_keys_callback,
+            hs_session);
 
     /* Initialize SSL. */
-    mbedtls_ssl_init(&session->ssl);
-    ret = mbedtls_ssl_setup(&session->ssl, &session->conf);
+    mbedtls_ssl_init(&hs_session->ssl);
+    ret = mbedtls_ssl_setup(&hs_session->ssl, &hs_session->conf);
     if (ret) {
         handle_mbedtls_error(ret, "mbedtls_ssl_setup");
         goto exit_free_ssl;
     }
-    mbedtls_ssl_set_bio(&session->ssl, session, send_callback, NULL,
+    mbedtls_ssl_set_bio(&hs_session->ssl, hs_session, send_callback, NULL,
             recv_callback);
 
     /* Allocate a buffer in case the message is longer than the requested
      * bytes. */
-    ret = mbedtls_ssl_get_max_out_record_payload(&session->ssl);
+    ret = mbedtls_ssl_get_max_out_record_payload(&hs_session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_max_out_record_payload");
         goto exit_free_ssl;
     }
     size_t max_payload_len = ret;
-    ret = mbedtls_ssl_get_record_expansion(&session->ssl);
+    ret = mbedtls_ssl_get_record_expansion(&hs_session->ssl);
     if (ret < 0) {
         handle_mbedtls_error(ret, "mbedtls_ssl_get_record_expansion");
         goto exit_free_ssl;
     }
-    session->recv_buf_cap = max_payload_len + ret;
-    session->recv_buf = malloc(session->recv_buf_cap);
-    if (!session->recv_buf) {
-        perror("malloc session->recv_buf");
+    hs_session->recv_buf_cap = max_payload_len + ret;
+    hs_session->recv_buf = malloc(hs_session->recv_buf_cap);
+    if (!hs_session->recv_buf) {
+        perror("malloc hs_session->recv_buf");
         ret = -1;
         goto exit_free_ssl;
     }
-    session->recv_buf_idx = 0;
-    session->recv_buf_len = 0;
+    hs_session->recv_buf_idx = 0;
+    hs_session->recv_buf_len = 0;
 
     return 0;
 
 exit_free_ssl:
-    mbedtls_ssl_free(&session->ssl);
+    mbedtls_ssl_free(&hs_session->ssl);
 exit_free_config:
-    mbedtls_ssl_config_free(&session->conf);
+    mbedtls_ssl_config_free(&hs_session->conf);
 exit_free_drbg:
-    mbedtls_ctr_drbg_free(&session->drbg);
+    mbedtls_ctr_drbg_free(&hs_session->drbg);
     return ret;
 }
 
-static void free_session(struct mpi_tls_session *session) {
+static void free_handshake_session(struct mpi_tls_handshake_session *session) {
     mbedtls_ctr_drbg_free(&session->drbg);
     mbedtls_ssl_free(&session->ssl);
     mbedtls_ssl_config_free(&session->conf);
@@ -371,12 +380,21 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
         goto exit;
     }
 
-    /* Initialize TLS sessions. */
+    /* Allocate sessions. */
     sessions = malloc(world_size * sizeof(*sessions));
     if (!sessions) {
-        perror("malloc TLS sessions");
+        perror("malloc encrypted MPI sessions");
         ret = -1;
         goto exit_free_keys;
+    }
+
+    /* Initialize TLS handshake sessions. */
+    struct mpi_tls_handshake_session *handshake_sessions =
+        malloc(world_size * sizeof(*handshake_sessions));
+    if (!sessions) {
+        perror("malloc TLS handshake sessions");
+        ret = -1;
+        goto exit_free_sessions;
     }
     for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
@@ -385,14 +403,16 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
         }
 
         /* Initialize SSL. */
-        ret = init_session(&sessions[i], i, &cert, &privkey, entropy);
+        ret =
+            init_handshake_session(&handshake_sessions[i], i, &sessions[i],
+                    &cert, &privkey, entropy);
         if (ret) {
-            handle_error_string("Failed to initialize TLS session structures");
+            handle_error_string("Failed to initialize TLS handshake session");
             for (int j = 0; j < i; j++) {
-                free_session(&sessions[j]);
+                free_handshake_session(&handshake_sessions[j]);
             }
             free(sessions);
-            goto exit_free_keys;
+            goto exit_free_sessions;
         }
     }
 
@@ -404,26 +424,38 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
             }
 
             /* Do handshake. */
-            ret = mbedtls_ssl_handshake(&sessions[i == world_rank ? j : i].ssl);
+            ret = mbedtls_ssl_handshake(&handshake_sessions[i == world_rank ? j : i].ssl);
             if (ret) {
                 handle_mbedtls_error(ret, "mbedtls_ssl_handshake");
-                goto exit_free_sessions;
+                goto exit_free_handshake_sessions;
             }
         }
     }
 
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+    oe_result_t result = ocall_mpi_barrier();
+    if (result != OE_OK) {
+        handle_oe_error(result, "ocall_mpi_barrier");
+    }
+#else
     ocall_mpi_barrier();
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 
-    return 0;
+    ret = 0;
 
-exit_free_sessions:
+exit_free_handshake_sessions:
     for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
             continue;
         }
-        free_session(&sessions[i]);
+        free_handshake_session(&handshake_sessions[i]);
     }
-    free(sessions);
+    free(handshake_sessions);
+exit_free_sessions:
+    if (ret) {
+        /* Only free if function failed. */
+        free(sessions);
+    }
 exit_free_keys:
     mbedtls_x509_crt_free(&cert);
     mbedtls_pk_free(&privkey);
@@ -432,13 +464,6 @@ exit:
 }
 
 void mpi_tls_free(void) {
-    for (int i = 0; i < world_size; i++) {
-        if (i == world_rank) {
-            /* Skip our own rank. */
-            continue;
-        }
-        free_session(&sessions[i]);
-    }
     free(sessions);
     mbedtls_x509_crt_free(&cert);
     mbedtls_pk_free(&privkey);
