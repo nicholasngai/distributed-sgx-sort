@@ -33,9 +33,8 @@ static int UNUSED ensure_thread_local_ctx_init(void) {
             __atomic_fetch_add(&ctx_len, 1, __ATOMIC_RELAXED);
         if (ctx_len >= THREAD_LOCAL_LIST_MAXLEN) {
             handle_error_string("Too many threads for crypto");
-            __atomic_fetch_sub(&ctx_len, 1, __ATOMIC_RELAXED);
             ret = -1;
-            goto exit;
+            goto exit_dec_ctx_len;
         }
         ctx = &ctxs[idx];
         ctx->ptr = &ctx;
@@ -47,16 +46,20 @@ static int UNUSED ensure_thread_local_ctx_init(void) {
                     &entropy_ctx, NULL, 0);
         if (ret) {
             handle_mbedtls_error(ret, "mbedtls_ctr_drbg_seed");
-            mbedtls_ctr_drbg_free(&ctx->drbg_ctx);
-            __atomic_fetch_sub(&ctx_len, 1, __ATOMIC_RELAXED);
-            goto exit;
+            goto exit_free_ctr_drbg;
         }
 #endif
     }
 
-    ret = 0;
+    return 0;
 
-exit:
+#ifdef DISTRIBUTED_SGX_SORT_NORDRAND
+exit_free_ctr_drbg:
+    mbedtls_ctr_drbg_free(&ctx->drbg_ctx);
+#endif
+exit_dec_ctx_len:
+    __atomic_fetch_sub(&ctx_len, 1, __ATOMIC_RELAXED);
+    ctx = NULL;
     return ret;
 }
 
