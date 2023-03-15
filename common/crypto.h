@@ -11,6 +11,7 @@
 #include "common/defs.h"
 #include "common/error.h"
 
+#define KEY_LEN 16
 #define IV_LEN 12
 #define TAG_LEN 16
 

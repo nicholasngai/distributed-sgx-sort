@@ -1,4 +1,5 @@
 #include "crypto.h"
+#include <limits.h>
 #include <stddef.h>
 #include <string.h>
 #include <threads.h>
@@ -37,7 +38,9 @@ int aad_encrypt(const void *key, const void *plaintext, size_t plaintext_len,
     mbedtls_gcm_init(&ctx);
 
     /* Initialize key. */
-    ret = mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key, 128);
+    ret =
+        mbedtls_gcm_setkey(&ctx, MBEDTLS_CIPHER_ID_AES, key,
+                KEY_LEN * CHAR_BIT);
     if (ret) {
         handle_mbedtls_error(ret, "mbedtls_gcm_setkey");
         goto exit_free_ctx;
