@@ -54,6 +54,11 @@ static mbedtls_x509_crt cert;
 static mbedtls_pk_context privkey;
 static struct mpi_tls_session *sessions;
 
+static int ciphersuites[] = {
+    MBEDTLS_TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+    0,
+};
+
 /* Bandwidth measurement. */
 size_t mpi_tls_bytes_sent;
 
@@ -184,6 +189,7 @@ static int init_session(struct mpi_tls_session *session, bool is_server,
     // TODO Figure out how to enable this again.
     mbedtls_ssl_conf_dtls_anti_replay(&session->conf,
             MBEDTLS_SSL_ANTI_REPLAY_DISABLED);
+    mbedtls_ssl_conf_ciphersuites(&session->conf, ciphersuites);
 
     /* Initialize SSL. */
     mbedtls_ssl_init(&session->ssl);
