@@ -1,5 +1,7 @@
 #!/bin/sh
 
+REPEAT=4
+
 if [ -z "${ENCLAVE_OFFSET+x}" ]; then
     ENCLAVE_OFFSET=0
 fi
@@ -29,4 +31,27 @@ deallocate_az_vm() {
         az vm deallocate -g enclave_group -n "enclave$i" --no-wait
         i=$(( i + 1 ))
     done
+}
+
+get_mem_usage() {
+    algorithm=$1
+    num_enclaves=$2
+    elem_size=$3
+    num_elems=$4
+
+    case "$algorithm" in
+        bitonic)
+            echo $(( elem_size * num_elems / num_enclaves ))
+            ;;
+        bucket|orshuffle)
+            echo $(( elem_size * num_elems * 4 / num_enclaves ))
+            ;;
+    esac
+}
+
+set_elem_size() {
+    elem_size=$1
+    find . -name '*.[ch]' -print0 | xargs -0 sed -Ei "s/^#define (ELEM_SIZE) .*\$/#define \\1 $elem_size/"
+    make -j >/dev/null
+    ./scripts/sync.sh >/dev/null
 }

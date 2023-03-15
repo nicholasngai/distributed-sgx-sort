@@ -193,38 +193,24 @@ static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
         goto exit;
     }
 
-    int local_bucket_idx = bucket1_local ? bucket1_idx : bucket2_idx;
-    int nonlocal_bucket_idx = bucket1_local ? bucket2_idx : bucket1_idx;
-    int nonlocal_rank = bucket1_local ? bucket2_rank : bucket1_rank;
-
     /* Load bucket 1 elems if local. */
-    elem_t *bucket1;
+    elem_t *bucket1 = NULL;
     if (bucket1_local) {
         bucket1 = arr + (bucket1_idx - local_bucket_start) * BUCKET_SIZE;
     }
 
     /* Load bucket 2 elems if local. */
-    elem_t *bucket2;
+    elem_t *bucket2 = NULL;
     if (bucket2_local) {
         bucket2 = arr + (bucket2_idx - local_bucket_start) * BUCKET_SIZE;
     }
 
-    /* The number of elements with corresponding bit 1. */
-    size_t count1 = 0;
-
     /* If remote, send the current count and then our local buckets. Then,
      * receive the sent count and remote buckets from the other elem. */
-    if (!bucket1_local || !bucket2_local) {
-        /* Post receive for count. */
-        mpi_tls_request_t count_request;
-        size_t remote_count1;
-        ret = mpi_tls_irecv_bytes(&remote_count1, sizeof(remote_count1),
-                nonlocal_rank, nonlocal_bucket_idx, &count_request);
-        if (ret) {
-            handle_error_string("Error receiving count1 into %d from %d",
-                    world_rank, nonlocal_rank);
-            goto exit;
-        }
+    if (!bucket1 || !bucket2) {
+        int local_bucket_idx = bucket1_local ? bucket1_idx : bucket2_idx;
+        int nonlocal_bucket_idx = bucket1_local ? bucket2_idx : bucket1_idx;
+        int nonlocal_rank = bucket1_local ? bucket2_rank : bucket1_rank;
 
         /* Post receive for remote bucket. */
         mpi_tls_request_t bucket_request;
@@ -235,19 +221,10 @@ static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
                     world_rank, nonlocal_rank);
             goto exit;
         }
-        if (bucket1_local) {
+        if (bucket1) {
             bucket2 = buffer;
         } else {
             bucket1 = buffer;
-        }
-
-        /* Send count. */
-        ret = mpi_tls_send_bytes(&count1, sizeof(count1), nonlocal_rank,
-                local_bucket_idx);
-        if (ret) {
-            handle_error_string("Error sending count1 from %d to %d",
-                    world_rank, nonlocal_rank);
-            goto exit;
         }
 
         /* Send local bucket. */
@@ -262,13 +239,6 @@ static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
         }
 
         /* Wait for count and bucket to come in. */
-        ret = mpi_tls_wait(&count_request, MPI_TLS_STATUS_IGNORE);
-        if (ret) {
-            handle_error_string(
-                    "Error waiting on receive for count1 into %d from %d",
-                    world_rank, nonlocal_rank);
-            goto exit;
-        }
         ret = mpi_tls_wait(&bucket_request, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string(
@@ -276,10 +246,17 @@ static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
                     world_rank, nonlocal_rank);
             goto exit;
         }
+    }
 
-        /* Add the received remote count to the local count to arrive at the
-         * total for both buckets. */
-        count1 += remote_count1;
+    /* Count number of elements with corresponding bit 1. */
+    size_t count1 = 0;
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        /* Obliviously increment count. */
+        count1 += ((bucket1[i].orp_id >> bit_idx) & 1) & !bucket1[i].is_dummy;
+    }
+    for (size_t i = 0; i < BUCKET_SIZE; i++) {
+        /* Obliviously increment count. */
+        count1 += ((bucket2[i].orp_id >> bit_idx) & 1) & !bucket2[i].is_dummy;
     }
 
     /* Count number of elements with corresponding bit 1. */
@@ -432,8 +409,7 @@ exit:
 
 /* Distribute and receive elements from buckets in ARR to buckets in OUT.
  * Bucket i is sent to enclave i % E. */
-static int distributed_bucket_route(elem_t *arr, void *out_) {
-    unsigned char *out = out_;
+static int distributed_bucket_route(elem_t *arr, elem_t *out) {
     size_t local_bucket_start = get_local_bucket_start(world_rank);
     size_t num_local_buckets =
         get_local_bucket_start(world_rank + 1) - local_bucket_start;
@@ -651,7 +627,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
 
     elem_t *buf = arr + local_length;
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct ocall_timespec time_start;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     {
@@ -665,7 +640,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
 #else
     ocall_clock_gettime(&time_start);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Spread the elements located in the first half of our input array. */
     ret =
@@ -677,7 +651,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct ocall_timespec time_assign_ids;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     {
@@ -691,7 +664,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
 #else
     ocall_clock_gettime(&time_assign_ids);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     size_t route_levels1 = log2li(world_size);
     ret = bucket_route(buf, route_levels1, 0);
@@ -707,13 +679,12 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     }
 
     size_t route_levels2 = log2li(num_local_buckets);
-    ret = bucket_route(buf, route_levels2, route_levels1 + route_levels2);
+    ret = bucket_route(arr, route_levels2, route_levels1);
     if (ret) {
         handle_error_string("Error routing elements through butterfly network");
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct ocall_timespec time_merge_split;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     {
@@ -727,7 +698,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
 #else
     ocall_clock_gettime(&time_merge_split);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     /* Permute each bucket and concatenate them back together by compressing all
      * real elems together. We also assign new ORP IDs so that all elements have
@@ -735,8 +705,8 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     size_t compress_len = 0;
     {
         struct permute_and_compress_args args = {
-            .arr = buf,
-            .out = arr,
+            .arr = arr,
+            .out = buf,
             .start_idx = local_start,
             .compress_idx = &compress_len,
             .ret = 0,
@@ -759,7 +729,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         }
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct ocall_timespec time_compress;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     {
@@ -773,16 +742,14 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
 #else
     ocall_clock_gettime(&time_compress);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
-    ret =
-        nonoblivious_sort(arr, length, compress_len, local_start, num_threads);
+    /* Nonoblivious sort. */
+    ret = nonoblivious_sort(buf, arr, length, compress_len, num_threads);
     if (ret) {
         handle_error_string("Error in nonoblivious sort");
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     if (world_rank == 0) {
         printf("assign_ids       : %f\n",
                 get_time_difference(&time_start, &time_assign_ids));
@@ -791,7 +758,6 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         printf("compression      : %f\n",
                 get_time_difference(&time_merge_split, &time_compress));
     }
-#endif
 
 exit:
     return ret;

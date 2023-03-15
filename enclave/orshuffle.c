@@ -64,16 +64,14 @@ static size_t get_local_start(int rank) {
 static int should_mark(size_t left_to_mark, size_t total_left, bool *result) {
     int ret;
 
-    size_t r;
-    do {
-        ret = rand_read(&r, sizeof(r));
-        if (ret) {
-            handle_error_string("Error reading random value");
-            goto exit;
-        }
-    } while (r >= SIZE_MAX - SIZE_MAX % total_left);
+    uint32_t r;
+    ret = rand_read(&r, sizeof(r));
+    if (ret) {
+        handle_error_string("Error reading random value");
+        goto exit;
+    }
 
-    *result = r % total_left < left_to_mark;
+    *result = ((uint64_t) r * total_left) >> 32 >= left_to_mark;
 
 exit:
     return ret;
@@ -100,8 +98,8 @@ static void swap_local_range(void *args_, size_t i) {
                 >= args->length / 2)
             != (args->offset >= args->length / 2);
 
-    size_t start = i * args->length / args->num_threads;
-    size_t end = (i + 1) * args->length / args->num_threads;
+    size_t start = i * args->count / args->num_threads;
+    size_t end = (i + 1) * args->count / args->num_threads;
     for (size_t j = start; j < end; j++) {
         bool cond =
             s
@@ -160,8 +158,9 @@ static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
          * lower, then we swap if the local element is lower. Likewise, if the
          * local index is higher, than we swap if the local element is higher.
          * If descending, everything is reversed. */
+        size_t min_idx = MIN(local_idx, remote_idx);
         for (size_t i = 0; i < elems_to_swap; i++) {
-            bool cond = s != (local_idx + i >= (offset + left_marked_count) % (length / 2));
+            bool cond = s != (min_idx + i >= (offset + left_marked_count) % (length / 2));
             o_memcpy(&arr[local_idx + i - local_start], &buffer[i],
                     sizeof(*arr), cond);
         }
@@ -252,6 +251,23 @@ static void compact(void *args_) {
         goto exit;
     }
 
+    if (args->start >= local_start
+            && args->start + args->length <= local_start + local_length
+            && args->length == 2) {
+        bool cond =
+            (!args->arr[args->start].marked & args->arr[args->start + 1].marked)
+                != (bool) args->offset;
+        o_memswap(&args->arr[args->start], &args->arr[args->start + 1],
+                sizeof(*args->arr), cond);
+        ret = 0;
+        goto exit;
+    }
+
+    if (args->start >= local_start + local_length
+            || args->start + args->length <= local_start) {
+        ret = 0;
+        goto exit;
+    }
 
     /* Get number of elements in the left half that are marked. The elements
      * contains the prefix sums, so taking the final prefix sum minus the first
@@ -332,18 +348,6 @@ static void compact(void *args_) {
         }
     }
 
-    /* Swap. */
-    ret =
-        swap_range(args->arr, args->length, args->start,
-                args->start + args->length / 2, args->length / 2, args->offset,
-                left_marked_count, args->num_threads);
-    if (ret) {
-        handle_error_string(
-                "Error swapping range with start %lu and length %lu",
-                args->start, args->start + args->length / 2);
-        goto exit;
-    }
-
     /* Recursively compact. */
     struct compact_args left_args = {
         .arr = args->arr,
@@ -409,6 +413,18 @@ static void compact(void *args_) {
         }
     }
 
+    /* Swap. */
+    ret =
+        swap_range(args->arr, args->length, args->start,
+                args->start + args->length / 2, args->length / 2, args->offset,
+                left_marked_count, args->num_threads);
+    if (ret) {
+        handle_error_string(
+                "Error swapping range with start %lu and length %lu",
+                args->start, args->start + args->length / 2);
+        goto exit;
+    }
+
 exit:
     {
         int expected = 0;
@@ -431,6 +447,18 @@ static void shuffle(void *args_) {
     int ret;
 
     if (args->length < 2) {
+        ret = 0;
+        goto exit;
+    }
+
+    if (args->start >= local_start
+            && args->start + args->length <= local_start + local_length
+            && args->length == 2) {
+        unsigned char c;
+        rand_read(&c, sizeof(c));
+        bool cond = c & 1;
+        o_memswap(&args->arr[args->start], &args->arr[args->start + 1],
+                sizeof(*args->arr), cond);
         ret = 0;
         goto exit;
     }
@@ -482,7 +510,7 @@ static void shuffle(void *args_) {
             }
         }
 
-        marked_in_prev = 0;
+        marked_in_prev = enclave_mark_counts[master_rank];
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
             struct mark_count_payload payload = {
                 .num_to_mark = enclave_mark_counts[rank],
@@ -526,10 +554,12 @@ static void shuffle(void *args_) {
             handle_error_string("Error getting random marked");
             goto exit;
         }
-        num_to_mark += marked;
+        marked_so_far += marked;
         total_left--;
 
         args->arr[i - local_start].marked = marked;
+        args->arr[i - local_start].marked_prefix_sum =
+            marked_in_prev + marked_so_far;
     }
 
     /* Obliviously compact. */
@@ -547,7 +577,7 @@ static void shuffle(void *args_) {
         goto exit;
     }
 
-    /* Recursively compact. */
+    /* Recursively shuffle. */
     struct shuffle_args left_args = {
         .arr = args->arr,
         .start = args->start,
@@ -620,12 +650,45 @@ exit:
     }
 }
 
+/* For assign random ORP IDs to ARR[i * LENGTH / NUM_THREADS] to
+ * ARR[(i + 1) * LENGTH / NUM_THREADS]. */
+struct assign_random_id_args {
+    elem_t *arr;
+    size_t length;
+    size_t start_idx;
+    size_t num_threads;
+    int ret;
+};
+static void assign_random_id(void *args_, size_t i) {
+    struct assign_random_id_args *args = args_;
+    int ret;
+
+    size_t start = i * args->length / args->num_threads;
+    size_t end = (i + 1) * args->length / args->num_threads;
+    for (size_t j = start; j < end; j++) {
+        ret = rand_read(&args->arr[j].orp_id, sizeof(args->arr[j].orp_id));
+        if (ret) {
+            handle_error_string("Error assigning random ID to elem %lu",
+                    i + args->start_idx);
+            goto exit;
+        }
+    }
+
+    ret = 0;
+
+exit:
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret,
+                false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
+}
+
 int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     size_t local_start = length * world_rank / world_size;
     size_t local_length = length * (world_rank + 1) / world_size - local_start;
     int ret;
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
     struct ocall_timespec time_start;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     {
@@ -639,25 +702,48 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
 #else
     ocall_clock_gettime(&time_start);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
     total_length = length;
 
-    struct shuffle_args args = {
+    struct shuffle_args shuffle_args = {
         .arr = arr,
         .start = 0,
         .length = length,
         .num_threads = num_threads,
         .ret = 0,
     };
-    shuffle(&args);
-    if (args.ret) {
+    shuffle(&shuffle_args);
+    if (shuffle_args.ret) {
         handle_error_string("Error in recursive shuffle");
-        ret = args.ret;
+        ret = shuffle_args.ret;
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    /* Assign random IDs to ensure uniqueness. */
+    struct assign_random_id_args assign_random_id_args = {
+        .arr = arr,
+        .length = local_length,
+        .start_idx = local_start,
+        .num_threads = num_threads,
+        .ret = 0,
+    };
+    struct thread_work work = {
+        .type = THREAD_WORK_ITER,
+        .iter = {
+            .func = assign_random_id,
+            .arg = &assign_random_id_args,
+            .count = num_threads,
+        },
+    };
+    thread_work_push(&work);
+    thread_work_until_empty();
+    thread_wait(&work);
+    if (assign_random_id_args.ret) {
+        handle_error_string("Error assigning random ORP IDs");
+        ret = assign_random_id_args.ret;
+        goto exit;
+    }
+
     struct ocall_timespec time_shuffle;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     {
@@ -671,21 +757,23 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
 #else
     ocall_clock_gettime(&time_shuffle);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-#endif /* DISTRIBUTED_SGX_SORT_BENCHMARK */
 
-    /* Nonoblivious sort. */
-    ret =
-        nonoblivious_sort(arr, length, local_length, local_start, num_threads);
+    /* Nonoblivious sort. This requires MAX(LOCAL_LENGTH * 2, 512) elements for
+     * both the array and buffer, so use the second half of the array given to
+     * us (which should be of length MAX(LOCAL_LENGTH * 2, 512) * 2). */
+    elem_t *buf = arr + MAX(local_length * 2, 512);
+    ret = nonoblivious_sort(arr, buf, length, local_length, num_threads);
     if (ret) {
         goto exit;
     }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
+    /* Copy the output to the final output. */
+    memcpy(arr, buf, local_length * sizeof(*arr));
+
     if (world_rank == 0) {
         printf("shuffle          : %f\n",
                 get_time_difference(&time_start, &time_shuffle));
     }
-#endif
 
 exit:
     return ret;

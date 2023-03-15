@@ -41,14 +41,12 @@ static inline int comp_ul(const void *a_, const void *b_) {
     return (*a > *b) - (*a < *b);
 }
 
-#ifdef DISTRIBUTED_SGX_SORT_BENCHMARK
 static inline double get_time_difference(struct ocall_timespec *start,
         struct ocall_timespec *end) {
     return (double) (end->tv_sec * 1000000000 + end->tv_nsec
             - (start->tv_sec * 1000000000 + start->tv_nsec))
         / 1000000000;
 }
-#endif
 
 void *bsearch_ge(const void *key, const void *arr, size_t num_elems,
         size_t elem_size, int (*comparator)(const void *a, const void *b));

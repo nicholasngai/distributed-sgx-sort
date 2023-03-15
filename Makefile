@@ -7,7 +7,6 @@ APP_NAME = parallel
 COMMON_DIR = common
 COMMON_OBJS = \
 	$(COMMON_DIR)/crypto.o \
-	$(COMMON_DIR)/elem_t.o \
 	$(COMMON_DIR)/error.o \
 	$(COMMON_DIR)/util.o
 COMMON_DEPS = $(COMMON_OBJS:.o=.d)
@@ -16,7 +15,8 @@ HOST_DIR = host
 HOST_TARGET = $(HOST_DIR)/parallel
 HOST_OBJS = \
 	$(HOST_DIR)/parallel.o \
-	$(HOST_DIR)/error.o
+	$(HOST_DIR)/error.o \
+	$(HOST_DIR)/ocalls.o
 HOST_DEPS = $(HOST_OBJS:.o=.d)
 
 ENCLAVE_DIR = enclave
@@ -60,7 +60,7 @@ CPPFLAGS = -I. \
 	-I$(LIBOBLIVIOUS)/include \
 	-I$(MBEDTLS_SGX)/include \
 	-DOE_SIMULATION_CERT
-CFLAGS = -O3 -Wall -Wextra
+CFLAGS = -O3 -Wall -Wextra -Werror
 LDFLAGS = \
 	-L$(LIBOBLIVIOUS)
 LDLIBS = \
@@ -175,12 +175,20 @@ $(COMMON_DIR)/%.o: $(COMMON_DIR)/%.c
 
 # Host-only binary for profiling.
 
-HOSTONLY_CPPFLAGS = $(HOST_CPPFLAGS) -DDISTRIBUTED_SGX_SORT_HOSTONLY
-HOSTONLY_CFLAGS = $(HOST_CFLAGS) -Wno-implicit-function-declaration -Wno-unused
-HOSTONLY_LDFLAGS = $(HOST_LDFLAGS)
-HOSTONLY_LDLIBS = $(HOST_LDLIBS) \
+HOSTONLY_CPPFLAGS = \
+	-DDISTRIBUTED_SGX_SORT_HOSTONLY \
+	$(CPPFLAGS)
+HOSTONLY_CFLAGS = \
+	$(shell pkg-config mpi --cflags) \
+	-Wno-implicit-function-declaration -Wno-unused \
+	$(CFLAGS)
+HOSTONLY_LDFLAGS = $(LDFLAGS)
+HOSTONLY_LDLIBS = \
+	$(shell pkg-config mpi --libs) \
+	-lmbedcrypto \
 	-lmbedx509 \
-	-lmbedtls
+	-lmbedtls \
+	$(LDLIBS)
 
 $(HOSTONLY_TARGET): $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) $(THIRD_PARTY_LIBS)
 	$(CC) $(HOSTONLY_CFLAGS) $(HOSTONLY_CPPFLAGS) $(HOSTONLY_LDFLAGS) $(HOST_OBJS:.o=.c) $(ENCLAVE_OBJS:.o=.c) $(COMMON_OBJS:.o=.c) $(HOSTONLY_LDLIBS) -o $@

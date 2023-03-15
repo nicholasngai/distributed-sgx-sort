@@ -11,7 +11,15 @@ mkdir -p ${ROOTPATH}
 for i in {0..31}; do
     (
         ssh enclave${i} mkdir -p ${ROOTPATH}
-        rsync -aiv --progress --delete "${ROOTPATH}/" enclave${i}:"${ROOTPATH}/" || true
+        rsync \
+            -aiv \
+            --progress \
+            --exclude .git \
+            --exclude benchmarks \
+            --delete \
+            "${ROOTPATH}/" \
+            enclave${i}:"${ROOTPATH}/" \
+            || true
     ) &
 done
 

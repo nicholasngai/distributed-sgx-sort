@@ -15,7 +15,7 @@ mkdir -p "$BENCHMARK_DIR"
 
 ./scripts/sync.sh
 
-b=128
+s=1048576
 last_e=
 for e in 32 16 8 4 2 1; do
     if "$AZ" && [ -n "$last_e" ]; then
@@ -37,11 +37,13 @@ for e in 32 16 8 4 2 1; do
     $warm_up
 
     for a in bitonic bucket orshuffle; do
-        for s in 256 4096 65536 1048576 4194304 16777216 67108864 268435456; do
+        for b in 32 128 512 2048 8192 32768; do
             if [ "$(get_mem_usage "$a" "$e" "$b" "$s")" -gt "$MAX_MEM_SIZE" ]; then
                 echo "Skipping $a with E = $e, b = $b, and N = $s due to size"
                 continue
             fi
+
+            set_elem_size "$b"
 
             for t in 1 2 4 8; do
                 if [ "$a" = 'bitonic' ]; then

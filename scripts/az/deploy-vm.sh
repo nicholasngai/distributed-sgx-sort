@@ -2,7 +2,7 @@
 
 set -eux
 
-SIZE=Standard_DC4s_v3
+SIZE=Standard_DC8s_v3
 #IMAGE=Canonical:UbuntuServer:18_04-lts-gen2:latest
 IMAGE=canonical:0001-com-ubuntu-server-focal:20_04-lts-gen2:latest
 

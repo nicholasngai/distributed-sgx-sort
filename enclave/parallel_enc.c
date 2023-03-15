@@ -66,16 +66,19 @@ static int zero_entropy_func(void *entropy UNUSED, unsigned char *bytes,
     return 0;
 }
 
-int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
+int ecall_sort_alloc_arr(size_t total_length_, enum sort_type sort_type) {
     total_length = total_length_;
     size_t local_length =
         ((world_rank + 1) * total_length + world_size - 1) / world_size
             - (world_rank * total_length + world_size - 1) / world_size;
     int ret;
 
+    size_t data_size;
+    size_t alloc_size;
     switch (sort_type) {
         case SORT_BITONIC:
-            arr = calloc(MAX(local_length, 512), sizeof(*arr));
+            data_size = local_length;
+            alloc_size = local_length;
             break;
         case SORT_BUCKET: {
             /* The total number of buckets is the max of either double the
@@ -91,20 +94,25 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
             /* The bucket sort relies on having 2 local buffers, so we allocate
              * double the size of a single buffer (a single buffer is
              * local_num_buckets * BUCKET_SIZE elements). */
-            arr = calloc(local_num_buckets * BUCKET_SIZE * 2, sizeof(*arr));
+            data_size = MAX(local_length, 512);
+            alloc_size = local_num_buckets * BUCKET_SIZE * 2;
             break;
         case SORT_OPAQUE:
-            arr = calloc(local_length * 2, sizeof(*arr));
+            data_size = local_length;
+            alloc_size = local_length * 2;
             break;
         case SORT_ORSHUFFLE:
-            arr = calloc(MAX(local_length * 2, 512), sizeof(*arr));
+            data_size = local_length;
+            alloc_size = MAX(local_length * 2, 512) * 2;
             break;
         case SORT_UNSET:
+        default:
             handle_error_string("Invalid sort type");
             ret = -1;
             goto exit;
         }
     }
+    arr = calloc(alloc_size, sizeof(*arr));
     if (!arr) {
         printf("Error allocating array\n");
         ret = -1;
@@ -120,7 +128,7 @@ int ecall_sort_alloc(size_t total_length_, enum sort_type sort_type) {
         handle_mbedtls_error(ret, "mbedtls_ctr_drbg_seed");
         goto exit_free_drbg;
     }
-    for (size_t i = 0; i < MAX(local_length, 512); i++) {
+    for (size_t i = 0; i < data_size; i++) {
         ret =
             mbedtls_ctr_drbg_random(&drbg, (unsigned char *) &arr[i].key,
                     sizeof(arr[i].key));
@@ -138,13 +146,14 @@ exit:
     return ret;
 }
 
+void ecall_sort_free_arr(void) {
+    free(arr);
+    mpi_tls_bytes_sent = 0;
+}
+
 void ecall_sort_free(void) {
     mpi_tls_free();
     rand_free();
-    if (arr) {
-        free(arr);
-        arr = NULL;
-    }
 }
 
 int ecall_verify_sorted(void) {
@@ -379,4 +388,8 @@ exit_free_sort:
     orshuffle_free();
 exit:
     return ret;
+}
+
+void ecall_get_stats(struct ocall_enclave_stats *stats) {
+    stats->mpi_tls_bytes_sent = mpi_tls_bytes_sent;
 }

@@ -15,164 +15,57 @@ static size_t get_local_start(size_t length, int rank) {
     return (rank * length + world_size - 1) / world_size;
 }
 
-static int swap(void *arr_, size_t a, size_t b, size_t local_start,
-        bool descending) {
-    unsigned char *arr = arr_;
-    elem_t elem_a;
-    elem_t elem_b;
-    int ret;
-
-    ret =
-        elem_decrypt(key, &elem_a, arr + a * SIZEOF_ENCRYPTED_NODE,
-                a + local_start);
-    if (ret) {
-        handle_error_string("Error decrypting elem %lu", a + local_start);
-        goto exit;
-    }
-    ret =
-        elem_decrypt(key, &elem_b, arr + b * SIZEOF_ENCRYPTED_NODE,
-                b + local_start);
-    if (ret) {
-        handle_error_string("Error decrypting elem %lu", b + local_start);
-        goto exit;
-    }
-
-    o_memswap(&elem_a, &elem_b, sizeof(elem_a),
-            (elem_a.key > elem_b.key) != descending);
-
-    ret =
-        elem_encrypt(key, &elem_a, arr + a * SIZEOF_ENCRYPTED_NODE,
-                a + local_start);
-    if (ret) {
-        handle_error_string("Error encrypting elem %lu", a + local_start);
-        goto exit;
-    }
-    ret =
-        elem_encrypt(key, &elem_b, arr + b * SIZEOF_ENCRYPTED_NODE,
-                b + local_start);
-    if (ret) {
-        handle_error_string("Error encrypting elem %lu", b + local_start);
-        goto exit;
-    }
-
-exit:
-    return ret;
+static void swap(elem_t *arr, size_t a, size_t b, bool descending) {
+    o_memswap(&arr[a], &arr[b], sizeof(*arr),
+            (arr[a].key > arr[b].key) != descending);
 }
 
-static int local_bitonic_merge(void *arr, size_t start, size_t length,
-        size_t local_start, bool descending) {
-    int ret;
-
+static void local_bitonic_merge(void *arr, size_t start, size_t length,
+        bool descending) {
     switch (length) {
         case 0:
         case 1:
             /* Do nothing. */
-            ret = 0;
             break;
 
         default:
             for (size_t i = start; i < start + length / 2; i++) {
-                ret = swap(arr, i, i + length / 2, local_start, descending);
-                if (ret) {
-                    handle_error_string("Error locally swapping %lu and %lu",
-                            i + local_start, i + length / 2 + local_start);
-                    goto exit;
-                }
+                swap(arr, i, i + length / 2, descending);
             }
 
-            ret = local_bitonic_merge(arr, start, length / 2, local_start,
+            local_bitonic_merge(arr, start, length / 2, descending);
+            local_bitonic_merge(arr, start + length / 2, length / 2,
                     descending);
-            if (ret) {
-                handle_error_string(
-                        "Error locally bitonic merging from %lu to %lu",
-                        start + local_start,
-                        start + length / 2 - 1 + local_start);
-                goto exit;
-            }
-            ret =
-                local_bitonic_merge(arr, start + length / 2, length / 2,
-                        local_start, descending);
-            if (ret) {
-                handle_error_string(
-                        "Error locally bitonic merging from %lu to %lu",
-                        start + length / 2 + local_start,
-                        start + length - 1 + local_start);
-                goto exit;
-            }
             break;
     }
-
-    ret = 0;
-
-exit:
-    return ret;
 }
 
-static int local_bitonic_sort(void *arr, size_t start, size_t length,
-        size_t local_start, bool descending) {
-    int ret;
-
+static void local_bitonic_sort(void *arr, size_t start, size_t length,
+        bool descending) {
     switch (length) {
         case 0:
         case 1:
             /* Do nothing. */
-            ret = 0;
             break;
 
         case 2:
-            ret = swap(arr, start, start + 1, local_start, descending);
-            if (ret) {
-                handle_error_string("Error locally swapping %lu and %lu",
-                        start + local_start, start + 1 + local_start);
-                goto exit;
-            }
+            swap(arr, start, start + 1, descending);
             break;
 
         default:
-            ret =
-                local_bitonic_sort(arr, start, length / 2, local_start,
-                        descending);
-            if (ret) {
-                handle_error_string(
-                        "Error locally sorting from %lu to %lu",
-                        start + local_start,
-                        start + length / 2 - 1 + local_start);
-                goto exit;
-            }
-            ret =
-                local_bitonic_sort(arr, start + length / 2, length / 2,
-                        local_start, !descending);
-            if (ret) {
-                handle_error_string("Error locally sorting from %lu to %lu",
-                        start + length / 2 + local_start,
-                        start + length - 1 + local_start);
-                goto exit;
-            }
+            local_bitonic_sort(arr, start, length / 2, descending);
+            local_bitonic_sort(arr, start + length / 2, length / 2,
+                    !descending);
 
-            ret =
-                local_bitonic_merge(arr, start, length, local_start,
-                        descending);
-            if (ret) {
-                handle_error_string(
-                        "Error locally bitonic merging from %lu to %lu",
-                        start + local_start, start + length - 1 + local_start);
-                goto exit;
-            }
+            local_bitonic_merge(arr, start, length, descending);
             break;
     }
-
-    ret = 0;
-
-exit:
-    return ret;
 }
 
 #define CHUNK_SIZE 4096
 
-static int transpose(void *arr_, void *out_, size_t local_length,
-        size_t local_start, bool reverse) {
-    unsigned char *arr = arr_;
-    unsigned char *out = out_;
+static int transpose(elem_t *arr, elem_t *out, size_t local_length,
+        bool reverse) {
     size_t offsets[world_size];
     mpi_tls_request_t requests[world_size];
     size_t requests_len = world_size;
@@ -188,34 +81,17 @@ static int transpose(void *arr_, void *out_, size_t local_length,
      * right nodes, and simultaneously receive them. */
     for (int rank = 0; rank < world_size; rank++) {
         if (rank == world_rank) {
-            /* Decrypt elements that will end up in our own output and encrypt
-             * them to their new locations. */
-            size_t elems_to_decrypt = local_length / world_size;
-            for (size_t i = 0; i < elems_to_decrypt; i++) {
-                elem_t elem;
-                size_t decrypt_offset =
+            /* Copy elements that will end up in our own output and encrypt them
+             * to their new locations. */
+            size_t elems_to_copy = local_length / world_size;
+            for (size_t i = 0; i < elems_to_copy; i++) {
+                size_t from_offset =
                     !reverse
                         ? rank + i * world_size
                         : rank * local_length / world_size + i;
-                ret =
-                    elem_decrypt(key, &elem,
-                            arr + decrypt_offset * SIZEOF_ENCRYPTED_NODE,
-                            decrypt_offset + local_start);
-                if (ret) {
-                    handle_error_string("Error decrypting elem %lu",
-                            decrypt_offset + local_start);
-                    goto exit_free_bufs;
-                }
-                ret =
-                    elem_encrypt(key, &elem, out + i * SIZEOF_ENCRYPTED_NODE,
-                            i + local_start);
-                if (ret) {
-                    handle_error_string("Error encrypting elem %lu",
-                            i + local_start);
-                    goto exit_free_bufs;
-                }
+                memcpy(&out[i], &arr[from_offset], sizeof(out[i]));
             }
-            offsets[rank] = elems_to_decrypt;
+            offsets[rank] = elems_to_copy;
 
             /* Post receive request. */
             ret =
@@ -227,7 +103,7 @@ static int transpose(void *arr_, void *out_, size_t local_length,
                 goto exit_free_bufs;
             }
         } else {
-            /* Decrypt elements with stride of world_size. */
+            /* Send elements with stride of world_size. */
             size_t elems_to_decrypt =
                 MIN(local_length / world_size, CHUNK_SIZE);
             for (size_t i = 0; i < elems_to_decrypt; i++) {
@@ -235,15 +111,8 @@ static int transpose(void *arr_, void *out_, size_t local_length,
                     !reverse
                         ? rank + i * world_size
                         : rank * local_length / world_size + i;
-                ret =
-                    elem_decrypt(key, &bufs[rank][i],
-                            arr + decrypt_offset * SIZEOF_ENCRYPTED_NODE,
-                            decrypt_offset + local_start);
-                if (ret) {
-                    handle_error_string("Error decrypting elem %lu",
-                            decrypt_offset + local_start);
-                    goto exit_free_bufs;
-                }
+                memcpy(&bufs[rank][i], &arr[decrypt_offset],
+                        sizeof(bufs[rank][i]));
             }
             offsets[rank] = elems_to_decrypt;
 
@@ -276,17 +145,8 @@ static int transpose(void *arr_, void *out_, size_t local_length,
 
             /* Write received data out to the buffer. */
             size_t num_received_elems = status.count / sizeof(*bufs[index]);
-            for (size_t i = 0; i < num_received_elems; i++) {
-                ret =
-                    elem_encrypt(key, &bufs[index][i],
-                            out + (offsets[index] + i) * SIZEOF_ENCRYPTED_NODE,
-                            offsets[index] + i + local_start);
-                if (ret) {
-                    handle_error_string("Error encrypting elem %lu",
-                            offsets[index] + i + local_start);
-                    goto exit_free_bufs;
-                }
-            }
+            memcpy(out + offsets[index], bufs[index],
+                    num_received_elems * sizeof(*out));
             offsets[index] += num_received_elems;
 
             if (offsets[index] < local_length) {
@@ -307,7 +167,7 @@ static int transpose(void *arr_, void *out_, size_t local_length,
             }
         } else {
             if (offsets[index] < local_length / world_size) {
-                /* Decrypt elements with stride of world_size. */
+                /* Send elements with stride of world_size. */
                 size_t elems_to_decrypt =
                         MIN(CEIL_DIV(local_length - offsets[index], world_size),
                                 CHUNK_SIZE);
@@ -316,15 +176,8 @@ static int transpose(void *arr_, void *out_, size_t local_length,
                         !reverse
                             ? offsets[index] + i * world_size
                             : index * local_length / world_size + offsets[index] + i;
-                    ret =
-                        elem_decrypt(key, &bufs[index][i],
-                                arr + decrypt_offset * SIZEOF_ENCRYPTED_NODE,
-                                decrypt_offset + local_start);
-                    if (ret) {
-                        handle_error_string("Error decrypting elem %lu",
-                                (offsets[index] + i * world_size));
-                        goto exit_free_bufs;
-                    }
+                    memcpy(&bufs[index][i], &arr[decrypt_offset],
+                            sizeof(bufs[index][i]));
                 }
                 offsets[index] += elems_to_decrypt;
 
@@ -352,24 +205,9 @@ exit:
     return ret;
 }
 
-static int back_shift(void *arr_, void *out_, size_t local_length, size_t local_start,
+static int back_shift(elem_t *arr, elem_t *out, size_t local_length,
         bool reverse) {
-    unsigned char *arr = arr_;
-    unsigned char *out = out_;
     int ret;
-
-    elem_t *send_buf = malloc(CHUNK_SIZE * sizeof(*send_buf));
-    if (!send_buf) {
-        handle_error_string("Error allocating send buffer");
-        ret = -1;
-        goto exit;
-    }
-    elem_t *recv_buf = malloc(CHUNK_SIZE * sizeof(*recv_buf));
-    if (!recv_buf) {
-        handle_error_string("Error allocating recv buffer");
-        ret = -1;
-        goto exit_free_send_buf;
-    }
 
     if (!reverse || world_rank == 0) {
         /* If !reverse, since this step will be followed by sorting anyway,
@@ -381,27 +219,10 @@ static int back_shift(void *arr_, void *out_, size_t local_length, size_t local_
          * right half of the array is sent instead of the left half. */
 
         /* Memcpy the left half. */
-        memcpy(out, arr, local_length / 2 * SIZEOF_ENCRYPTED_NODE);
+        memcpy(out, arr, local_length / 2 * sizeof(*out));
     } else {
-        /* Decrypt the right half and write it to the left half. */
-        for (size_t i = 0; i < local_length / 2; i++) {
-            elem_t elem;
-            ret = elem_decrypt(key, &elem,
-                    arr + (local_length / 2 + i) * SIZEOF_ENCRYPTED_NODE,
-                    local_length / 2 + i + local_start);
-            if (ret) {
-                handle_error_string("Error decrypting elem %lu",
-                        local_length / 2 + i + local_start);
-                goto exit_free_recv_buf;
-            }
-            ret = elem_encrypt(key, &elem, out + i * SIZEOF_ENCRYPTED_NODE,
-                    i + local_start);
-            if (ret) {
-                handle_error_string("Error encrypting elem %lu",
-                        i + local_start);
-                goto exit_free_recv_buf;
-            }
-        }
+        /* Memcpy the right half to the left half. */
+        memcpy(out, arr + local_length / 2, local_length / 2 * sizeof(*out));
     }
 
     mpi_tls_request_t requests[2];
@@ -416,35 +237,24 @@ static int back_shift(void *arr_, void *out_, size_t local_length, size_t local_
 
     /* Send the right half. */
     size_t elems_to_send = MIN(local_length / 2, CHUNK_SIZE);
-    for (size_t i = 0; i < elems_to_send; i++) {
-        ret =
-            elem_decrypt(key, &send_buf[i],
-                    arr + (send_offset + i) * SIZEOF_ENCRYPTED_NODE,
-                    send_offset + i + local_start);
-        if (ret) {
-            handle_error_string("Error decrypting elem %lu",
-                    send_offset + i + local_start);
-            goto exit_free_recv_buf;
-        }
-    }
     ret =
-        mpi_tls_isend_bytes(send_buf, elems_to_send * sizeof(*send_buf),
+        mpi_tls_isend_bytes(arr + send_offset, elems_to_send * sizeof(*arr),
                 send_rank, 0, send_request);
     if (ret) {
         handle_error_string("Error posting send from %d to %d", world_rank,
                 send_rank);
-        goto exit_free_recv_buf;
+        goto exit;
     }
     send_offset += elems_to_send;
 
     /* Receive the left half. */
     ret =
-        mpi_tls_irecv_bytes(recv_buf, CHUNK_SIZE * sizeof(*recv_buf), recv_rank,
-                0, recv_request);
+        mpi_tls_irecv_bytes(out + recv_offset, CHUNK_SIZE * sizeof(*out),
+                recv_rank, 0, recv_request);
     if (ret) {
         handle_error_string("Error posting recv into %d from %d", world_rank,
                 recv_rank);
-        goto exit_free_recv_buf;
+        goto exit;
     }
 
     while (send_offset < (reverse ? local_length / 2 : local_length)
@@ -464,35 +274,24 @@ static int back_shift(void *arr_, void *out_, size_t local_length, size_t local_
         }
         if (ret) {
             handle_error_string("Error waiting on request");
-            goto exit_free_recv_buf;
+            goto exit;
         }
 
         if (is_recv) {
-            /* Encrypt received elements. */
-            size_t num_received_elems = status.count / sizeof(*recv_buf);
-            for (size_t i = 0; i < num_received_elems; i++) {
-                ret =
-                    elem_encrypt(key, &recv_buf[i],
-                            out + (recv_offset + i) * SIZEOF_ENCRYPTED_NODE,
-                            recv_offset + i + local_start);
-                if (ret) {
-                    handle_error_string("Error encrypting node %lu",
-                            recv_offset + i + local_start);
-                    goto exit_free_recv_buf;
-                }
-            }
+            /* Increment receive offset. */
+            size_t num_received_elems = status.count / sizeof(*out);
             recv_offset += num_received_elems;
 
             /* Post another receive if necessary. */
             if (recv_offset < local_length) {
                 ret =
-                    mpi_tls_irecv_bytes(recv_buf,
-                            CHUNK_SIZE * sizeof(*recv_buf), recv_rank, 0,
+                    mpi_tls_irecv_bytes(out + recv_offset,
+                            CHUNK_SIZE * sizeof(*out), recv_rank, 0,
                             recv_request);
                 if (ret) {
                     handle_error_string("Error posting recv into %d from %d",
                             world_rank, recv_rank);
-                    goto exit_free_recv_buf;
+                    goto exit;
                 }
             }
         } else {
@@ -500,101 +299,70 @@ static int back_shift(void *arr_, void *out_, size_t local_length, size_t local_
             if (send_offset < local_length) {
                 size_t elems_to_send =
                     MIN(local_length - send_offset, CHUNK_SIZE);
-                for (size_t i = 0; i < elems_to_send; i++) {
-                    ret =
-                        elem_decrypt(key, &send_buf[i],
-                                arr + (send_offset + i) * SIZEOF_ENCRYPTED_NODE,
-                                send_offset + i + local_start);
-                    if (ret) {
-                        handle_error_string("Error decrypting elem %lu",
-                                send_offset + i + local_start);
-                        goto exit_free_recv_buf;
-                    }
-                }
                 ret =
-                    mpi_tls_isend_bytes(send_buf,
-                            elems_to_send * sizeof(*send_buf), send_rank, 0,
+                    mpi_tls_isend_bytes(arr + send_offset,
+                            elems_to_send * sizeof(*arr), send_rank, 0,
                             send_request);
                 if (ret) {
                     handle_error_string("Error posting send from %d to %d", world_rank,
                             send_rank);
-                    goto exit_free_recv_buf;
+                    goto exit;
                 }
                 send_offset += elems_to_send;
             }
         }
     }
 
-exit_free_recv_buf:
-    free(recv_buf);
-exit_free_send_buf:
-    free(send_buf);
 exit:
     return ret;
 }
 
-int opaque_sort(void *arr_, size_t length) {
+int opaque_sort(elem_t *arr, size_t length) {
     size_t local_start = get_local_start(length, world_rank);
     size_t local_length = get_local_start(length, world_rank + 1) - local_start;
-    unsigned char *arr = arr_;
-    unsigned char *buf = arr + local_length * SIZEOF_ENCRYPTED_NODE;
+    elem_t *buf = arr + local_length;
     int ret;
 
     /* Step 1: Local sort. */
-    ret = local_bitonic_sort(arr, 0, local_length, local_start, false);
-    if (ret) {
-        handle_error_string("Error in local sort (step 1)");
-        goto exit;
-    }
+    local_bitonic_sort(arr, 0, local_length, false);
 
     if (world_size == 1) {
+        ret = 0;
         goto exit;
     }
 
     /* Step 2: Transpose. */
-    ret = transpose(arr, buf, local_length, local_start, false);
+    ret = transpose(arr, buf, local_length, false);
     if (ret) {
         handle_error_string("Error in transpose (step 2)");
         goto exit;
     }
 
     /* Step 3: Local sort. */
-    ret = local_bitonic_sort(buf, 0, local_length, local_start, false);
-    if (ret) {
-        handle_error_string("Error in local sort (step 3)");
-        goto exit;
-    }
+    local_bitonic_sort(buf, 0, local_length, false);
 
     /* Step 4: Transpose. */
-    ret = transpose(buf, arr, local_length, local_start, true);
+    ret = transpose(buf, arr, local_length, true);
     if (ret) {
         handle_error_string("Error in reverse transpose (step 4)");
         goto exit;
     }
 
     /* Step 5: Local sort. */
-    ret = local_bitonic_sort(arr, 0, local_length, local_start, false);
-    if (ret) {
-        handle_error_string("Error in local sort (step 5)");
-        goto exit;
-    }
+    local_bitonic_sort(arr, 0, local_length, false);
 
     /* Step 6: Back shift. */
-    ret = back_shift(arr, buf, local_length, local_start, false);
+    ret = back_shift(arr, buf, local_length, false);
     if (ret) {
         handle_error_string("Error in back shift (step 6)");
         goto exit;
     }
 
     /* Step 7: Local sort. */
-    ret = local_bitonic_sort(buf, 0, local_length, local_start, false);
-    if (ret) {
-        handle_error_string("Error in local sort (step 7)");
-        goto exit;
-    }
+    local_bitonic_sort(buf, 0, local_length, false);
 
     /* Step 8: Forward shift. */
-    ret = back_shift(buf, arr, local_length, local_start, true);
+    ret = back_shift(buf, arr, local_length, true);
     if (ret) {
         handle_error_string("Error in forward shift (step 8)");
         goto exit;

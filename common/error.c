@@ -2,12 +2,15 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <mbedtls/error.h>
+#include "common/defs.h"
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include <sgx_error.h>
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
 
 #define fprintf(...)
 #define vfprintf(...)
+
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 
 void _handle_mbedtls_error(int ret, const char *msg, const char *file,
         int line) {

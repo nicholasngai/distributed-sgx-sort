@@ -59,6 +59,9 @@ static mbedtls_x509_crt cert;
 static mbedtls_pk_context privkey;
 static struct mpi_tls_session *sessions;
 
+/* Bandwidth measurement. */
+size_t mpi_tls_bytes_sent;
+
 static int verify_callback(void *data UNUSED, mbedtls_x509_crt *crt UNUSED,
         int depth UNUSED, uint32_t *flags UNUSED) {
     // TODO Implement actual SGX attestation verification.
@@ -77,6 +80,8 @@ static int send_callback(void *session_, const unsigned char *buf, size_t len) {
     memcpy(session->out_bio, buf, len);
     session->out_bio += len;
     session->out_bio_len -= len;
+
+    __atomic_add_fetch(&mpi_tls_bytes_sent, len, __ATOMIC_RELAXED);
 
     ret = len;
 
@@ -933,6 +938,10 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
         wait_bio = request->bio;
         wait_bio_len = request->bio_len;
         break;
+    default:
+        handle_error_string("Invalid request type");
+        ret = -1;
+        goto exit;
     }
 
     ocall_mpi_request_t mpi_request;
