@@ -408,13 +408,6 @@ static int distributed_bucket_route(elem_t *arr, elem_t *out) {
         goto exit;
     }
 
-    elem_t *buf = malloc(BUCKET_SIZE * 2 * sizeof(*buf));
-    if (!buf) {
-        handle_error_string("Error allocating buffer");
-        ret = errno;
-        goto exit;
-    }
-
     /* Send and receive buckets according to the rules above. Note that we are
      * iterating by enclave instead of by bucket. */
     size_t num_requests = 0;
@@ -443,7 +436,7 @@ static int distributed_bucket_route(elem_t *arr, elem_t *out) {
                 handle_error_string("Error sending bucket %lu to %d from %d",
                         request_idxs[rank] + local_bucket_start, rank,
                         world_rank);
-                goto exit_free_buf;
+                goto exit;
             }
             num_requests++;
         }
@@ -451,12 +444,12 @@ static int distributed_bucket_route(elem_t *arr, elem_t *out) {
 
     /* Post a receive request for the current bucket. */
     ret =
-        mpi_tls_irecv_bytes(buf, BUCKET_SIZE * sizeof(*buf),
-                MPI_TLS_ANY_SOURCE, BUCKET_DISTRIBUTE_MPI_TAG,
-                &requests[world_rank]);
+        mpi_tls_irecv_bytes(out + request_idxs[world_rank] * BUCKET_SIZE,
+                BUCKET_SIZE * sizeof(*out), MPI_TLS_ANY_SOURCE,
+                BUCKET_DISTRIBUTE_MPI_TAG, &requests[world_rank]);
     if (ret) {
         handle_error_string("Error posting receive into %d", world_rank);
-        goto exit_free_buf;
+        goto exit;
     }
     num_requests++;
 
@@ -466,27 +459,24 @@ static int distributed_bucket_route(elem_t *arr, elem_t *out) {
         ret = mpi_tls_waitany(world_size, requests, &index, &status);
         if (ret) {
             handle_error_string("Error waiting on requests");
-            goto exit_free_buf;
+            goto exit;
         }
 
         if (index == (size_t) world_rank) {
             /* This was the receive request. */
 
-            /* Write the received bucket out. */
-            memcpy(out + request_idxs[index] * BUCKET_SIZE, buf,
-                    BUCKET_SIZE * sizeof(*out));
             request_idxs[index]++;
 
             if (request_idxs[index] < num_local_buckets) {
                 /* Post receive for the next bucket. */
                 ret =
-                    mpi_tls_irecv_bytes(buf, BUCKET_SIZE * sizeof(*buf),
-                            MPI_TLS_ANY_SOURCE, BUCKET_DISTRIBUTE_MPI_TAG,
-                            &requests[index]);
+                    mpi_tls_irecv_bytes(out + request_idxs[index] * BUCKET_SIZE,
+                            BUCKET_SIZE * sizeof(*out), MPI_TLS_ANY_SOURCE,
+                            BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string("Error posting receive into %d",
                             (int) index);
-                    goto exit_free_buf;
+                    goto exit;
                 }
             } else {
                 /* Nullify the receiving request. */
@@ -509,7 +499,7 @@ static int distributed_bucket_route(elem_t *arr, elem_t *out) {
                             "Error sending bucket %lu from %d to %d",
                             request_idxs[index] + local_bucket_start,
                             world_rank, (int) index);
-                    goto exit_free_buf;
+                    goto exit;
                 }
             } else {
                 /* Nullify the sending request. */
@@ -519,8 +509,6 @@ static int distributed_bucket_route(elem_t *arr, elem_t *out) {
         }
     }
 
-exit_free_buf:
-    free(buf);
 exit:
     return ret;
 }
