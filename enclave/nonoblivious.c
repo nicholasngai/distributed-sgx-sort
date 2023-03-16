@@ -508,11 +508,136 @@ exit:
     return ret;
 }
 
+static int send_and_receive_partitions(elem_t *arr, elem_t *out,
+        size_t local_length, size_t *pivot_idxs, size_t *recv_counts) {
+    size_t send_idxs[world_size];
+    size_t send_end_idxs[world_size];
+    mpi_tls_request_t requests[world_size];
+    int ret;
+
+    size_t total_recv_count = 0;
+    for (int i = 0; i < world_size; i++) {
+        total_recv_count += recv_counts[i];
+    }
+
+    /* Sending starts at the previous sample index (or 0). */
+    memcpy(send_end_idxs, pivot_idxs, (world_size - 1) * sizeof(*send_idxs));
+    send_end_idxs[world_size - 1] = local_length;
+    memcpy(send_idxs + 1, pivot_idxs, (world_size - 1) * sizeof(*send_idxs));
+    send_idxs[0] = 0;
+
+    /* Send elements to their corresponding enclaves. The elements in the array
+     * have already bee partitioned, so it's just a matter of sending them over
+     * in chunks. */
+
+    /* Copy own partition's elements to the output. */
+    size_t recv_idx = recv_counts[world_rank];
+    memcpy(out, arr + send_idxs[world_rank],
+            recv_counts[world_rank] * sizeof(*out));
+
+    /* Construct initial requests. REQUESTS is used for all send requests except
+     * for REQUESTS[WORLD_RANK], which is our receive request. */
+    size_t num_requests = 0;
+    for (int i = 0; i < world_size; i++) {
+        requests[i].type = MPI_TLS_NULL;
+    }
+    for (int i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            size_t elems_to_recv =
+                MIN(total_recv_count - recv_idx, SAMPLE_PARTITION_BUF_SIZE);
+            if (elems_to_recv > 0) {
+                ret =
+                    mpi_tls_irecv_bytes(out + recv_idx,
+                            elems_to_recv * sizeof(*out), MPI_TLS_ANY_SOURCE,
+                            SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG, &requests[i]);
+                if (ret) {
+                    handle_error_string("Error receiving partitioned data");
+                    goto exit;
+                }
+                num_requests++;
+            }
+        } else {
+            size_t elems_to_send =
+                MIN(send_end_idxs[i] - send_idxs[i], SAMPLE_PARTITION_BUF_SIZE);
+            if (elems_to_send > 0) {
+                /* Asynchronously send to enclave. */
+                ret =
+                    mpi_tls_isend_bytes(arr + send_idxs[i],
+                            elems_to_send * sizeof(*arr), i,
+                            SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG, &requests[i]);
+                if (ret) {
+                    handle_error_string("Error sending partitioned data");
+                    goto exit;
+                }
+                num_requests++;
+                send_idxs[i] += elems_to_send;
+            }
+        }
+    }
+
+    /* Get completed requests in a loop. */
+    while (num_requests) {
+        size_t index;
+        mpi_tls_status_t status;
+        ret = mpi_tls_waitany(world_size, requests, &index, &status);
+        if (ret) {
+            handle_error_string("Error waiting on partition requests");
+            goto exit;
+        }
+
+        if (index == (size_t) world_rank) {
+            /* Receive request completed. */
+            size_t req_num_received = status.count / sizeof(*out);
+            recv_idx += req_num_received;
+
+            if (recv_idx < total_recv_count) {
+                size_t elems_to_recv =
+                    MIN(total_recv_count - recv_idx, SAMPLE_PARTITION_BUF_SIZE);
+                ret =
+                    mpi_tls_irecv_bytes(out + recv_idx,
+                            elems_to_recv * sizeof(*out), MPI_TLS_ANY_SOURCE,
+                            SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG,
+                            &requests[index]);
+                if (ret) {
+                    handle_error_string("Error receiving partitioned data");
+                    goto exit;
+                }
+            } else {
+                requests[index].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        } else {
+            /* Send request completed. */
+            if (send_idxs[index] < send_end_idxs[index]) {
+                size_t elems_to_send =
+                    MIN(send_end_idxs[index] - send_idxs[index],
+                            SAMPLE_PARTITION_BUF_SIZE);
+
+                /* Asynchronously send to enclave. */
+                ret =
+                    mpi_tls_isend_bytes(arr + send_idxs[index],
+                            elems_to_send * sizeof(*arr), index,
+                            SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG,
+                            &requests[index]);
+                if (ret) {
+                    handle_error_string("Error sending partitioned data");
+                    goto exit;
+                }
+                send_idxs[index] += elems_to_send;
+            } else {
+                requests[index].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        }
+    }
+
+exit:
+    return ret;
+}
 
 /* Performs a non-oblivious samplesort across all enclaves. */
-static int distributed_sample_partition(elem_t *restrict arr,
-        elem_t *restrict out, size_t local_length,
-        size_t *restrict out_length, size_t num_threads) {
+static int distributed_sample_partition(elem_t *arr, elem_t *out,
+        size_t local_length, size_t *out_length, size_t num_threads) {
     int ret;
 
     /* This should never be called if this is a single-enclave sort. */
@@ -520,7 +645,8 @@ static int distributed_sample_partition(elem_t *restrict arr,
 
     struct sample samples[world_size - 1];
     size_t sample_idxs[world_size];
-    size_t send_idxs[world_size];
+    size_t send_counts[world_size];
+    size_t recv_counts[world_size];
     mpi_tls_request_t requests[world_size];
 
     /* Partition the data. Rank 0 partitions/samples from its own array using
@@ -576,131 +702,87 @@ static int distributed_sample_partition(elem_t *restrict arr,
         sample_idxs[world_size - 1] = local_length;
     }
 
-    /* Sending starts at the previous sample index (or 0). */
-    memcpy(send_idxs + 1, sample_idxs, (world_size - 1) * sizeof(*send_idxs));
-    send_idxs[0] = 0;
+    /* Compute send counts. */
+    for (int i = 0; i < world_size; i++) {
+        send_counts[i] = sample_idxs[i] - (i > 0 ? sample_idxs[i - 1] : 0);
+    }
 
-    /* Send elements to their corresponding enclaves. The elements in the array
-     * have already bee partitioned, so it's just a matter of sending them over
-     * in chunks. */
-
-    /* Copy own partition's elements to the output. */
-    *out_length = sample_idxs[world_rank] - send_idxs[world_rank];
-    memcpy(out, arr + send_idxs[world_rank], *out_length * sizeof(*out));
-    send_idxs[world_rank] = sample_idxs[world_rank];
-
-    /* Construct initial requests. REQUESTS is used for all send requests except
-     * for REQUESTS[WORLD_RANK], which is our receive request. */
+    /* Sum the number of elements that the other enclaves have sent to us. */
+    /* Send our count to all other enclaves. */
+    size_t recv_count;
     for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
+            /* Post receive. */
             ret =
-                mpi_tls_irecv_bytes(out + *out_length,
-                        SAMPLE_PARTITION_BUF_SIZE * sizeof(*out),
+                mpi_tls_irecv_bytes(&recv_count, sizeof(recv_count),
                         MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
                         &requests[i]);
             if (ret) {
-                handle_error_string("Error receiving partitioned data");
+                handle_error_string(
+                        "Error posting receive for sample partition count into %d",
+                        world_rank);
                 goto exit;
             }
         } else {
-            /* This could be 0, but we would need to send an empty message to
-             * signal the end of our partition. */
-            size_t elems_to_send =
-                MIN(sample_idxs[i] - send_idxs[i], SAMPLE_PARTITION_BUF_SIZE);
-
-            /* Asynchronously send to enclave. */
+            /* Post send. */
             ret =
-                mpi_tls_isend_bytes(arr + send_idxs[i],
-                        elems_to_send * sizeof(*arr), i,
+                mpi_tls_isend_bytes(&send_counts[i], sizeof(send_counts[i]), i,
                         SAMPLE_PARTITION_MPI_TAG, &requests[i]);
             if (ret) {
-                handle_error_string("Error sending partitioned data");
+                handle_error_string(
+                        "Error posting send for sample partition count from %d to %d",
+                        world_rank, i);
                 goto exit;
-            }
-            send_idxs[i] += elems_to_send;
-
-            /* If this block sent less than SAMPLE_PARTITION_BUF_SIZE elements,
-             * then the receiver will take this as the end of our stream, so
-             * increment SEND_IDXS[i] by 1 to indicate we're truly done. */
-            if (elems_to_send < SAMPLE_PARTITION_BUF_SIZE) {
-                send_idxs[i]++;
             }
         }
     }
 
-    /* Get completed requests in a loop. */
-    size_t ranks_still_receiving = world_size - 1;
-    size_t ranks_still_sending = world_size - 1;
-    while (ranks_still_sending || ranks_still_receiving) {
+    /* Loop (WORLD_SIZE - 1) * 2 times for WORLD_SIZE - 1 sends and
+     * WORLD_SIZE - 1 receives. */
+    size_t receives_left = world_size - 1;
+    recv_counts[world_rank] = send_counts[world_rank];
+    *out_length = recv_counts[world_rank];
+    for (int i = 0; i < (world_size - 1) * 2; i++) {
         size_t index;
         mpi_tls_status_t status;
         ret = mpi_tls_waitany(world_size, requests, &index, &status);
         if (ret) {
-            handle_error_string("Error waiting on partition requests");
+            handle_error_string(
+                    "Error waiting on receives for sample partition count");
             goto exit;
         }
 
         if (index == (size_t) world_rank) {
-            /* Receive request completed. */
-            size_t req_num_received = status.count / sizeof(*out);
-            *out_length += req_num_received;
+            recv_counts[status.source] = recv_count;
+            *out_length += recv_count;
+            receives_left--;
 
-            /* If the number of elements received is less than
-             * SAMPLE_PARTITION_BUF_SIZE, that rank has finished sending. */
-            if (req_num_received < SAMPLE_PARTITION_BUF_SIZE) {
-                ranks_still_receiving--;
-            }
-
-            if (ranks_still_receiving > 0) {
+            if (receives_left > 0) {
+                /* Post receive. */
                 ret =
-                    mpi_tls_irecv_bytes(out + *out_length,
-                            SAMPLE_PARTITION_BUF_SIZE * sizeof(*out),
+                    mpi_tls_irecv_bytes(&recv_count, sizeof(recv_count),
                             MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
                             &requests[index]);
                 if (ret) {
-                    handle_error_string("Error receiving partitioned data");
+                    handle_error_string(
+                            "Error posting receive for sample partition count into %d",
+                            world_rank);
                     goto exit;
                 }
             } else {
                 requests[index].type = MPI_TLS_NULL;
             }
         } else {
-            /* Send request completed. */
-
-            /* If the send index is equal to the sample index, we need to send
-             * an extra message of length 0 to indicate the end of our
-             * partition. We indicate that we've already sent a sentinel message
-             * of length < SAMPLE_PARTITION_BUF_SIZE message by setting
-             * the send index GREATER than the sample index. */
-            bool keep_rank = send_idxs[index] <= sample_idxs[index];
-            if (keep_rank) {
-                size_t elems_to_send =
-                    MIN(sample_idxs[index] - send_idxs[index],
-                            SAMPLE_PARTITION_BUF_SIZE);
-
-                /* Asynchronously send to enclave. */
-                ret =
-                    mpi_tls_isend_bytes(arr + send_idxs[index],
-                            elems_to_send * sizeof(*arr), index,
-                            SAMPLE_PARTITION_MPI_TAG, &requests[index]);
-                if (ret) {
-                    handle_error_string("Error sending partitioned data");
-                    goto exit;
-                }
-                send_idxs[index] += elems_to_send;
-
-                /* If this block sent less than SAMPLE_PARTITION_BUF_SIZE
-                 * elements, then the receiver will take this as the end of our
-                 * stream, so increment SEND_IDXS[INDEX] by 1 to indicate
-                 * we're truly done. */
-                if (elems_to_send < SAMPLE_PARTITION_BUF_SIZE) {
-                    send_idxs[index]++;
-                }
-            } else {
-                requests[index].type = MPI_TLS_NULL;
-                ranks_still_sending--;
-            }
+            requests[index].type = MPI_TLS_NULL;
         }
+    }
+
+    ret =
+        send_and_receive_partitions(arr, out, local_length, sample_idxs,
+                recv_counts);
+    if (ret) {
+        handle_error_string("Error sending and receiving partitions");
+        goto exit;
     }
 
 exit:
