@@ -119,9 +119,27 @@ static int elem_sample_comparator(const elem_t *a, const struct sample *b) {
     return (comp_key << 1) + comp_orp_id;
 }
 
-static int quickselect_helper(elem_t *arr, size_t length,
-        const size_t *targets, struct sample *samples, size_t num_targets,
-        size_t left, size_t right) {
+struct quickselect_args {
+    elem_t *arr;
+    size_t length;
+    const size_t *targets;
+    struct sample *samples;
+    size_t num_targets;
+    size_t left;
+    size_t right;
+    size_t num_threads;
+    volatile int ret;
+};
+static void quickselect_helper(void *args_) {
+    struct quickselect_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t length = args->length;
+    const size_t *targets = args->targets;
+    struct sample *samples = args->samples;
+    size_t num_targets = args->num_targets;
+    size_t left = args->left;
+    size_t right = args->right;
+    size_t num_threads = args->num_threads;
     int ret;
 
     if (!num_targets) {
@@ -223,28 +241,69 @@ static int quickselect_helper(elem_t *arr, size_t length,
         samples[i] = pivot;
     }
 
-    /* Set up next iteration(s) if we have targets on either side. If the next
-     * split is greater than the target, keep the current split and advance the
-     * head of the slice. Else, advance the split and retract the tail of the
-     * slice. */
-    /* Targets less than pivot. */
-    ret =
-        quickselect_helper(arr, length, targets, samples, geq_target_idx,
-                left, partition_right);
-    if (ret) {
-        goto exit;
-    }
-    /* Targets greater than pivot. */
-    ret =
-        quickselect_helper(arr, length, targets + gt_target_idx,
-                samples + gt_target_idx, num_targets - gt_target_idx,
-                partition_left, right);
-    if (ret) {
-        goto exit;
+    /* Recurse. */
+    struct quickselect_args left_args = {
+        .arr = arr,
+        .length = length,
+        .targets = targets,
+        .samples = samples,
+        .num_targets = geq_target_idx,
+        .left = left,
+        .right = partition_right,
+        .num_threads = MAX((num_threads + 1) / 2, 1),
+        .ret = 0,
+    };
+    struct quickselect_args right_args = {
+        .arr = arr,
+        .length = length,
+        .targets = targets + gt_target_idx,
+        .samples = samples + gt_target_idx,
+        .num_targets = num_targets - gt_target_idx,
+        .left = partition_left,
+        .right = right,
+        .num_threads = MAX(num_threads - left_args.num_threads, 1),
+        .ret = 0,
+    };
+    if (num_threads > 1) {
+        struct thread_work right_work = {
+            .type = THREAD_WORK_SINGLE,
+            .single = {
+                .func = quickselect_helper,
+                .arg = &right_args,
+            },
+        };
+        thread_work_push(&right_work);
+
+        quickselect_helper(&left_args);
+        ret = left_args.ret;
+        if (ret) {
+            goto exit;
+        }
+
+        thread_wait(&right_work);
+        ret = right_args.ret;
+        if (ret) {
+            goto exit;
+        }
+    } else {
+        quickselect_helper(&left_args);
+        ret = left_args.ret;
+        if (ret) {
+            goto exit;
+        }
+        quickselect_helper(&right_args);
+        ret = right_args.ret;
+        if (ret) {
+            goto exit;
+        }
     }
 
 exit:
-    return ret;
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
 }
 
 /* Performs a quickselect algorithm to find NUM_TARGETS target element indices
@@ -252,10 +311,22 @@ exit:
  * LENGTH elements. Resulting samples are stored in SAMPLES. TARGETS must be a
  * sorted array. */
 static int quickselect(elem_t *arr, size_t length, size_t *targets,
-        struct sample *samples, size_t num_targets) {
-    int ret =
-        quickselect_helper(arr, length, targets, samples, num_targets, 0,
-                length);
+        struct sample *samples, size_t num_targets, size_t num_threads) {
+    int ret;
+
+    struct quickselect_args args = {
+        .arr = arr,
+        .length = length,
+        .targets = targets,
+        .samples = samples,
+        .num_targets = num_targets,
+        .left = 0,
+        .right = length,
+        .num_threads = num_threads,
+        .ret = 0,
+    };
+    quickselect_helper(&args);
+    ret = args.ret;
     if (ret) {
         handle_error_string("Error in distributed quickselect");
         goto exit;
@@ -265,9 +336,27 @@ exit:
     return ret;
 }
 
-static int quickpartition_helper(elem_t *arr, size_t length,
-        const struct sample *pivots, size_t *pivot_idxs, size_t num_pivots,
-        size_t left, size_t right) {
+struct quickpartition_args {
+    elem_t *arr;
+    size_t length;
+    const struct sample *pivots;
+    size_t *pivot_idxs;
+    size_t num_pivots;
+    size_t left;
+    size_t right;
+    size_t num_threads;
+    volatile int ret;
+};
+static void quickpartition_helper(void *args_) {
+    struct quickpartition_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t length = args->length;
+    const struct sample *pivots = args->pivots;
+    size_t *pivot_idxs = args->pivot_idxs;
+    size_t num_pivots = args->num_pivots;
+    size_t left = args->left;
+    size_t right = args->right;
+    size_t num_threads = args->num_threads;
     int ret;
 
     if (!num_pivots) {
@@ -325,34 +414,91 @@ static int quickpartition_helper(elem_t *arr, size_t length,
     pivot_idxs[num_pivots / 2] = partition_right;
 
     /* Recurse. */
-    /* Targets less than pivot. */
-    ret =
-        quickpartition_helper(arr, length, pivots, pivot_idxs, num_pivots / 2,
-                left, partition_right);
-    if (ret) {
-        goto exit;
-    }
-    /* Targets greater than pivot. */
-    ret =
-        quickpartition_helper(arr, length, pivots + num_pivots / 2 + 1,
-                pivot_idxs + num_pivots / 2 + 1,
-                num_pivots - (num_pivots / 2 + 1), partition_left, right);
-    if (ret) {
-        goto exit;
+    struct quickpartition_args left_args = {
+        .arr = arr,
+        .length = length,
+        .pivots = pivots,
+        .pivot_idxs = pivot_idxs,
+        .num_pivots = num_pivots / 2,
+        .left = left,
+        .right = partition_right,
+        .num_threads = MAX((num_threads + 1) / 2, 1),
+        .ret = 0,
+    };
+    struct quickpartition_args right_args = {
+        .arr = arr,
+        .length = length,
+        .pivots = pivots + num_pivots / 2 + 1,
+        .pivot_idxs = pivot_idxs + num_pivots / 2 + 1,
+        .num_pivots = num_pivots - (num_pivots / 2 + 1),
+        .left = partition_left,
+        .right = right,
+        .num_threads = MAX(num_threads - left_args.num_threads, 1),
+        .ret = 0,
+    };
+    if (num_threads > 1) {
+        struct thread_work right_work = {
+            .type = THREAD_WORK_SINGLE,
+            .single = {
+                .func = quickpartition_helper,
+                .arg = &right_args,
+            },
+        };
+        thread_work_push(&right_work);
+
+        quickpartition_helper(&left_args);
+        ret = left_args.ret;
+        if (ret) {
+            goto exit;
+        }
+
+        thread_wait(&right_work);
+        ret = right_args.ret;
+        if (ret) {
+            goto exit;
+        }
+    } else {
+        quickpartition_helper(&left_args);
+        ret = left_args.ret;
+        if (ret) {
+            goto exit;
+        }
+        quickpartition_helper(&right_args);
+        ret = right_args.ret;
+        if (ret) {
+            goto exit;
+        }
     }
 
 exit:
-    return ret;
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
 }
 
 /* Use a variation of the quickselect algorithm to partition elements according
  * to NUM_PIVOTS pivots in PIVOTS contained in ARR, which contains LENGTH
  * elements. Resulting indices are PIVOT_IDXS. PIVOTS must be a sorted array. */
 static int quickpartition(elem_t *arr, size_t length,
-        const struct sample *pivots, size_t *pivot_idxs, size_t num_pivots) {
-    int ret =
-        quickpartition_helper(arr, length, pivots, pivot_idxs, num_pivots, 0,
-                length);
+        const struct sample *pivots, size_t *pivot_idxs, size_t num_pivots,
+        size_t num_threads) {
+    int ret;
+
+    struct quickpartition_args args = {
+        .arr = arr,
+        .length = length,
+        .pivots = pivots,
+        .pivot_idxs = pivot_idxs,
+        .num_pivots = num_pivots,
+        .left = 0,
+        .right = length,
+        .num_threads = num_threads,
+        .ret = 0,
+    };
+    quickpartition_helper(&args);
+    ret = args.ret;
     if (ret) {
         handle_error_string("Error in distributed quickselect");
         goto exit;
@@ -362,10 +508,11 @@ exit:
     return ret;
 }
 
+
 /* Performs a non-oblivious samplesort across all enclaves. */
 static int distributed_sample_partition(elem_t *restrict arr,
         elem_t *restrict out, size_t local_length,
-        size_t *restrict out_length) {
+        size_t *restrict out_length, size_t num_threads) {
     int ret;
 
     /* This should never be called if this is a single-enclave sort. */
@@ -386,7 +533,7 @@ static int distributed_sample_partition(elem_t *restrict arr,
         }
         ret =
             quickselect(arr, local_length, sample_idxs, samples,
-                    world_size - 1);
+                    world_size - 1, num_threads);
         if (ret) {
             handle_error_string("Error in quickselect");
             goto exit;
@@ -421,7 +568,7 @@ static int distributed_sample_partition(elem_t *restrict arr,
         /* Partition with quickpartition. */
         ret =
             quickpartition(arr, local_length, samples, sample_idxs,
-                    world_size - 1);
+                    world_size - 1, num_threads);
         if (ret) {
             handle_error_string("Error in quickpartition");
             goto exit;
@@ -839,7 +986,8 @@ int nonoblivious_sort(elem_t *arr, elem_t *out, size_t length,
      * element, e.g. enclave 0 has the lowest elements, then enclave 1, etc. */
     size_t partition_length;
     ret =
-        distributed_sample_partition(arr, out, local_length, &partition_length);
+        distributed_sample_partition(arr, out, local_length, &partition_length,
+                num_threads);
     if (ret) {
         handle_error_string("Error in distributed sample partitioning");
         goto exit;
