@@ -349,9 +349,17 @@ exit:
  * the paper, since all merge-split operations will be constrained to the same
  * buckets of memory. */
 static int bucket_route(elem_t *arr, size_t num_levels, size_t start_bit_idx) {
-    size_t num_buckets = get_local_bucket_start(world_size);
     int ret;
 
+    size_t bucket_start = get_local_bucket_start(world_rank);
+    size_t num_buckets = get_local_bucket_start(world_rank + 1) - bucket_start;
+    if (1lu << num_levels > num_buckets) {
+        /* If 2 ^ NUM_LEVELS > NUM_BUCKETS, we need to do some merge-splits
+         * across different enclaves, so we round BUCKET_START down to the
+         * nearest multiple of 2 ^ NUM_LEVELS. */
+        bucket_start -= bucket_start % (1 << num_levels);
+        num_buckets = 1 << num_levels;
+    }
     for (size_t bit_idx = 0; bit_idx < num_levels; bit_idx++) {
         size_t bucket_stride = 2u << bit_idx;
 
@@ -360,7 +368,7 @@ static int bucket_route(elem_t *arr, size_t num_levels, size_t start_bit_idx) {
             .arr = arr,
             .bit_idx = start_bit_idx + bit_idx,
             .bucket_stride = bucket_stride,
-            .bucket_offset = 0,
+            .bucket_offset = bucket_start,
             .num_buckets = num_buckets,
         };
         struct thread_work work = {
