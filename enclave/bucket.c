@@ -16,6 +16,7 @@
 #include "enclave/mpi_tls.h"
 #include "enclave/nonoblivious.h"
 #include "enclave/parallel_enc.h"
+#include "enclave/synch.h"
 #include "enclave/threading.h"
 
 static size_t total_length;
@@ -404,23 +405,22 @@ exit:
 struct distributed_bucket_route_args {
     elem_t *arr;
     elem_t *out;
-    volatile size_t out_idx;
-    size_t num_threads;
+    volatile size_t *send_idxs;
+    volatile size_t recv_idx;
     volatile int ret;
 };
 static void distributed_bucket_route(void *args_, size_t thread_idx) {
     struct distributed_bucket_route_args *args = args_;
     elem_t *arr = args->arr;
     elem_t *out = args->out;
-    volatile size_t *out_idx = &args->out_idx;
-    size_t num_threads = args->num_threads;
+    volatile size_t *send_idxs = args->send_idxs;
+    volatile size_t *recv_idx = &args->recv_idx;
     size_t local_bucket_start = get_local_bucket_start(world_rank);
     size_t num_local_buckets =
         get_local_bucket_start(world_rank + 1) - local_bucket_start;
     int ret;
 
     mpi_tls_request_t requests[world_size];
-    size_t request_idxs[world_size];
 
     if (world_size == 1) {
         if (thread_idx == 0) {
@@ -430,49 +430,23 @@ static void distributed_bucket_route(void *args_, size_t thread_idx) {
         goto exit;
     }
 
-    size_t start = thread_idx * num_local_buckets / num_threads;
-    size_t end = (thread_idx + 1) * num_local_buckets / num_threads;
-
-    /* Send and receive buckets according to the rules above. Note that we are
-     * iterating by enclave instead of by bucket. */
-    size_t num_requests = 0;
-    for (size_t i = 0; i < (size_t) world_size; i++) {
-        requests[i].type = MPI_TLS_NULL;
-    }
-    for (size_t i = start; i < MIN(end, start + world_size); i++) {
-        int rank = (world_rank * num_local_buckets + i) % world_size;
-        if (rank == world_rank) {
-            /* Copy our own buckets to the output if any. */
-            for (size_t j = i; j < end; j += world_size) {
-                size_t copy_idx =
-                    __atomic_fetch_add(out_idx, 1, __ATOMIC_RELAXED);
-                memcpy(out + copy_idx * BUCKET_SIZE, arr + j * BUCKET_SIZE,
-                        BUCKET_SIZE * sizeof(*out));
-            }
-        } else {
-            /* Post a send request to the remote rank containing the first
-             * bucket. */
-            request_idxs[rank] = i;
-            elem_t *bucket = arr + request_idxs[rank] * BUCKET_SIZE;
-
-            ret =
-                mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket), rank,
-                        BUCKET_DISTRIBUTE_MPI_TAG, &requests[rank]);
-            if (ret) {
-                handle_error_string("Error sending bucket %lu to %d from %d",
-                        request_idxs[rank] + local_bucket_start, rank,
-                        world_rank);
-                goto exit;
-            }
-            num_requests++;
+    /* Copy our own buckets to the output if any. */
+    if (thread_idx == 0) {
+        for (size_t j = send_idxs[world_rank]; j < num_local_buckets;
+                j += world_size) {
+            size_t copy_idx =
+                __atomic_fetch_add(recv_idx, 1, __ATOMIC_RELAXED);
+            memcpy(out + copy_idx * BUCKET_SIZE, arr + j * BUCKET_SIZE,
+                    BUCKET_SIZE * sizeof(*out));
         }
     }
 
     /* Post a receive request for the current bucket. */
-    size_t recv_idx = __atomic_fetch_add(out_idx, 1, __ATOMIC_RELAXED);
-    if (recv_idx < num_local_buckets) {
+    size_t num_requests = 0;
+    size_t our_recv_idx = __atomic_fetch_add(recv_idx, 1, __ATOMIC_RELAXED);
+    if (our_recv_idx < num_local_buckets) {
         ret =
-            mpi_tls_irecv_bytes(out + recv_idx * BUCKET_SIZE,
+            mpi_tls_irecv_bytes(out + our_recv_idx * BUCKET_SIZE,
                     BUCKET_SIZE * sizeof(*out), MPI_TLS_ANY_SOURCE,
                     BUCKET_DISTRIBUTE_MPI_TAG, &requests[world_rank]);
         if (ret) {
@@ -480,6 +454,35 @@ static void distributed_bucket_route(void *args_, size_t thread_idx) {
             goto exit;
         }
         num_requests++;
+    } else {
+        requests[world_rank].type = MPI_TLS_NULL;
+    }
+
+    /* Send and receive buckets. */
+    for (int i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            continue;
+        }
+
+        /* Post a send request to the remote rank containing the first
+         * bucket. */
+        size_t our_send_idx =
+            __atomic_fetch_add(&send_idxs[i], world_size, __ATOMIC_RELAXED);
+        if (our_send_idx < num_local_buckets) {
+            ret =
+                mpi_tls_isend_bytes(arr + our_send_idx * BUCKET_SIZE,
+                        BUCKET_SIZE * sizeof(*arr), i,
+                        BUCKET_DISTRIBUTE_MPI_TAG, &requests[i]);
+            if (ret) {
+                handle_error_string(
+                        "Error sending bucket %lu to %d from %d",
+                        our_send_idx + local_bucket_start, i, world_rank);
+                goto exit;
+            }
+            num_requests++;
+        } else {
+            requests[i].type = MPI_TLS_NULL;
+        }
     }
 
     while (num_requests) {
@@ -494,11 +497,12 @@ static void distributed_bucket_route(void *args_, size_t thread_idx) {
         if (index == (size_t) world_rank) {
             /* This was the receive request. */
 
-            size_t recv_idx = __atomic_fetch_add(out_idx, 1, __ATOMIC_RELAXED);
-            if (recv_idx < num_local_buckets) {
+            size_t our_recv_idx =
+                __atomic_fetch_add(recv_idx, 1, __ATOMIC_RELAXED);
+            if (our_recv_idx < num_local_buckets) {
                 /* Post receive for the next bucket. */
                 ret =
-                    mpi_tls_irecv_bytes(out + recv_idx * BUCKET_SIZE,
+                    mpi_tls_irecv_bytes(out + our_recv_idx * BUCKET_SIZE,
                             BUCKET_SIZE * sizeof(*out), MPI_TLS_ANY_SOURCE,
                             BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
                 if (ret) {
@@ -514,19 +518,19 @@ static void distributed_bucket_route(void *args_, size_t thread_idx) {
         } else {
             /* This was a send request. */
 
-            request_idxs[index] += world_size;
-
-            if (request_idxs[index] < end) {
-                elem_t *bucket = arr + request_idxs[index] * BUCKET_SIZE;
-
+            size_t our_send_idx =
+                __atomic_fetch_add(&send_idxs[index], world_size,
+                        __ATOMIC_RELAXED);
+            if (our_send_idx < num_local_buckets) {
                 ret =
-                    mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
-                            index, BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
+                    mpi_tls_isend_bytes(arr + our_send_idx * BUCKET_SIZE,
+                            BUCKET_SIZE * sizeof(*arr), index,
+                            BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string(
                             "Error sending bucket %lu from %d to %d",
-                            request_idxs[index] + local_bucket_start,
-                            world_rank, (int) index);
+                            our_send_idx + local_bucket_start, world_rank,
+                            (int) index);
                     goto exit;
                 }
             } else {
@@ -536,6 +540,8 @@ static void distributed_bucket_route(void *args_, size_t thread_idx) {
             }
         }
     }
+
+    ret = 0;
 
 exit:
     if (ret) {
@@ -629,6 +635,8 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     size_t local_start = local_bucket_start * BUCKET_SIZE;
     size_t local_length = num_local_buckets * BUCKET_SIZE;
 
+    size_t send_idxs[world_size];
+
     elem_t *buf = arr + local_length;
 
     struct timespec time_start;
@@ -662,11 +670,16 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
+    /* Distributed bucket routing. */
+    for (int i = 0; i < world_size; i++) {
+        send_idxs[i] = (i - local_bucket_start % world_size) % world_size;
+    }
     struct distributed_bucket_route_args args = {
         .arr = buf,
         .out = arr,
-        .out_idx = 0,
-        .num_threads = num_threads,
+        .send_idxs = send_idxs,
+        .recv_idx = 0,
+        .ret = 0,
     };
     struct thread_work work = {
         .type = THREAD_WORK_ITER,
