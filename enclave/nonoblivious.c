@@ -508,70 +508,93 @@ exit:
     return ret;
 }
 
-static int send_and_receive_partitions(elem_t *arr, elem_t *out,
-        size_t local_length, size_t *pivot_idxs, size_t *recv_counts) {
-    size_t send_idxs[world_size];
-    size_t send_end_idxs[world_size];
+struct send_and_receive_partitions_args {
+    elem_t *arr;
+    elem_t *out;
+    volatile size_t *send_idxs;
+    size_t *send_end_idxs;
+    volatile size_t recv_idx;
+    volatile ssize_t total_num_recvs;
+    int ret;
+};
+static void send_and_receive_partitions(void *args_, size_t thread_idx) {
+    struct send_and_receive_partitions_args *args = args_;
+    elem_t *arr = args->arr;
+    elem_t *out = args->out;
+    volatile size_t *send_idxs = args->send_idxs;
+    size_t *send_end_idxs = args->send_end_idxs;
+    volatile size_t *recv_idx = &args->recv_idx;
+    volatile ssize_t *total_num_recvs = &args->total_num_recvs;
     mpi_tls_request_t requests[world_size];
     int ret;
 
-    size_t total_recv_count = 0;
-    for (int i = 0; i < world_size; i++) {
-        total_recv_count += recv_counts[i];
-    }
-
-    /* Sending starts at the previous sample index (or 0). */
-    memcpy(send_end_idxs, pivot_idxs, (world_size - 1) * sizeof(*send_idxs));
-    send_end_idxs[world_size - 1] = local_length;
-    memcpy(send_idxs + 1, pivot_idxs, (world_size - 1) * sizeof(*send_idxs));
-    send_idxs[0] = 0;
-
     /* Send elements to their corresponding enclaves. The elements in the array
-     * have already bee partitioned, so it's just a matter of sending them over
+     * have already been partitioned, so it's just a matter of sending them over
      * in chunks. */
 
+    /* Allocate receive buffer. */
+    elem_t *buf = malloc(SAMPLE_PARTITION_BUF_SIZE * sizeof(*buf));
+    if (!buf) {
+        perror("malloc buf");
+        ret = errno;
+        goto exit;
+    }
+
     /* Copy own partition's elements to the output. */
-    size_t recv_idx = recv_counts[world_rank];
-    memcpy(out, arr + send_idxs[world_rank],
-            recv_counts[world_rank] * sizeof(*out));
+    if (thread_idx == 0) {
+        size_t elems_to_copy =
+            send_end_idxs[world_rank] - send_idxs[world_rank];
+        size_t copy_idx =
+            __atomic_fetch_add(recv_idx, elems_to_copy, __ATOMIC_RELAXED);
+        memcpy(out + copy_idx, arr + send_idxs[world_rank],
+                elems_to_copy * sizeof(*out));
+    }
+
+    /* Post a receive request. */
+    size_t num_requests = 0;
+    ssize_t next_num_recvs =
+        __atomic_fetch_sub(total_num_recvs, 1, __ATOMIC_RELAXED);
+    if (next_num_recvs > 0) {
+        ret =
+            mpi_tls_irecv_bytes(buf,
+                    SAMPLE_PARTITION_BUF_SIZE * sizeof(*buf),
+                    MPI_TLS_ANY_SOURCE,
+                    SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG, &requests[world_rank]);
+        if (ret) {
+            handle_error_string("Error receiving partitioned data");
+            goto exit_free_buf;
+        }
+        num_requests++;
+    } else {
+        requests[world_rank].type = MPI_TLS_NULL;
+    }
 
     /* Construct initial requests. REQUESTS is used for all send requests except
      * for REQUESTS[WORLD_RANK], which is our receive request. */
-    size_t num_requests = 0;
-    for (int i = 0; i < world_size; i++) {
-        requests[i].type = MPI_TLS_NULL;
-    }
     for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
-            size_t elems_to_recv =
-                MIN(total_recv_count - recv_idx, SAMPLE_PARTITION_BUF_SIZE);
-            if (elems_to_recv > 0) {
-                ret =
-                    mpi_tls_irecv_bytes(out + recv_idx,
-                            elems_to_recv * sizeof(*out), MPI_TLS_ANY_SOURCE,
-                            SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG, &requests[i]);
-                if (ret) {
-                    handle_error_string("Error receiving partitioned data");
-                    goto exit;
-                }
-                num_requests++;
+            continue;
+        }
+
+        size_t our_send_idx =
+            __atomic_fetch_add(&send_idxs[i], SAMPLE_PARTITION_BUF_SIZE,
+                    __ATOMIC_RELAXED);
+        our_send_idx = MIN(our_send_idx, send_end_idxs[i]);
+        size_t elems_to_send =
+            MIN(send_end_idxs[i] - our_send_idx, SAMPLE_PARTITION_BUF_SIZE);
+        if (elems_to_send > 0) {
+            /* Asynchronously send to enclave. */
+            ret =
+                mpi_tls_isend_bytes(arr + our_send_idx,
+                        elems_to_send * sizeof(*arr), i,
+                        SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG, &requests[i]);
+            if (ret) {
+                handle_error_string("Error sending partitioned data");
+                goto exit_free_buf;
             }
+            num_requests++;
         } else {
-            size_t elems_to_send =
-                MIN(send_end_idxs[i] - send_idxs[i], SAMPLE_PARTITION_BUF_SIZE);
-            if (elems_to_send > 0) {
-                /* Asynchronously send to enclave. */
-                ret =
-                    mpi_tls_isend_bytes(arr + send_idxs[i],
-                            elems_to_send * sizeof(*arr), i,
-                            SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG, &requests[i]);
-                if (ret) {
-                    handle_error_string("Error sending partitioned data");
-                    goto exit;
-                }
-                num_requests++;
-                send_idxs[i] += elems_to_send;
-            }
+            requests[i].type = MPI_TLS_NULL;
         }
     }
 
@@ -582,25 +605,31 @@ static int send_and_receive_partitions(elem_t *arr, elem_t *out,
         ret = mpi_tls_waitany(world_size, requests, &index, &status);
         if (ret) {
             handle_error_string("Error waiting on partition requests");
-            goto exit;
+            goto exit_free_buf;
         }
 
         if (index == (size_t) world_rank) {
             /* Receive request completed. */
-            size_t req_num_received = status.count / sizeof(*out);
-            recv_idx += req_num_received;
 
-            if (recv_idx < total_recv_count) {
-                size_t elems_to_recv =
-                    MIN(total_recv_count - recv_idx, SAMPLE_PARTITION_BUF_SIZE);
+            /* Copy received elements to buffer. */
+            size_t req_num_received = status.count / sizeof(*out);
+            size_t copy_idx =
+                __atomic_fetch_add(recv_idx, req_num_received,
+                        __ATOMIC_RELAXED);
+            memcpy(out + copy_idx, buf, req_num_received * sizeof(*out));
+
+            ssize_t next_num_recvs =
+                __atomic_fetch_sub(total_num_recvs, 1, __ATOMIC_RELAXED);
+            if (next_num_recvs > 0) {
                 ret =
-                    mpi_tls_irecv_bytes(out + recv_idx,
-                            elems_to_recv * sizeof(*out), MPI_TLS_ANY_SOURCE,
+                    mpi_tls_irecv_bytes(buf,
+                            SAMPLE_PARTITION_BUF_SIZE * sizeof(*buf),
+                            MPI_TLS_ANY_SOURCE,
                             SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG,
                             &requests[index]);
                 if (ret) {
                     handle_error_string("Error receiving partitioned data");
-                    goto exit;
+                    goto exit_free_buf;
                 }
             } else {
                 requests[index].type = MPI_TLS_NULL;
@@ -608,22 +637,24 @@ static int send_and_receive_partitions(elem_t *arr, elem_t *out,
             }
         } else {
             /* Send request completed. */
-            if (send_idxs[index] < send_end_idxs[index]) {
-                size_t elems_to_send =
-                    MIN(send_end_idxs[index] - send_idxs[index],
-                            SAMPLE_PARTITION_BUF_SIZE);
-
+            size_t our_send_idx =
+                __atomic_fetch_add(&send_idxs[index], SAMPLE_PARTITION_BUF_SIZE,
+                        __ATOMIC_RELAXED);
+            our_send_idx = MIN(our_send_idx, send_end_idxs[index]);
+            size_t elems_to_send =
+                MIN(send_end_idxs[index] - our_send_idx,
+                        SAMPLE_PARTITION_BUF_SIZE);
+            if (elems_to_send > 0) {
                 /* Asynchronously send to enclave. */
                 ret =
-                    mpi_tls_isend_bytes(arr + send_idxs[index],
+                    mpi_tls_isend_bytes(arr + our_send_idx,
                             elems_to_send * sizeof(*arr), index,
                             SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG,
                             &requests[index]);
                 if (ret) {
                     handle_error_string("Error sending partitioned data");
-                    goto exit;
+                    goto exit_free_buf;
                 }
-                send_idxs[index] += elems_to_send;
             } else {
                 requests[index].type = MPI_TLS_NULL;
                 num_requests--;
@@ -631,8 +662,16 @@ static int send_and_receive_partitions(elem_t *arr, elem_t *out,
         }
     }
 
+    ret = 0;
+
+exit_free_buf:
+    free(buf);
 exit:
-    return ret;
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
 }
 
 /* Performs a non-oblivious samplesort across all enclaves. */
@@ -644,7 +683,8 @@ static int distributed_sample_partition(elem_t *arr, elem_t *out,
     assert(world_size > 1);
 
     struct sample samples[world_size - 1];
-    size_t sample_idxs[world_size];
+    size_t send_idxs[world_size];
+    size_t send_end_idxs[world_size];
     size_t send_counts[world_size];
     size_t recv_counts[world_size];
     mpi_tls_request_t requests[world_size];
@@ -655,16 +695,16 @@ static int distributed_sample_partition(elem_t *arr, elem_t *out,
     if (world_rank == 0) {
         /* Construct targets to and pass to quickselect. */
         for (size_t i = 0; i < (size_t) world_size - 1; i++) {
-            sample_idxs[i] = local_length * (i + 1) / world_size;
+            send_end_idxs[i] = local_length * (i + 1) / world_size;
         }
         ret =
-            quickselect(arr, local_length, sample_idxs, samples,
+            quickselect(arr, local_length, send_end_idxs, samples,
                     world_size - 1, num_threads);
         if (ret) {
             handle_error_string("Error in quickselect");
             goto exit;
         }
-        sample_idxs[world_size - 1] = local_length;
+        send_end_idxs[world_size - 1] = local_length;
 
         /* Send the samples to everyone else. */
         for (int i = 0; i < world_size; i++) {
@@ -693,18 +733,18 @@ static int distributed_sample_partition(elem_t *arr, elem_t *out,
 
         /* Partition with quickpartition. */
         ret =
-            quickpartition(arr, local_length, samples, sample_idxs,
+            quickpartition(arr, local_length, samples, send_end_idxs,
                     world_size - 1, num_threads);
         if (ret) {
             handle_error_string("Error in quickpartition");
             goto exit;
         }
-        sample_idxs[world_size - 1] = local_length;
+        send_end_idxs[world_size - 1] = local_length;
     }
 
     /* Compute send counts. */
     for (int i = 0; i < world_size; i++) {
-        send_counts[i] = sample_idxs[i] - (i > 0 ? sample_idxs[i - 1] : 0);
+        send_counts[i] = send_end_idxs[i] - (i > 0 ? send_end_idxs[i - 1] : 0);
     }
 
     /* Sum the number of elements that the other enclaves have sent to us. */
@@ -777,9 +817,44 @@ static int distributed_sample_partition(elem_t *arr, elem_t *out,
         }
     }
 
-    ret =
-        send_and_receive_partitions(arr, out, local_length, sample_idxs,
-                recv_counts);
+    /* Sending starts at the previous sample index (or 0). */
+    memcpy(send_idxs + 1, send_end_idxs, (world_size - 1) * sizeof(*send_idxs));
+    send_idxs[0] = 0;
+
+    //printf("%d\n", getpid());
+    //volatile int loop = 1;
+    //while (loop) {}
+
+    /* Compute receive statistics. */
+    ssize_t total_num_recvs = 0;
+    for (int i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            continue;
+        }
+        total_num_recvs += CEIL_DIV(recv_counts[i], SAMPLE_PARTITION_BUF_SIZE);
+    }
+
+    struct send_and_receive_partitions_args args = {
+        .arr = arr,
+        .out = out,
+        .send_idxs = send_idxs,
+        .send_end_idxs = send_end_idxs,
+        .recv_idx = 0,
+        .total_num_recvs = total_num_recvs,
+        .ret = 0,
+    };
+    struct thread_work work = {
+        .type = THREAD_WORK_ITER,
+        .iter = {
+            .func = send_and_receive_partitions,
+            .arg = &args,
+            .count = num_threads,
+        },
+    };
+    thread_work_push(&work);
+    thread_work_until_empty();
+    thread_wait(&work);
+    ret = args.ret;
     if (ret) {
         handle_error_string("Error sending and receiving partitions");
         goto exit;
