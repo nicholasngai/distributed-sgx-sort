@@ -430,6 +430,9 @@ static void distributed_bucket_route(void *args_, size_t thread_idx) {
         goto exit;
     }
 
+    /* Wait so that thread 0 has defeintely updated RECV_IDX. */
+    thread_wait_for_all();
+
     /* Copy our own buckets to the output if any. */
     if (thread_idx == 0) {
         for (size_t j = send_idxs[world_rank]; j < num_local_buckets;

@@ -13,6 +13,7 @@
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
 #include "enclave/qsort.h"
+#include "enclave/synch.h"
 #include "enclave/threading.h"
 
 #define BUF_SIZE 1024
@@ -549,6 +550,9 @@ static void send_and_receive_partitions(void *args_, size_t thread_idx) {
         memcpy(out + copy_idx, arr + send_idxs[world_rank],
                 elems_to_copy * sizeof(*out));
     }
+
+    /* Wait so that thread 0 has defeintely updated RECV_IDX. */
+    thread_wait_for_all();
 
     /* Post a receive request. */
     size_t num_requests = 0;
