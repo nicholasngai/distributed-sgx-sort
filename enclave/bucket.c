@@ -75,24 +75,30 @@ struct assign_random_id_args {
 };
 static void assign_random_id(void *args_, size_t i) {
     struct assign_random_id_args *args = args_;
+    const elem_t *arr = args->arr;
+    elem_t *out = args->out;
+    size_t arr_length = args->arr_length;
+    size_t out_length = args->out_length;
+    size_t result_start_idx = args->result_start_idx;
+    size_t num_threads = args->num_threads;
     int ret;
 
-    size_t start = i * args->out_length / args->num_threads;
-    size_t end = (i + 1) * args->out_length / args->num_threads;
+    size_t start = i * out_length / num_threads;
+    size_t end = (i + 1) * out_length / num_threads;
     for (size_t j = start; j < end; j++) {
-        if (j % 2 == 0 && j < args->arr_length * 2) {
+        if (j % 2 == 0 && j < arr_length * 2) {
             /* Copy elem from index j / 2 and assign ORP ID. */
-            memcpy(&args->out[j], &args->arr[j / 2], sizeof(args->out[j]));
-            ret = rand_read(&args->out[j].orp_id, sizeof(args->out[j].orp_id));
+            memcpy(&out[j], &arr[j / 2], sizeof(out[j]));
+            ret = rand_read(&out[j].orp_id, sizeof(out[j].orp_id));
             if (ret) {
                 handle_error_string("Error assigning random ID to elem %lu",
-                        i + args->result_start_idx);
+                        i + result_start_idx);
                 goto exit;
             }
-            args->out[j].is_dummy = false;
+            out[j].is_dummy = false;
         } else {
             /* Use dummy elem. */
-            args->out[j].is_dummy = true;
+            out[j].is_dummy = true;
         }
     }
 
@@ -320,17 +326,22 @@ struct merge_split_idx_args {
 };
 static void merge_split_idx(void *args_, size_t bucket_idx) {
     struct merge_split_idx_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t bit_idx = args->bit_idx;
+    size_t bucket_stride = args->bucket_stride;
+    size_t bucket_offset = args->bucket_offset;
+    size_t num_buckets = args->num_buckets;
     int ret;
 
-    if (args->bit_idx % 2 == 1) {
-        bucket_idx = args->num_buckets / 2 - bucket_idx - 1;
+    if (bit_idx % 2 == 1) {
+        bucket_idx = num_buckets / 2 - bucket_idx - 1;
     }
 
-    size_t bucket = bucket_idx % (args->bucket_stride / 2)
-        + bucket_idx / (args->bucket_stride / 2) * args->bucket_stride
-        + args->bucket_offset;
-    size_t other_bucket = bucket + args->bucket_stride / 2;
-    ret = merge_split(args->arr, bucket, other_bucket, args->bit_idx);
+    size_t bucket =
+        bucket_idx % (bucket_stride / 2)
+            + bucket_idx / (bucket_stride / 2) * bucket_stride + bucket_offset;
+    size_t other_bucket = bucket + bucket_stride / 2;
+    ret = merge_split(arr, bucket, other_bucket, bit_idx);
     if (ret) {
         handle_error_string(
                 "Error in merge split with indices %lu and %lu\n", bucket,
@@ -340,7 +351,8 @@ static void merge_split_idx(void *args_, size_t bucket_idx) {
 
 exit:
     if (ret) {
-        __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
                 __ATOMIC_RELAXED, __ATOMIC_RELAXED);
     }
 }
@@ -579,10 +591,14 @@ struct permute_and_compress_args {
 };
 static void permute_and_compress(void *args_, size_t bucket_idx) {
     struct permute_and_compress_args *args = args_;
+    elem_t *arr = args->arr;
+    elem_t *out = args->out;
+    size_t start_idx = args->start_idx;
+    size_t *compress_idx = args->compress_idx;
     int ret;
 
-    o_sort(args->arr + bucket_idx * BUCKET_SIZE, BUCKET_SIZE,
-            sizeof(*args->arr), permute_comparator, NULL);
+    o_sort(arr + bucket_idx * BUCKET_SIZE, BUCKET_SIZE, sizeof(*arr),
+            permute_comparator, NULL);
 
     /* Assign random ORP IDs and Count real elements. */
     size_t num_real_elems = 0;
@@ -591,30 +607,30 @@ static void permute_and_compress(void *args_, size_t bucket_idx) {
          * are sorted before the dummy elements at this point. This
          * non-oblivious comparison is fine since it's fine to leak how many
          * elements end up in each bucket. */
-        if (args->arr[bucket_idx * BUCKET_SIZE + i].is_dummy) {
+        if (arr[bucket_idx * BUCKET_SIZE + i].is_dummy) {
             num_real_elems = i;
             break;
         }
 
         /* Assign random ORP ID. */
         ret =
-            rand_read(&args->arr[bucket_idx * BUCKET_SIZE + i].orp_id,
+            rand_read(&arr[bucket_idx * BUCKET_SIZE + i].orp_id,
                     sizeof(buffer[i].orp_id));
         if (ret) {
             handle_error_string("Error assigning random ID to %lu",
-                    bucket_idx * BUCKET_SIZE + args->start_idx);
+                    bucket_idx * BUCKET_SIZE + start_idx);
             goto exit;
         }
     }
 
     /* Fetch the next index to copy to. */
     size_t out_idx =
-        __atomic_fetch_add(args->compress_idx, num_real_elems,
+        __atomic_fetch_add(compress_idx, num_real_elems,
                 __ATOMIC_RELAXED);
 
     /* Copy the elements to the output. */
-    memcpy(args->out + out_idx, args->arr + bucket_idx * BUCKET_SIZE,
-            num_real_elems * sizeof(*args->out));
+    memcpy(out + out_idx, arr + bucket_idx * BUCKET_SIZE,
+            num_real_elems * sizeof(*out));
 
 exit:
     if (ret) {

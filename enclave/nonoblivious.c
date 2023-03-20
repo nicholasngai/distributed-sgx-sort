@@ -40,12 +40,15 @@ struct mergesort_first_pass_args {
 };
 static void mergesort_first_pass(void *args_, size_t run_idx) {
     struct mergesort_first_pass_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t length = args->length;
+    size_t num_threads = args->num_threads;
 
-    size_t run_start = run_idx * args->length / args->num_threads;
-    size_t run_end = (run_idx + 1) * args->length / args->num_threads;
+    size_t run_start = run_idx * length / num_threads;
+    size_t run_end = (run_idx + 1) * length / num_threads;
 
     /* Sort using libc quicksort. */
-    qsort_glibc(args->arr + run_start, run_end - run_start, sizeof(*args->arr),
+    qsort_glibc(arr + run_start, run_end - run_start, sizeof(*arr),
             mergesort_comparator, NULL);
 }
 
