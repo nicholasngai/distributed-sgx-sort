@@ -101,8 +101,8 @@ static void assign_random_id(void *args_, size_t i) {
 exit:
     if (ret) {
         int expected = 0;
-        __atomic_compare_exchange_n(&args->ret, &expected, ret,
-                false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        __atomic_compare_exchange_n(&ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
     }
 }
 
