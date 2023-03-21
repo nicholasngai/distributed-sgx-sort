@@ -108,9 +108,27 @@ static void swap_local_range(void *args_, size_t i) {
     }
 }
 
-static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
-        size_t remote_idx, size_t count, size_t offset,
-        size_t left_marked_count) {
+struct swap_remote_range_args {
+    elem_t *arr;
+    size_t length;
+    size_t local_idx;
+    size_t remote_idx;
+    size_t count;
+    size_t offset;
+    size_t left_marked_count;
+    size_t num_threads;
+    volatile int ret;
+};
+static void swap_remote_range(void *args_, size_t thread_idx) {
+    struct swap_remote_range_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t length = args->length;
+    size_t local_idx = args->local_idx;
+    size_t remote_idx = args->remote_idx;
+    size_t count = args->count;
+    size_t offset = args->offset;
+    size_t left_marked_count = args->left_marked_count;
+    size_t num_threads = args->num_threads;
     size_t local_start = get_local_start(world_rank);
     int remote_rank = get_index_address(remote_idx);
     int ret;
@@ -120,13 +138,18 @@ static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
 
     /* Swap elems in maximum chunk sizes of SWAP_CHUNK_SIZE and iterate until no
      * count is remaining. */
-    while (count) {
-        size_t elems_to_swap = MIN(count, SWAP_CHUNK_SIZE);
+    size_t start = thread_idx * count / num_threads;
+    size_t end = (thread_idx + 1) * count / num_threads;
+    size_t our_local_idx = local_idx + start;
+    size_t our_remote_idx = remote_idx + start;
+    size_t our_count = end - start;
+    while (our_count) {
+        size_t elems_to_swap = MIN(our_count, SWAP_CHUNK_SIZE);
 
         /* Post receive for remote elems to buffer. */
         mpi_tls_request_t request;
         ret = mpi_tls_irecv_bytes(buffer,
-                elems_to_swap * sizeof(*buffer), remote_rank, local_idx,
+                elems_to_swap * sizeof(*buffer), remote_rank, our_local_idx,
                 &request);
         if (ret) {
             handle_error_string("Error receiving elem bytes");
@@ -135,8 +158,8 @@ static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
 
         /* Send local elems to the remote. */
         ret =
-            mpi_tls_send_bytes(arr + local_idx - local_start,
-                    elems_to_swap * sizeof(*arr), remote_rank, remote_idx);
+            mpi_tls_send_bytes(arr + our_local_idx - local_start,
+                    elems_to_swap * sizeof(*arr), remote_rank, our_remote_idx);
         if (ret) {
             handle_error_string("Error sending elem bytes");
             goto exit;
@@ -154,23 +177,27 @@ static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
          * lower, then we swap if the local element is lower. Likewise, if the
          * local index is higher, than we swap if the local element is higher.
          * If descending, everything is reversed. */
-        size_t min_idx = MIN(local_idx, remote_idx);
+        size_t min_idx = MIN(our_local_idx, our_remote_idx);
         for (size_t i = 0; i < elems_to_swap; i++) {
             bool cond = s != (min_idx + i >= (offset + left_marked_count) % (length / 2));
-            o_memcpy(&arr[local_idx + i - local_start], &buffer[i],
+            o_memcpy(&arr[our_local_idx + i - local_start], &buffer[i],
                     sizeof(*arr), cond);
         }
 
-        /* Bump pointers, decrement count, and continue. */
-        local_idx += elems_to_swap;
-        remote_idx += elems_to_swap;
-        count -= elems_to_swap;
+        /* Bump pointers, decrement our_count, and continue. */
+        our_local_idx += elems_to_swap;
+        our_remote_idx += elems_to_swap;
+        our_count -= elems_to_swap;
     }
 
     ret = 0;
 
 exit:
-    return ret;
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
 }
 
 static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start,
@@ -214,15 +241,57 @@ static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start
     } else if (a_is_local) {
         size_t a_local_start = MAX(a_start, local_start);
         size_t a_local_end = MIN(a_start + count, local_end);
-        return swap_remote_range(arr, length, a_local_start,
-                b_start + a_local_start - a_start,
-                a_local_end - a_local_start, offset, left_marked_count);
+        struct swap_remote_range_args args = {
+            .arr = arr,
+            .length = length,
+            .local_idx = a_local_start,
+            .remote_idx = b_start + a_local_start - a_start,
+            .count = a_local_end - a_local_start,
+            .offset = offset,
+            .left_marked_count = left_marked_count,
+            .num_threads = num_threads,
+            .ret = 0,
+        };
+        struct thread_work work;
+        if (num_threads > 1) {
+            work.type = THREAD_WORK_ITER;
+            work.iter.func = swap_remote_range;
+            work.iter.arg = &args;
+            work.iter.count = num_threads - 1;
+            thread_work_push(&work);
+        }
+        swap_remote_range(&args, num_threads - 1);
+        if (num_threads > 1) {
+            thread_wait(&work);
+        }
+        return args.ret;
     } else if (b_is_local) {
         size_t b_local_start = MAX(b_start, local_start);
         size_t b_local_end = MIN(b_start + count, local_end);
-        return swap_remote_range(arr, length, b_local_start,
-                a_start + b_local_start - b_start,
-                b_local_end - b_local_start, offset, left_marked_count);
+        struct swap_remote_range_args args = {
+            .arr = arr,
+            .length = length,
+            .local_idx = b_local_start,
+            .remote_idx = a_start + b_local_start - b_start,
+            .count = b_local_end - b_local_start,
+            .offset = offset,
+            .left_marked_count = left_marked_count,
+            .num_threads = num_threads,
+            .ret = 0,
+        };
+        struct thread_work work;
+        if (num_threads > 1) {
+            work.type = THREAD_WORK_ITER;
+            work.iter.func = swap_remote_range;
+            work.iter.arg = &args;
+            work.iter.count = num_threads - 1;
+            thread_work_push(&work);
+        }
+        swap_remote_range(&args, num_threads - 1);
+        if (num_threads > 1) {
+            thread_wait(&work);
+        }
+        return args.ret;
     } else {
         return 0;
     }
