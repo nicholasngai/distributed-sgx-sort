@@ -61,17 +61,17 @@ exit:
 
 /* Swapping. */
 
-static int swap_local_range(elem_t *arr, size_t length, size_t a, size_t b,
-        size_t count, size_t offset, size_t left_marked_count) {
+static int swap_local_range(elem_t *arr, size_t length, size_t offset,
+        size_t left_marked_count) {
     int ret;
 
     bool s =
         (offset % (length / 2) + left_marked_count >= length / 2)
             != (offset >= length / 2);
 
-    for (size_t i = 0; i < count; i++) {
-        bool cond = s != (a + i >= (offset + left_marked_count) % (length / 2));
-        o_memswap(&arr[a + i], &arr[b + i], sizeof(*arr), cond);
+    for (size_t i = 0; i < length / 2; i++) {
+        bool cond = s != (i >= (offset + left_marked_count) % (length / 2));
+        o_memswap(&arr[i], &arr[i + length / 2], sizeof(*arr), cond);
     }
 
     ret = 0;
@@ -79,22 +79,20 @@ static int swap_local_range(elem_t *arr, size_t length, size_t a, size_t b,
     return ret;
 }
 
-static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start,
-        size_t count, size_t offset, size_t left_marked_count) {
+static int swap_range(elem_t *arr, size_t length, size_t offset,
+        size_t left_marked_count) {
     // TODO Assumption: Only either a subset of range A is local, or a subset of
     // range B is local. For local-remote swaps, the subset of the remote range
     // correspondingw with the local range is entirely contained within a single
     // elem. This requires that both the number of elements and the number of
     // elems is a power of 2.
 
-    swap_local_range(arr, length, a_start, b_start, count, offset,
-            left_marked_count);
+    swap_local_range(arr, length, offset, left_marked_count);
     return 0;
 }
 
 struct compact_args {
     elem_t *arr;
-    size_t start;
     size_t length;
     size_t offset;
     int ret;
@@ -102,7 +100,6 @@ struct compact_args {
 static void compact(void *args_) {
     struct compact_args *args = args_;
     elem_t *arr = args->arr;
-    size_t start = args->start;
     size_t length = args->length;
     size_t offset = args->offset;
     int ret;
@@ -113,9 +110,8 @@ static void compact(void *args_) {
     }
 
     if (length == 2) {
-        bool cond =
-            (!arr[start].marked & arr[start + 1].marked) != (bool) offset;
-        o_memswap(&arr[start], &arr[start + 1], sizeof(*arr), cond);
+        bool cond = (!arr[0].marked & arr[1].marked) != (bool) offset;
+        o_memswap(&arr[0], &arr[1], sizeof(*arr), cond);
         ret = 0;
         goto exit;
     }
@@ -123,25 +119,23 @@ static void compact(void *args_) {
     /* Get number of elements in the left half that are marked. The elements
      * contains the prefix sums, so taking the final prefix sum minus the first
      * prefix sum plus 1 if first element is marked should be sufficient. */
-    size_t mid_idx = start + length / 2 - 1;
+    size_t mid_idx = length / 2 - 1;
     size_t left_marked_count;
     size_t mid_prefix_sum = arr[mid_idx].marked_prefix_sum;
 
     /* Compute the number of marked elements. */
     left_marked_count =
-        mid_prefix_sum - arr[start].marked_prefix_sum + arr[start].marked;
+        mid_prefix_sum - arr[0].marked_prefix_sum + arr[0].marked;
 
     /* Recursively compact. */
     struct compact_args left_args = {
         .arr = arr,
-        .start = start,
         .length = length / 2,
         .offset = offset % (length / 2),
         .ret = 0,
     };
     struct compact_args right_args = {
-        .arr = arr,
-        .start = start + length / 2,
+        .arr = arr + length / 2,
         .length = length / 2,
         .offset = (offset + left_marked_count) % (length / 2),
         .ret = 0,
@@ -158,13 +152,9 @@ static void compact(void *args_) {
     }
 
     /* Swap. */
-    ret =
-        swap_range(arr, length, start, start + length / 2, length / 2, offset,
-                left_marked_count);
+    ret = swap_range(arr, length, offset, left_marked_count);
     if (ret) {
-        handle_error_string(
-                "Error swapping range with start %lu and length %lu", start,
-                start + length / 2);
+        handle_error_string("Error swapping range with length %lu", length / 2);
         goto exit;
     }
 
@@ -178,14 +168,12 @@ exit:
 
 struct shuffle_args {
     elem_t *arr;
-    size_t start;
     size_t length;
     int ret;
 };
 static void shuffle(void *args_) {
     struct shuffle_args *args = args_;
     elem_t *arr = args->arr;
-    size_t start = args->start;
     size_t length = args->length;
     int ret;
 
@@ -200,7 +188,7 @@ static void shuffle(void *args_) {
         if (ret) {
             goto exit;
         }
-        o_memswap(&arr[start], &arr[start + 1], sizeof(*arr), cond);
+        o_memswap(&arr[0], &arr[1], sizeof(*arr), cond);
         goto exit;
     }
 
@@ -215,7 +203,7 @@ static void shuffle(void *args_) {
     /* Mark exactly NUM_TO_MARK elems in our partition. */
     size_t total_left = length;
     size_t marked_so_far = 0;
-    for (size_t i = start; i < start + length; i++) {
+    for (size_t i = 0; i < length; i++) {
         bool marked;
         ret = should_mark(num_to_mark - marked_so_far, total_left, &marked);
         if (ret) {
@@ -232,7 +220,6 @@ static void shuffle(void *args_) {
     /* Obliviously compact. */
     struct compact_args compact_args = {
         .arr = arr,
-        .start = start,
         .length = length,
         .offset = 0,
         .ret = 0,
@@ -246,13 +233,11 @@ static void shuffle(void *args_) {
     /* Recursively shuffle. */
     struct shuffle_args left_args = {
         .arr = arr,
-        .start = start,
         .length = length / 2,
         .ret = 0,
     };
     struct shuffle_args right_args = {
-        .arr = arr,
-        .start = start + length / 2,
+        .arr = arr + length / 2,
         .length = length / 2,
         .ret = 0,
     };
@@ -327,7 +312,6 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
 
     struct shuffle_args shuffle_args = {
         .arr = arr,
-        .start = 0,
         .length = length,
         .ret = 0,
     };
