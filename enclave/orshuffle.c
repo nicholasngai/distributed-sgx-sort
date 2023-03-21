@@ -73,39 +73,24 @@ exit:
 
 /* Swapping. */
 
-struct swap_local_range_args {
-    elem_t *arr;
-    size_t length;
-    size_t a;
-    size_t b;
-    size_t count;
-    size_t offset;
-    size_t left_marked_count;
-    size_t num_threads;
-};
-static void swap_local_range(void *args_, size_t i) {
-    struct swap_local_range_args *args = args_;
-    elem_t *arr = args->arr;
-    size_t length = args->length;
-    size_t a = args->a;
-    size_t b = args->b;
-    size_t count = args->count;
-    size_t offset = args->offset;
-    size_t left_marked_count = args->left_marked_count;
-    size_t num_threads = args->num_threads;
+static int swap_local_range(elem_t *arr, size_t length, size_t a, size_t b,
+        size_t count, size_t offset, size_t left_marked_count) {
     size_t local_start = get_local_start(world_rank);
+    int ret;
 
     bool s =
         (offset % (length / 2) + left_marked_count >= length / 2)
             != (offset >= length / 2);
 
-    size_t start = i * count / num_threads;
-    size_t end = (i + 1) * count / num_threads;
-    for (size_t j = start; j < end; j++) {
-        bool cond = s != (a + j >= (offset + left_marked_count) % (length / 2));
-        o_memswap(&arr[a + j - local_start], &arr[b + j - local_start],
+    for (size_t i = 0; i < count; i++) {
+        bool cond = s != (a + i >= (offset + left_marked_count) % (length / 2));
+        o_memswap(&arr[a + i - local_start], &arr[b + i - local_start],
                 sizeof(*arr), cond);
     }
+
+    ret = 0;
+
+    return ret;
 }
 
 struct swap_remote_range_args {
@@ -215,29 +200,8 @@ static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start
     bool b_is_local = b_start < local_end && b_start + count > local_start;
 
     if (a_is_local && b_is_local) {
-        struct swap_local_range_args args = {
-            .arr = arr,
-            .length = length,
-            .a = a_start,
-            .b = b_start,
-            .count = count,
-            .offset = offset,
-            .left_marked_count = left_marked_count,
-            .num_threads = num_threads,
-        };
-        struct thread_work work;
-        if (num_threads > 1) {
-            work.type = THREAD_WORK_ITER;
-            work.iter.func = swap_local_range;
-            work.iter.arg = &args;
-            work.iter.count = num_threads - 1;
-            thread_work_push(&work);
-        }
-        swap_local_range(&args, num_threads - 1);
-        if (num_threads > 1) {
-            thread_wait(&work);
-        }
-        return 0;
+        return swap_local_range(arr, length, a_start, b_start, count, offset,
+                left_marked_count);
     } else if (a_is_local) {
         size_t a_local_start = MAX(a_start, local_start);
         size_t a_local_end = MIN(a_start + count, local_end);
