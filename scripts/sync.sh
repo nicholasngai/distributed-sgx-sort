@@ -14,7 +14,6 @@ for i in {0..31}; do
         rsync \
             -aiv \
             --progress \
-            --exclude .git \
             --exclude benchmarks \
             --delete \
             "${ROOTPATH}/" \

@@ -50,30 +50,15 @@ static size_t get_local_start(int rank) {
 
 /* Swapping. */
 
-struct swap_local_range_args {
-    elem_t *arr;
-    size_t a;
-    size_t b;
-    size_t count;
-    bool descending;
-    size_t num_threads;
-};
-static void swap_local_range(void *args_, size_t i) {
-    struct swap_local_range_args *args = args_;
-    elem_t *arr = args->arr;
-    size_t a = args->a;
-    size_t b = args->b;
-    size_t count = args->count;
-    bool descending = args->descending;
-    size_t num_threads = args->num_threads;
+static void swap_local_range(elem_t *arr, size_t a, size_t b, size_t count,
+        bool descending) {
     size_t local_start = get_local_start(world_rank);
 
-    size_t start = i * count / num_threads;
-    size_t end = (i + 1) * count / num_threads;
-    for (size_t j = start; j < end; j++) {
-        bool cond = arr[a + j - local_start].key > arr[b + j - local_start].key;
+    for (size_t i = 0; i < count; i++) {
+        bool cond =
+            (arr[a + i - local_start].key > arr[b + i - local_start].key);
         cond = cond != descending;
-        o_memswap(&arr[a + j - local_start], &arr[b + j - local_start],
+        o_memswap(&arr[a + i - local_start], &arr[b + i - local_start],
                 sizeof(*arr), cond);
     }
 }
@@ -169,26 +154,7 @@ static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
     bool b_is_local = b_start < local_end && b_start + count > local_start;
 
     if (a_is_local && b_is_local) {
-        struct swap_local_range_args args = {
-            .arr = arr,
-            .a = a_start,
-            .b = b_start,
-            .count = count,
-            .descending = descending,
-            .num_threads = num_threads,
-        };
-        struct thread_work work;
-        if (num_threads > 1) {
-            work.type = THREAD_WORK_ITER;
-            work.iter.func = swap_local_range;
-            work.iter.arg = &args;
-            work.iter.count = num_threads - 1;
-            thread_work_push(&work);
-        }
-        swap_local_range(&args, num_threads - 1);
-        if (num_threads > 1) {
-            thread_wait(&work);
-        }
+        swap_local_range(arr, a_start, b_start, count, descending);
     } else if (a_is_local) {
         size_t a_local_start = MAX(a_start, local_start);
         size_t a_local_end = MIN(a_start + count, local_end);
