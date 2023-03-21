@@ -91,17 +91,7 @@ static int swap_range(elem_t *arr, size_t length, size_t offset,
     return 0;
 }
 
-struct compact_args {
-    elem_t *arr;
-    size_t length;
-    size_t offset;
-    int ret;
-};
-static void compact(void *args_) {
-    struct compact_args *args = args_;
-    elem_t *arr = args->arr;
-    size_t length = args->length;
-    size_t offset = args->offset;
+static int compact(elem_t *arr, size_t length, size_t offset) {
     int ret;
 
     if (length < 2) {
@@ -128,26 +118,14 @@ static void compact(void *args_) {
         mid_prefix_sum - arr[0].marked_prefix_sum + arr[0].marked;
 
     /* Recursively compact. */
-    struct compact_args left_args = {
-        .arr = arr,
-        .length = length / 2,
-        .offset = offset % (length / 2),
-        .ret = 0,
-    };
-    struct compact_args right_args = {
-        .arr = arr + length / 2,
-        .length = length / 2,
-        .offset = (offset + left_marked_count) % (length / 2),
-        .ret = 0,
-    };
-    compact(&left_args);
-    if (left_args.ret) {
-        ret = left_args.ret;
+    ret = compact(arr, length / 2, offset % (length / 2));
+    if (ret) {
         goto exit;
     }
-    compact(&right_args);
-    if (right_args.ret) {
-        ret = right_args.ret;
+    ret =
+        compact(arr + length / 2, length / 2,
+                (offset + left_marked_count) % (length / 2));
+    if (ret) {
         goto exit;
     }
 
@@ -159,22 +137,10 @@ static void compact(void *args_) {
     }
 
 exit:
-    {
-        int expected = 0;
-        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
-                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-    }
+    return ret;
 }
 
-struct shuffle_args {
-    elem_t *arr;
-    size_t length;
-    int ret;
-};
-static void shuffle(void *args_) {
-    struct shuffle_args *args = args_;
-    elem_t *arr = args->arr;
-    size_t length = args->length;
+static int shuffle(elem_t *arr, size_t length) {
     int ret;
 
     if (length < 2) {
@@ -218,48 +184,25 @@ static void shuffle(void *args_) {
     }
 
     /* Obliviously compact. */
-    struct compact_args compact_args = {
-        .arr = arr,
-        .length = length,
-        .offset = 0,
-        .ret = 0,
-    };
-    compact(&compact_args);
-    if (compact_args.ret) {
-        ret = compact_args.ret;
+    ret = compact(arr, length, 0);
+    if (ret) {
         goto exit;
     }
 
     /* Recursively shuffle. */
-    struct shuffle_args left_args = {
-        .arr = arr,
-        .length = length / 2,
-        .ret = 0,
-    };
-    struct shuffle_args right_args = {
-        .arr = arr + length / 2,
-        .length = length / 2,
-        .ret = 0,
-    };
-    shuffle(&left_args);
-    if (left_args.ret) {
-        ret = left_args.ret;
+    ret = shuffle(arr, length / 2);
+    if (ret) {
         goto exit;
     }
-    shuffle(&right_args);
-    if (right_args.ret) {
-        ret = right_args.ret;
+    ret = shuffle(arr + length / 2, length / 2);
+    if (ret) {
         goto exit;
     }
 
     ret = 0;
 
 exit:
-    {
-        int expected = 0;
-        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
-                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-    }
+    return ret;
 }
 
 /* For assign random ORP IDs to ARR[i * LENGTH / NUM_THREADS] to
@@ -310,15 +253,9 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
-    struct shuffle_args shuffle_args = {
-        .arr = arr,
-        .length = length,
-        .ret = 0,
-    };
-    shuffle(&shuffle_args);
-    if (shuffle_args.ret) {
+    ret = shuffle(arr, length);
+    if (ret) {
         handle_error_string("Error in recursive shuffle");
-        ret = shuffle_args.ret;
         goto exit;
     }
 
