@@ -80,8 +80,7 @@ static int swap_local_range(elem_t *arr, size_t length, size_t a, size_t b,
 }
 
 static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start,
-        size_t count, size_t offset, size_t left_marked_count,
-        size_t num_threads UNUSED) {
+        size_t count, size_t offset, size_t left_marked_count) {
     // TODO Assumption: Only either a subset of range A is local, or a subset of
     // range B is local. For local-remote swaps, the subset of the remote range
     // correspondingw with the local range is entirely contained within a single
@@ -98,7 +97,6 @@ struct compact_args {
     size_t start;
     size_t length;
     size_t offset;
-    size_t num_threads;
     int ret;
 };
 static void compact(void *args_) {
@@ -107,7 +105,6 @@ static void compact(void *args_) {
     size_t start = args->start;
     size_t length = args->length;
     size_t offset = args->offset;
-    size_t num_threads = args->num_threads;
     int ret;
 
     if (length < 2) {
@@ -149,8 +146,6 @@ static void compact(void *args_) {
         .offset = (offset + left_marked_count) % (length / 2),
         .ret = 0,
     };
-    left_args.num_threads = 1;
-    right_args.num_threads = 1;
     compact(&left_args);
     if (left_args.ret) {
         ret = left_args.ret;
@@ -165,7 +160,7 @@ static void compact(void *args_) {
     /* Swap. */
     ret =
         swap_range(arr, length, start, start + length / 2, length / 2, offset,
-                left_marked_count, num_threads);
+                left_marked_count);
     if (ret) {
         handle_error_string(
                 "Error swapping range with start %lu and length %lu", start,
@@ -185,7 +180,6 @@ struct shuffle_args {
     elem_t *arr;
     size_t start;
     size_t length;
-    size_t num_threads;
     int ret;
 };
 static void shuffle(void *args_) {
@@ -193,7 +187,6 @@ static void shuffle(void *args_) {
     elem_t *arr = args->arr;
     size_t start = args->start;
     size_t length = args->length;
-    size_t num_threads = args->num_threads;
     int ret;
 
     if (length < 2) {
@@ -242,7 +235,6 @@ static void shuffle(void *args_) {
         .start = start,
         .length = length,
         .offset = 0,
-        .num_threads = num_threads,
         .ret = 0,
     };
     compact(&compact_args);
@@ -264,8 +256,6 @@ static void shuffle(void *args_) {
         .length = length / 2,
         .ret = 0,
     };
-    left_args.num_threads = 1;
-    right_args.num_threads = 1;
     shuffle(&left_args);
     if (left_args.ret) {
         ret = left_args.ret;
@@ -339,7 +329,6 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
         .arr = arr,
         .start = 0,
         .length = length,
-        .num_threads = num_threads,
         .ret = 0,
     };
     shuffle(&shuffle_args);
