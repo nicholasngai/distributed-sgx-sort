@@ -209,8 +209,6 @@ static int init_handshake_session(struct mpi_tls_handshake_session *hs_session,
 
     /* Initialize config. We act as clients to lower ranks and servers to higher
      * ranks. */
-    // TODO Think about downgrade attacks. All clients will be on the same
-    // version, anyway.
     mbedtls_ssl_config_init(&hs_session->conf);
     ret = mbedtls_ssl_config_defaults(&hs_session->conf,
             other_rank > world_rank
@@ -223,6 +221,11 @@ static int init_handshake_session(struct mpi_tls_handshake_session *hs_session,
     }
     mbedtls_ssl_conf_rng(&hs_session->conf, mbedtls_ctr_drbg_random,
             &hs_session->drbg);
+    /* Pin TLS 1.2. */
+    mbedtls_ssl_conf_min_version(&hs_session->conf, MBEDTLS_SSL_MAJOR_VERSION_3,
+            MBEDTLS_SSL_MINOR_VERSION_3);
+    mbedtls_ssl_conf_max_version(&hs_session->conf, MBEDTLS_SSL_MAJOR_VERSION_3,
+            MBEDTLS_SSL_MINOR_VERSION_3);
     mbedtls_ssl_conf_authmode(&hs_session->conf, MBEDTLS_SSL_VERIFY_OPTIONAL);
     mbedtls_ssl_conf_verify(&hs_session->conf, verify_callback, NULL);
     mbedtls_ssl_conf_ca_chain(&hs_session->conf, cert->next, NULL);
