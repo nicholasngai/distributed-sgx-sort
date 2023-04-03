@@ -2,6 +2,7 @@
 #include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -16,6 +17,8 @@
 #include "common/error.h"
 #include "common/ocalls.h"
 #include "common/util.h"
+#include "enclave/synch.h"
+#include "enclave/window.h"
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include <openenclave/enclave.h>
@@ -37,6 +40,8 @@ struct mpi_tls_session {
 
     /* Sliding window for replay protection. */
     uint64_t counter;
+    window_t window;
+    spinlock_t window_lock;
 };
 
 struct mpi_tls_handshake_session {
@@ -407,7 +412,20 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
         goto exit_free_keys;
     }
     for (int i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            /* Skip our own rank. */
+            continue;
+        }
+
         sessions[i].counter = 0;
+        ret = window_init(&sessions[i].window);
+        if (ret) {
+            for (int j = 0; j < i; j++) {
+                window_free(&sessions[j].window);
+            }
+            goto exit_free_sessions;
+        }
+        spinlock_init(&sessions[i].window_lock);
     }
 
     /* Initialize TLS handshake sessions. */
@@ -476,6 +494,12 @@ exit_free_handshake_sessions:
 exit_free_sessions:
     if (ret) {
         /* Only free if function failed. */
+        for (int i = 0; i < world_size; i++) {
+            if (i == world_rank) {
+                continue;
+            }
+            window_free(&sessions[i].window);
+        }
         free(sessions);
     }
 exit_free_keys:
@@ -486,6 +510,12 @@ exit:
 }
 
 void mpi_tls_free(void) {
+    for (int i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            continue;
+        }
+        window_free(&sessions[i].window);
+    }
     free(sessions);
     mbedtls_x509_crt_free(&cert);
     mbedtls_pk_free(&privkey);
@@ -617,6 +647,24 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
         goto exit_free_msg;
     }
     status->count -= sizeof(*msg) + IV_LEN + TAG_LEN;
+
+    /* Check counter uniqueness. */
+    spinlock_lock(&sessions[status->source].window_lock);
+    bool was_set;
+    uint64_t counter = ntohll(msg->counter);
+    ret = window_add(&sessions[status->source].window, counter, &was_set);
+    if (ret) {
+        handle_error_string("Error adding encrypted MPI counter to window");
+        spinlock_unlock(&sessions[status->source].window_lock);
+        goto exit_free_msg;
+    }
+    if (was_set) {
+        handle_error_string("Duplicate counter: %" PRIu64, counter);
+        spinlock_unlock(&sessions[status->source].window_lock);
+        ret = -1;
+        goto exit_free_msg;
+    }
+    spinlock_unlock(&sessions[status->source].window_lock);
 
 exit_free_msg:
     free(msg);
@@ -830,8 +878,26 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
         }
         status->count -= sizeof(*request->msg) + IV_LEN + TAG_LEN;
 
+        /* Check counter uniqueness. */
+        spinlock_lock(&sessions[status->source].window_lock);
+        bool was_set;
+        uint64_t counter = ntohll(request->msg->counter);
+        ret = window_add(&sessions[status->source].window, counter, &was_set);
+        if (ret) {
+            handle_error_string("Error adding encrypted MPI counter to window");
+            spinlock_unlock(&sessions[status->source].window_lock);
+            goto exit;
+        }
+        if (was_set) {
+            handle_error_string("Duplicate counter: %" PRIu64, counter);
+            spinlock_unlock(&sessions[status->source].window_lock);
+            ret = -1;
+            goto exit;
+        }
+        spinlock_unlock(&sessions[status->source].window_lock);
+
         break;
-    }
+        }
     }
 
 exit:
@@ -921,6 +987,24 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
             goto exit;
         }
         status->count -= sizeof(*wait_msg) + IV_LEN + TAG_LEN;
+
+        /* Check counter uniqueness. */
+        spinlock_lock(&sessions[status->source].window_lock);
+        bool was_set;
+        uint64_t counter = ntohll(wait_msg->counter);
+        ret = window_add(&sessions[status->source].window, counter, &was_set);
+        if (ret) {
+            handle_error_string("Error adding encrypted MPI counter to window");
+            spinlock_unlock(&sessions[status->source].window_lock);
+            goto exit;
+        }
+        if (was_set) {
+            handle_error_string("Duplicate counter: %" PRIu64, counter);
+            spinlock_unlock(&sessions[status->source].window_lock);
+            ret = -1;
+            goto exit;
+        }
+        spinlock_unlock(&sessions[status->source].window_lock);
 
         break;
     }

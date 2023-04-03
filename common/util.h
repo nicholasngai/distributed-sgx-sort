@@ -53,14 +53,14 @@ static inline uint64_t htonll(uint64_t hostll) {
         unsigned char bytes[sizeof(uint64_t)];
         uint64_t t;
     } u;
-    u.bytes[0] = (hostll >> (CHAR_BIT * 7)) & CHAR_MAX;
-    u.bytes[1] = (hostll >> (CHAR_BIT * 6)) & CHAR_MAX;
-    u.bytes[2] = (hostll >> (CHAR_BIT * 5)) & CHAR_MAX;
-    u.bytes[3] = (hostll >> (CHAR_BIT * 4)) & CHAR_MAX;
-    u.bytes[4] = (hostll >> (CHAR_BIT * 3)) & CHAR_MAX;
-    u.bytes[5] = (hostll >> (CHAR_BIT * 2)) & CHAR_MAX;
-    u.bytes[6] = (hostll >> CHAR_BIT) & CHAR_MAX;
-    u.bytes[7] = hostll & CHAR_MAX;
+    u.bytes[0] = (hostll >> (CHAR_BIT * 7)) & UCHAR_MAX;
+    u.bytes[1] = (hostll >> (CHAR_BIT * 6)) & UCHAR_MAX;
+    u.bytes[2] = (hostll >> (CHAR_BIT * 5)) & UCHAR_MAX;
+    u.bytes[3] = (hostll >> (CHAR_BIT * 4)) & UCHAR_MAX;
+    u.bytes[4] = (hostll >> (CHAR_BIT * 3)) & UCHAR_MAX;
+    u.bytes[5] = (hostll >> (CHAR_BIT * 2)) & UCHAR_MAX;
+    u.bytes[6] = (hostll >> CHAR_BIT) & UCHAR_MAX;
+    u.bytes[7] = hostll & UCHAR_MAX;
     return u.t;
 }
 
