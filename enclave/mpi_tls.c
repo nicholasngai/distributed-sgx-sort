@@ -1,8 +1,10 @@
 #include "enclave/mpi_tls.h"
+#include <arpa/inet.h>
 #include <assert.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +15,7 @@
 #include "common/defs.h"
 #include "common/error.h"
 #include "common/ocalls.h"
+#include "common/util.h"
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
 #include <openenclave/enclave.h>
@@ -31,6 +34,9 @@ struct mpi_tls_session {
     /* Keys for encryption/authentication. */
     unsigned char send_key[KEY_LEN];
     unsigned char recv_key[KEY_LEN];
+
+    /* Sliding window for replay protection. */
+    uint64_t counter;
 };
 
 struct mpi_tls_handshake_session {
@@ -45,6 +51,16 @@ struct mpi_tls_handshake_session {
 
     struct mpi_tls_session *session;
 };
+
+struct mpi_tls_msg {
+    uint64_t counter;
+    unsigned char ciphertext[];
+} PACKED;
+
+struct mpi_tls_auth_data {
+    int tag;
+    uint64_t counter;
+} PACKED;
 
 static int world_rank;
 static int world_size;
@@ -383,12 +399,15 @@ int mpi_tls_init(size_t world_rank_, size_t world_size_,
         goto exit;
     }
 
-    /* Allocate sessions. */
+    /* Initialize sessions. */
     sessions = malloc(world_size * sizeof(*sessions));
     if (!sessions) {
         perror("malloc encrypted MPI sessions");
         ret = -1;
         goto exit_free_keys;
+    }
+    for (int i = 0; i < world_size; i++) {
+        sessions[i].counter = 0;
     }
 
     /* Initialize TLS handshake sessions. */
@@ -476,53 +495,61 @@ int mpi_tls_send_bytes(const void *buf, size_t count, int dest, int tag) {
     struct mpi_tls_session *session = &sessions[dest];
     int ret;
 
-    /* Allocate send buffer. */
-    size_t out_buf_len = IV_LEN + TAG_LEN + count;
-    unsigned char *out_buf = malloc(out_buf_len);
-    if (!out_buf) {
+    /* Allocate message. */
+    size_t msg_len = sizeof(struct mpi_tls_msg) + IV_LEN + TAG_LEN + count;
+    struct mpi_tls_msg *msg = malloc(msg_len);
+    if (!msg) {
         perror("malloc out_buf");
         ret = -1;
         goto exit;
     }
+    uint64_t counter =
+        __atomic_fetch_add(&session->counter, 1, __ATOMIC_RELAXED);
+    msg->counter = htonll(counter);
 
     /* Generate IV in the first IV_LEN bytes of the buffer. */
-    ret = rand_read(out_buf, IV_LEN);
+    ret = rand_read(msg->ciphertext, IV_LEN);
     if (ret) {
         handle_error_string("Error generating encrypted MPI IV");
-        goto exit_free_out_buf;
+        goto exit_free_msg;
     }
 
     /* Encrypt. Tag goes in the TAG_LEN bytes after the IV. Ciphertext goes in
      * the remaining bytes after the IV and tag. */
-    // TODO Incorporate message tag in ciphertext for authentication.
+    struct mpi_tls_auth_data auth_data = {
+        .tag = htonl(tag),
+        .counter = msg->counter,
+    };
     ret =
-        aad_encrypt(session->send_key, buf, count, NULL, 0, out_buf,
-                out_buf + IV_LEN + TAG_LEN, out_buf + IV_LEN);
+        aad_encrypt(session->send_key, buf, count, &auth_data,
+                sizeof(auth_data), msg->ciphertext,
+                msg->ciphertext + IV_LEN + TAG_LEN, msg->ciphertext + IV_LEN);
     if (ret) {
         handle_error_string("Error encrypting encrypted MPI data");
-        goto exit_free_out_buf;
+        goto exit_free_msg;
     }
 
-    /* Send buffer over MPI. */
+    /* Send message over MPI. */
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result =
-        ocall_mpi_send_bytes(&ret, out_buf, out_buf_len, dest, tag);
+        ocall_mpi_send_bytes(&ret, (const unsigned char *) msg, msg_len, dest,
+                tag);
     if (result != OE_OK) {
         handle_oe_error(ret, "ocall_mpi_send_bytes");
-        goto exit_free_out_buf;
+        goto exit_free_msg;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ret = ocall_mpi_send_bytes(out_buf, out_buf_len, dest, tag);
+    ret = ocall_mpi_send_bytes((const unsigned char *) msg, msg_len, dest, tag);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error sending encrypted MPI data");
-        goto exit_free_out_buf;
+        goto exit_free_msg;
     }
 
-    __atomic_add_fetch(&mpi_tls_bytes_sent, out_buf_len, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&mpi_tls_bytes_sent, msg_len, __ATOMIC_RELAXED);
 
-exit_free_out_buf:
-    free(out_buf);
+exit_free_msg:
+    free(msg);
 exit:
     return ret;
 }
@@ -542,49 +569,57 @@ int mpi_tls_recv_bytes(void *buf, size_t count, int src, int tag,
         tag = OCALL_MPI_ANY_TAG;
     }
 
-    /* Allocate receive buffer. */
-    size_t in_buf_len = IV_LEN + TAG_LEN + count;
-    unsigned char *in_buf = malloc(in_buf_len);
-    if (!in_buf) {
-        perror("malloc in_buf");
+    /* Allocate message. */
+    size_t msg_len = sizeof(struct mpi_tls_msg) + IV_LEN + TAG_LEN + count;
+    struct mpi_tls_msg *msg = malloc(msg_len);
+    if (!msg) {
+        perror("malloc msg");
         ret = -1;
         goto exit;
     }
 
-    /* Receive buffer over MPI. */
+    /* Receive message over MPI. */
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result =
-        ocall_mpi_recv_bytes(&ret, in_buf, in_buf_len, src, tag, status);
+        ocall_mpi_recv_bytes(&ret, (unsigned char *) msg, msg_len, src, tag,
+                status);
     if (result != OE_OK) {
         handle_oe_error(ret, "ocall_mpi_recv_bytes");
-        goto exit_free_in_buf;
+        goto exit_free_msg;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ret = ocall_mpi_recv_bytes(in_buf, in_buf_len, src, tag, status);
+    ret =
+        ocall_mpi_recv_bytes((unsigned char *) msg, msg_len, src, tag, status);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error receiving encrypted MPI data");
-        goto exit_free_in_buf;
+        goto exit_free_msg;
     }
 
     /* Decrypt. */
-    if (status->count < IV_LEN + TAG_LEN) {
+    if ((size_t) status->count
+            < sizeof(struct mpi_tls_msg) + IV_LEN + TAG_LEN) {
         handle_error_string(
                 "Received encrypted MPI data is shorter than IV + tag length");
-        goto exit_free_in_buf;
+        goto exit_free_msg;
     }
+    struct mpi_tls_auth_data auth_data = {
+        .tag = htonl(status->tag),
+        .counter = msg->counter,
+    };
     ret =
         aad_decrypt(sessions[status->source].recv_key,
-            in_buf + IV_LEN + TAG_LEN, status->count - IV_LEN - TAG_LEN, NULL,
-            0, in_buf, in_buf + IV_LEN, buf);
+            msg->ciphertext + IV_LEN + TAG_LEN,
+            status->count - sizeof(*msg) - IV_LEN - TAG_LEN, &auth_data,
+            sizeof(auth_data), msg->ciphertext, msg->ciphertext + IV_LEN, buf);
     if (ret) {
         handle_error_string("Error decrypting encrypted MPI data");
-        goto exit_free_in_buf;
+        goto exit_free_msg;
     }
-    status->count -= IV_LEN + TAG_LEN;
+    status->count -= sizeof(*msg) + IV_LEN + TAG_LEN;
 
-exit_free_in_buf:
-    free(in_buf);
+exit_free_msg:
+    free(msg);
 exit:
     return ret;
 }
@@ -595,31 +630,39 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
     const unsigned char *buf = buf_;
     int ret;
 
-    /* Allocate send buffer. */
-    request->enc_buf_len = IV_LEN + TAG_LEN + count;
-    request->enc_buf = malloc(request->enc_buf_len);
-    if (!request->enc_buf) {
-        perror("malloc request->enc_buf");
+    /* Allocate message. */
+    request->msg_len = sizeof(struct mpi_tls_msg) + IV_LEN + TAG_LEN + count;
+    request->msg = malloc(request->msg_len);
+    if (!request->msg) {
+        perror("malloc request->msg");
         ret = -1;
         goto exit;
     }
+    uint64_t counter =
+        __atomic_fetch_add(&session->counter, 1, __ATOMIC_RELAXED);
+    request->msg->counter = htonll(counter);
 
     /* Generate IV in the first IV_LEN bytes of the buffer. */
-    ret = rand_read(request->enc_buf, IV_LEN);
+    ret = rand_read(request->msg->ciphertext, IV_LEN);
     if (ret) {
         handle_error_string("Error generating encrypted MPI IV");
-        goto exit_free_enc_buf;
+        goto exit_free_msg;
     }
 
     /* Encrypt. Tag goes in the TAG_LEN bytes after the IV. Ciphertext goes in
      * the remaining bytes after the IV and tag. */
-    // TODO Incorporate message tag in ciphertext for authentication.
+    struct mpi_tls_auth_data auth_data = {
+        .tag = htonl(tag),
+        .counter = request->msg->counter,
+    };
     ret =
-        aad_encrypt(session->send_key, buf, count, NULL, 0, request->enc_buf,
-                request->enc_buf + IV_LEN + TAG_LEN, request->enc_buf + IV_LEN);
+        aad_encrypt(session->send_key, buf, count, &auth_data,
+                sizeof(auth_data), request->msg->ciphertext,
+                request->msg->ciphertext + IV_LEN + TAG_LEN,
+                request->msg->ciphertext + IV_LEN);
     if (ret) {
         handle_error_string("Error encrypting encrypted MPI data");
-        goto exit_free_enc_buf;
+        goto exit_free_msg;
     }
 
     request->type = MPI_TLS_SEND;
@@ -627,30 +670,31 @@ int mpi_tls_isend_bytes(const void *buf_, size_t count, int dest, int tag,
     /* Send buffer over MPI. */
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result =
-        ocall_mpi_isend_bytes(&ret, request->enc_buf, request->enc_buf_len,
-                dest, tag, &request->mpi_request);
+        ocall_mpi_isend_bytes(&ret, (const unsigned char *) request->msg,
+                request->msg_len, dest, tag, &request->mpi_request);
     if (result != OE_OK) {
         handle_oe_error(ret, "ocall_mpi_isend_bytes");
-        goto exit_free_enc_buf;
+        goto exit_free_msg;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ret =
-        ocall_mpi_isend_bytes(request->enc_buf, request->enc_buf_len, dest, tag,
+        ocall_mpi_isend_bytes(request->msg,
+                (const unsigned char *) request->msg_len, dest, tag,
                 &request->mpi_request);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error posting send for encrypted MPI data");
-        goto exit_free_enc_buf;
+        goto exit_free_msg;
     }
 
-    __atomic_add_fetch(&mpi_tls_bytes_sent, request->enc_buf_len,
+    __atomic_add_fetch(&mpi_tls_bytes_sent, request->msg_len,
             __ATOMIC_RELAXED);
 
 exit:
     return ret;
 
-exit_free_enc_buf:
-    free(request->enc_buf);
+exit_free_msg:
+    free(request->msg);
     return ret;
 }
 
@@ -666,10 +710,10 @@ int mpi_tls_irecv_bytes(void *buf, size_t count, int src, int tag,
     }
 
     /* Allocate receive buffer. */
-    request->enc_buf_len = IV_LEN + TAG_LEN + count;
-    request->enc_buf = malloc(request->enc_buf_len);
-    if (!request->enc_buf) {
-        perror("malloc request->enc_buf");
+    request->msg_len = sizeof(struct mpi_tls_msg) + IV_LEN + TAG_LEN + count;
+    request->msg = malloc(request->msg_len);
+    if (!request->msg) {
+        perror("malloc request->msg");
         ret = -1;
         goto exit;
     }
@@ -677,20 +721,20 @@ int mpi_tls_irecv_bytes(void *buf, size_t count, int src, int tag,
     /* Receive buffer over MPI. */
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result =
-        ocall_mpi_irecv_bytes(&ret, request->enc_buf_len, src, tag,
+        ocall_mpi_irecv_bytes(&ret, request->msg_len, src, tag,
                 &request->mpi_request);
     if (result != OE_OK) {
         handle_oe_error(ret, "ocall_mpi_recv_bytes");
-        goto exit_free_enc_buf;
+        goto exit_free_msg;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ret =
-        ocall_mpi_irecv_bytes(request->enc_buf_len, src, tag,
+        ocall_mpi_irecv_bytes(request->msg_len, src, tag,
                 &request->mpi_request);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error posting receive for encrypted MPI data");
-        goto exit_free_enc_buf;
+        goto exit_free_msg;
     }
 
     request->buf = buf;
@@ -700,8 +744,8 @@ int mpi_tls_irecv_bytes(void *buf, size_t count, int src, int tag,
 exit:
     return ret;
 
-exit_free_enc_buf:
-    free(request->enc_buf);
+exit_free_msg:
+    free(request->msg);
     return ret;
 }
 
@@ -713,17 +757,17 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
         status = &ignored_status;
     }
 
-    unsigned char *wait_buf;
-    size_t wait_buf_len;
+    struct mpi_tls_msg *wait_msg;
+    size_t wait_msg_len;
     switch (request->type) {
     case MPI_TLS_NULL:
     case MPI_TLS_SEND:
-        wait_buf = NULL;
-        wait_buf_len = 0;
+        wait_msg = NULL;
+        wait_msg_len = 0;
         break;
     case MPI_TLS_RECV:
-        wait_buf = request->enc_buf;
-        wait_buf_len = request->enc_buf_len;
+        wait_msg = request->msg;
+        wait_msg_len = request->msg_len;
         break;
     default:
         handle_error_string("Invalid request type");
@@ -740,14 +784,17 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result =
-        ocall_mpi_wait(&ret, wait_buf, wait_buf_len, &mpi_request, status);
+        ocall_mpi_wait(&ret, (unsigned char *) wait_msg, wait_msg_len,
+                &mpi_request, status);
     if (result != OE_OK) {
         handle_oe_error(result, "ocall_mpi_wait");
         ret = result;
         goto exit;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ret = ocall_mpi_wait(wait_buf, wait_buf_len, &mpi_request, status);
+    ret =
+        ocall_mpi_wait((unsigned char *) wait_msg, wait_msg_len, &mpi_request,
+                status);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error waiting on request");
@@ -761,28 +808,34 @@ int mpi_tls_wait(mpi_tls_request_t *request, mpi_tls_status_t *status) {
 
     case MPI_TLS_RECV: {
         /* Decrypt. */
-        if (status->count < IV_LEN + TAG_LEN) {
+        if ((size_t) status->count
+                < sizeof(struct mpi_tls_msg) + IV_LEN + TAG_LEN) {
             handle_error_string(
                     "Received encrypted MPI data is shorter than IV + tag length");
             goto exit;
         }
+        struct mpi_tls_auth_data auth_data = {
+            .tag = htonl(status->tag),
+            .counter = wait_msg->counter,
+        };
         ret =
             aad_decrypt(sessions[status->source].recv_key,
-                request->enc_buf + IV_LEN + TAG_LEN,
-                status->count - IV_LEN - TAG_LEN, NULL, 0, request->enc_buf,
-                request->enc_buf + IV_LEN, request->buf);
+                request->msg->ciphertext + IV_LEN + TAG_LEN,
+                status->count - sizeof(*request->msg) - IV_LEN - TAG_LEN,
+                &auth_data, sizeof(auth_data), request->msg->ciphertext,
+                request->msg->ciphertext + IV_LEN, request->buf);
         if (ret) {
             handle_error_string("Error decrypting encrypted MPI data");
             goto exit;
         }
-        status->count -= IV_LEN + TAG_LEN;
+        status->count -= sizeof(*request->msg) + IV_LEN + TAG_LEN;
 
         break;
     }
     }
 
 exit:
-    free(request->enc_buf);
+    free(request->msg);
     return ret;
 }
 
@@ -795,17 +848,17 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
         status = &ignored_status;
     }
 
-    unsigned char *wait_buf = NULL;
-    size_t wait_buf_len = 0;
+    struct mpi_tls_msg *wait_msg = NULL;
+    size_t wait_msg_len = 0;
     for (size_t i = 0; i < count; i++) {
         switch (requests[i].type) {
         case MPI_TLS_NULL:
         case MPI_TLS_SEND:
             break;
         case MPI_TLS_RECV:
-            if (requests[i].enc_buf_len > wait_buf_len) {
-                wait_buf = requests[i].enc_buf;
-                wait_buf_len = requests[i].enc_buf_len;
+            if (requests[i].msg_len > wait_msg_len) {
+                wait_msg = requests[i].msg;
+                wait_msg_len = requests[i].msg_len;
             }
             break;
         }
@@ -823,8 +876,8 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_result_t result =
-        ocall_mpi_waitany(&ret, wait_buf, wait_buf_len, count, mpi_requests,
-                index, status);
+        ocall_mpi_waitany(&ret, (unsigned char *) wait_msg, wait_msg_len, count,
+                mpi_requests, index, status);
     if (result != OE_OK) {
         handle_oe_error(result, "ocall_mpi_waitany");
         ret = result;
@@ -832,8 +885,8 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     ret =
-        ocall_mpi_waitany(wait_buf, wait_buf_len, count, mpi_requests, index,
-                status);
+        ocall_mpi_waitany((unsigned char *) wait_msg, wait_msg_len, count,
+                mpi_requests, index, status);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error waiting on request");
@@ -847,26 +900,33 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
 
     case MPI_TLS_RECV: {
         /* Decrypt. */
-        if (status->count < IV_LEN + TAG_LEN) {
+        if ((size_t) status->count
+                < sizeof(struct mpi_tls_msg) + IV_LEN + TAG_LEN) {
             handle_error_string(
                     "Received encrypted MPI data is shorter than IV + tag length");
             goto exit;
         }
+        struct mpi_tls_auth_data auth_data = {
+            .tag = htonl(status->tag),
+            .counter = wait_msg->counter,
+        };
         ret =
             aad_decrypt(sessions[status->source].recv_key,
-                wait_buf + IV_LEN + TAG_LEN, status->count - IV_LEN - TAG_LEN,
-                NULL, 0, wait_buf, wait_buf + IV_LEN, requests[*index].buf);
+                wait_msg->ciphertext + IV_LEN + TAG_LEN,
+                status->count - sizeof(*wait_msg) - IV_LEN - TAG_LEN,
+                &auth_data, sizeof(auth_data), wait_msg->ciphertext,
+                wait_msg->ciphertext + IV_LEN, requests[*index].buf);
         if (ret) {
             handle_error_string("Error decrypting encrypted MPI data");
             goto exit;
         }
-        status->count -= IV_LEN + TAG_LEN;
+        status->count -= sizeof(*wait_msg) + IV_LEN + TAG_LEN;
 
         break;
     }
     }
 
 exit:
-    free(requests[*index].enc_buf);
+    free(requests[*index].msg);
     return ret;
 }

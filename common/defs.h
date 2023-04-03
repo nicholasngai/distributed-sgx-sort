@@ -7,5 +7,6 @@
 #define ROUND_DOWN(a, b) ((a) / (b) * (b))
 #define ROUND_UP(a, b) (((a) + (b) - 1) / (b) * (b))
 #define UNUSED __attribute__((unused))
+#define PACKED __attribute__((packed))
 
 #endif /* distributed-sgx-sort/common/defs.h */
