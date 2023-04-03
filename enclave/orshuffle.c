@@ -291,8 +291,11 @@ static void compact(void *args_) {
     if (start >= local_start && start + length <= local_start + local_length
             && length == 2) {
         bool cond =
-            (!arr[start].marked & arr[start + 1].marked) != (bool) offset;
-        o_memswap(&arr[start], &arr[start + 1], sizeof(*arr), cond);
+            (!arr[start - local_start].marked
+                    & arr[start + 1 - local_start].marked)
+                != (bool) offset;
+        o_memswap(&arr[start - local_start], &arr[start + 1 - local_start],
+                sizeof(*arr), cond);
         ret = 0;
         goto exit;
     }
@@ -492,7 +495,8 @@ static void shuffle(void *args_) {
         if (ret) {
             goto exit;
         }
-        o_memswap(&arr[start], &arr[start + 1], sizeof(*arr), cond);
+        o_memswap(&arr[start - local_start], &arr[start + 1 - local_start],
+                sizeof(*arr), cond);
         goto exit;
     }
 
