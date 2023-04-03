@@ -17,8 +17,8 @@ typedef struct mpi_tls_request {
 
     void *buf;
     size_t count;
-    void *enc_buf;
-    size_t enc_buf_len;
+    struct mpi_tls_msg *msg;
+    size_t msg_len;
 } mpi_tls_request_t;
 
 typedef ocall_mpi_status_t mpi_tls_status_t;

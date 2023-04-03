@@ -13,8 +13,6 @@ MAX_MEM_SIZE=34359738368
 
 mkdir -p "$BENCHMARK_DIR"
 
-./scripts/sync.sh
-
 s=1048576
 last_e=
 for e in 32 16 8 4 2 1; do
@@ -43,7 +41,7 @@ for e in 32 16 8 4 2 1; do
                 continue
             fi
 
-            set_elem_size "$b"
+            set_elem_size "$b" "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
 
             for t in 1 2 4 8; do
                 if [ "$a" = 'bitonic' ]; then

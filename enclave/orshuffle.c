@@ -1,4 +1,7 @@
 #include "enclave/orshuffle.h"
+
+#define LIBOBLIVIOUS_CMOV
+
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
