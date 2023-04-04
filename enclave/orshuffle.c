@@ -72,15 +72,9 @@ static void compact(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
         return;
     }
 
-    /* Get number of elements in the left half that are marked. The elements
-     * contains the prefix sums, so taking the final prefix sum minus the first
-     * prefix sum plus 1 if first element is marked should be sufficient. */
-    size_t mid_idx = length / 2 - 1;
-    size_t left_marked_count;
-    size_t mid_prefix_sum = marked_prefix_sums[mid_idx];
-
     /* Compute the number of marked elements. */
-    left_marked_count = mid_prefix_sum - marked_prefix_sums[0] + marked[0];
+    size_t left_marked_count =
+        marked_prefix_sums[length / 2] - marked_prefix_sums[0];
 
     /* Recursively compact. */
     compact(arr, marked, marked_prefix_sums, length / 2, offset % (length / 2));
