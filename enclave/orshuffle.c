@@ -21,6 +21,7 @@
 #include "enclave/threading.h"
 
 #define SWAP_CHUNK_SIZE 4096
+#define MARK_COINS 2048
 
 static thread_local elem_t *buffer;
 
@@ -42,24 +43,6 @@ exit:
 
 void orshuffle_free(void) {
     free(buffer);
-}
-
-/* Marking helper. */
-
-static int should_mark(size_t left_to_mark, size_t total_left, bool *result) {
-    int ret;
-
-    uint32_t r;
-    ret = rand_read(&r, sizeof(r));
-    if (ret) {
-        handle_error_string("Error reading random value");
-        goto exit;
-    }
-
-    *result = ((uint64_t) r * total_left) >> 32 >= left_to_mark;
-
-exit:
-    return ret;
 }
 
 /* Swapping. */
@@ -94,7 +77,8 @@ static int swap_range(elem_t *arr, size_t length, size_t offset,
     return 0;
 }
 
-static int compact(elem_t *arr, size_t length, size_t offset) {
+static int compact(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
+        size_t length, size_t offset) {
     int ret;
 
     if (length < 2) {
@@ -103,7 +87,7 @@ static int compact(elem_t *arr, size_t length, size_t offset) {
     }
 
     if (length == 2) {
-        bool cond = (!arr[0].marked & arr[1].marked) != (bool) offset;
+        bool cond = (!marked[0] & marked[1]) != (bool) offset;
         o_memswap(&arr[0], &arr[1], sizeof(*arr), cond);
         ret = 0;
         goto exit;
@@ -114,19 +98,20 @@ static int compact(elem_t *arr, size_t length, size_t offset) {
      * prefix sum plus 1 if first element is marked should be sufficient. */
     size_t mid_idx = length / 2 - 1;
     size_t left_marked_count;
-    size_t mid_prefix_sum = arr[mid_idx].marked_prefix_sum;
+    size_t mid_prefix_sum = marked_prefix_sums[mid_idx];
 
     /* Compute the number of marked elements. */
-    left_marked_count =
-        mid_prefix_sum - arr[0].marked_prefix_sum + arr[0].marked;
+    left_marked_count = mid_prefix_sum - marked_prefix_sums[0] + marked[0];
 
     /* Recursively compact. */
-    ret = compact(arr, length / 2, offset % (length / 2));
+    ret =
+        compact(arr, marked, marked_prefix_sums, length / 2, offset % (length / 2));
     if (ret) {
         goto exit;
     }
     ret =
-        compact(arr + length / 2, length / 2,
+        compact(arr + length / 2, marked + length / 2,
+                marked_prefix_sums + length / 2, length / 2,
                 (offset + left_marked_count) % (length / 2));
     if (ret) {
         goto exit;
@@ -143,7 +128,8 @@ exit:
     return ret;
 }
 
-static int shuffle(elem_t *arr, size_t length) {
+static int shuffle(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
+        size_t length) {
     int ret;
 
     if (length < 2) {
@@ -162,42 +148,45 @@ static int shuffle(elem_t *arr, size_t length) {
     }
 
     /* Get the number of elements to mark in this enclave. */
-    struct mark_count_payload {
-        size_t num_to_mark;
-        size_t marked_in_prev;
-    };
     size_t num_to_mark = length / 2;;
-    size_t marked_in_prev = 0;
 
     /* Mark exactly NUM_TO_MARK elems in our partition. */
     size_t total_left = length;
     size_t marked_so_far = 0;
-    for (size_t i = 0; i < length; i++) {
-        bool marked;
-        ret = should_mark(num_to_mark - marked_so_far, total_left, &marked);
+    for (size_t i = 0; i < length; i += MARK_COINS) {
+        uint32_t coins[MARK_COINS];
+        size_t elems_to_mark = MIN(length - i, MARK_COINS);
+        ret = rand_read(coins, elems_to_mark * sizeof(*coins));
         if (ret) {
-            handle_error_string("Error getting random marked");
+            handle_error_string("Error getting random coins for marking");
             goto exit;
         }
-        marked_so_far += marked;
-        total_left--;
 
-        arr[i].marked = marked;
-        arr[i].marked_prefix_sum = marked_in_prev + marked_so_far;
+        for (size_t j = 0; j < MIN(length - i, MARK_COINS); j++) {
+            bool cur_marked =
+                ((uint64_t) coins[j] * total_left) >> 32
+                    >= num_to_mark - marked_so_far;
+            marked_so_far += cur_marked;
+            marked[i + j] = cur_marked;
+            marked_prefix_sums[i + j] = marked_so_far;
+            total_left--;
+        }
     }
 
     /* Obliviously compact. */
-    ret = compact(arr, length, 0);
+    ret = compact(arr, marked, marked_prefix_sums, length, 0);
     if (ret) {
         goto exit;
     }
 
     /* Recursively shuffle. */
-    ret = shuffle(arr, length / 2);
+    ret = shuffle(arr, marked, marked_prefix_sums, length / 2);
     if (ret) {
         goto exit;
     }
-    ret = shuffle(arr + length / 2, length / 2);
+    ret =
+        shuffle(arr + length / 2, marked + length / 2,
+                marked_prefix_sums + length / 2, length / 2);
     if (ret) {
         goto exit;
     }
@@ -256,11 +245,29 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
-    ret = shuffle(arr, length);
+    bool *marked = malloc(length * sizeof(*marked));
+    if (!marked) {
+        perror("malloc marked arr");
+        ret = errno;
+        goto exit;
+    }
+    size_t *marked_prefix_sums = malloc(length * sizeof(*marked_prefix_sums));
+    if (!marked_prefix_sums) {
+        perror("malloc marked prefix sums arr");
+        ret = errno;
+        goto exit_free_marked;
+    }
+
+    ret = shuffle(arr, marked, marked_prefix_sums, length);
     if (ret) {
         handle_error_string("Error in recursive shuffle");
         goto exit;
     }
+
+    free(marked);
+    marked = NULL;
+    free(marked_prefix_sums);
+    marked_prefix_sums = NULL;
 
     /* Assign random IDs to ensure uniqueness. */
     struct assign_random_id_args assign_random_id_args = {
@@ -284,14 +291,14 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     if (assign_random_id_args.ret) {
         handle_error_string("Error assigning random ORP IDs");
         ret = assign_random_id_args.ret;
-        goto exit;
+        goto exit_free_marked_prefix_sums;
     }
 
     struct timespec time_shuffle;
     if (clock_gettime(CLOCK_REALTIME, &time_shuffle)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit;
+        goto exit_free_marked_prefix_sums;
     }
 
     /* Nonoblivious sort. This requires MAX(LOCAL_LENGTH * 2, 512) elements for
@@ -300,7 +307,7 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     elem_t *buf = arr + MAX(length * 2, 512);
     ret = nonoblivious_sort(arr, buf, length, length, num_threads);
     if (ret) {
-        goto exit;
+        goto exit_free_marked_prefix_sums;
     }
 
     /* Copy the output to the final output. */
@@ -311,6 +318,10 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
                 get_time_difference(&time_start, &time_shuffle));
     }
 
+exit_free_marked_prefix_sums:
+    free(marked_prefix_sums);
+exit_free_marked:
+    free(marked);
 exit:
     return ret;
 }
