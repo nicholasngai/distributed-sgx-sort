@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <threads.h>
 #include <time.h>
@@ -47,10 +48,8 @@ void orshuffle_free(void) {
 
 /* Swapping. */
 
-static int swap_local_range(elem_t *arr, size_t length, size_t offset,
-        size_t left_marked_count) {
-    int ret;
-
+static void swap_range(elem_t *arr, size_t length, size_t offset, size_t
+        left_marked_count) {
     bool s =
         (offset % (length / 2) + left_marked_count >= length / 2)
             != (offset >= length / 2);
@@ -59,38 +58,18 @@ static int swap_local_range(elem_t *arr, size_t length, size_t offset,
         bool cond = s != (i >= (offset + left_marked_count) % (length / 2));
         o_memswap(&arr[i], &arr[i + length / 2], sizeof(*arr), cond);
     }
-
-    ret = 0;
-
-    return ret;
 }
 
-static int swap_range(elem_t *arr, size_t length, size_t offset,
-        size_t left_marked_count) {
-    // TODO Assumption: Only either a subset of range A is local, or a subset of
-    // range B is local. For local-remote swaps, the subset of the remote range
-    // correspondingw with the local range is entirely contained within a single
-    // elem. This requires that both the number of elements and the number of
-    // elems is a power of 2.
-
-    swap_local_range(arr, length, offset, left_marked_count);
-    return 0;
-}
-
-static int compact(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
+static void compact(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
         size_t length, size_t offset) {
-    int ret;
-
     if (length < 2) {
-        ret = 0;
-        goto exit;
+        return;
     }
 
     if (length == 2) {
         bool cond = (!marked[0] & marked[1]) != (bool) offset;
         o_memswap(&arr[0], &arr[1], sizeof(*arr), cond);
-        ret = 0;
-        goto exit;
+        return;
     }
 
     /* Get number of elements in the left half that are marked. The elements
@@ -104,47 +83,32 @@ static int compact(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
     left_marked_count = mid_prefix_sum - marked_prefix_sums[0] + marked[0];
 
     /* Recursively compact. */
-    ret =
-        compact(arr, marked, marked_prefix_sums, length / 2, offset % (length / 2));
-    if (ret) {
-        goto exit;
-    }
-    ret =
-        compact(arr + length / 2, marked + length / 2,
-                marked_prefix_sums + length / 2, length / 2,
-                (offset + left_marked_count) % (length / 2));
-    if (ret) {
-        goto exit;
-    }
+    compact(arr, marked, marked_prefix_sums, length / 2, offset % (length / 2));
+    compact(arr + length / 2, marked + length / 2,
+            marked_prefix_sums + length / 2, length / 2,
+            (offset + left_marked_count) % (length / 2));
 
     /* Swap. */
-    ret = swap_range(arr, length, offset, left_marked_count);
-    if (ret) {
-        handle_error_string("Error swapping range with length %lu", length / 2);
-        goto exit;
-    }
-
-exit:
-    return ret;
+    swap_range(arr, length, offset, left_marked_count);
 }
 
-static int shuffle(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
+static void shuffle(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
         size_t length) {
     int ret;
 
     if (length < 2) {
-        ret = 0;
-        goto exit;
+        return;
     }
 
     if (length == 2) {
         bool cond;
         ret = rand_bit(&cond);
         if (ret) {
-            goto exit;
+            handle_error_string("Error getting random bit");
+            abort();
         }
         o_memswap(&arr[0], &arr[1], sizeof(*arr), cond);
-        goto exit;
+        return;
     }
 
     /* Get the number of elements to mark in this enclave. */
@@ -159,7 +123,7 @@ static int shuffle(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
         ret = rand_read(coins, elems_to_mark * sizeof(*coins));
         if (ret) {
             handle_error_string("Error getting random coins for marking");
-            goto exit;
+            abort();
         }
 
         for (size_t j = 0; j < MIN(length - i, MARK_COINS); j++) {
@@ -174,27 +138,14 @@ static int shuffle(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
     }
 
     /* Obliviously compact. */
-    ret = compact(arr, marked, marked_prefix_sums, length, 0);
-    if (ret) {
-        goto exit;
-    }
+    compact(arr, marked, marked_prefix_sums, length, 0);
 
     /* Recursively shuffle. */
-    ret = shuffle(arr, marked, marked_prefix_sums, length / 2);
-    if (ret) {
-        goto exit;
-    }
-    ret =
-        shuffle(arr + length / 2, marked + length / 2,
-                marked_prefix_sums + length / 2, length / 2);
-    if (ret) {
-        goto exit;
-    }
+    shuffle(arr, marked, marked_prefix_sums, length / 2);
+    shuffle(arr + length / 2, marked + length / 2,
+            marked_prefix_sums + length / 2, length / 2);
 
     ret = 0;
-
-exit:
-    return ret;
 }
 
 /* For assign random ORP IDs to ARR[i * LENGTH / NUM_THREADS] to
@@ -258,11 +209,7 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit_free_marked;
     }
 
-    ret = shuffle(arr, marked, marked_prefix_sums, length);
-    if (ret) {
-        handle_error_string("Error in recursive shuffle");
-        goto exit;
-    }
+    shuffle(arr, marked, marked_prefix_sums, length);
 
     free(marked);
     marked = NULL;
