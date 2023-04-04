@@ -4,9 +4,10 @@
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <threads.h>
-#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/cipher.h>
 #include <mbedtls/entropy.h>
 #include "common/defs.h"
 #include "common/error.h"
@@ -21,7 +22,8 @@
 extern mbedtls_entropy_context entropy_ctx;
 
 struct thread_local_ctx {
-    mbedtls_ctr_drbg_context drbg_ctx;
+    mbedtls_cipher_context_t cipher_ctx;
+    unsigned char rand_counter[16];
     unsigned char rand_bytes_pool[RAND_BYTES_POOL_LEN];
     size_t rand_bytes_pool_idx;
     unsigned long rand_bits;
@@ -29,69 +31,40 @@ struct thread_local_ctx {
     struct thread_local_ctx **ptr;
 };
 
-extern struct thread_local_ctx ctxs[THREAD_LOCAL_LIST_MAXLEN];
-extern size_t ctx_len;
 extern thread_local struct thread_local_ctx *ctx;
 
-static inline int crypto_ensure_thread_local_ctx_init(void) {
-    int ret;
-
-    if (!ctx || !ctx->ptr) {
-        size_t idx =
-            __atomic_fetch_add(&ctx_len, 1, __ATOMIC_RELAXED);
-        if (ctx_len >= THREAD_LOCAL_LIST_MAXLEN) {
-            handle_error_string("Too many threads for crypto");
-            ret = -1;
-            goto exit_dec_ctx_len;
-        }
-        ctx = &ctxs[idx];
-        ctx->ptr = &ctx;
-
-        mbedtls_ctr_drbg_init(&ctx->drbg_ctx);
-        ret =
-            mbedtls_ctr_drbg_seed(&ctx->drbg_ctx, mbedtls_entropy_func,
-                    &entropy_ctx, NULL, 0);
-        if (ret) {
-            handle_mbedtls_error(ret, "mbedtls_ctr_drbg_seed");
-            goto exit_free_ctr_drbg;
-        }
-
-        ctx->rand_bytes_pool_idx = RAND_BYTES_POOL_LEN;
-        ctx->rand_bits_left = 0;
-    }
-
-    return 0;
-
-exit_free_ctr_drbg:
-    mbedtls_ctr_drbg_free(&ctx->drbg_ctx);
-exit_dec_ctx_len:
-    __atomic_fetch_sub(&ctx_len, 1, __ATOMIC_RELAXED);
-    ctx = NULL;
-    return ret;
-}
+int crypto_ensure_thread_local_ctx_init(void);
 
 int rand_init(void);
 void rand_free(void);
 
+extern const unsigned char zeroes[RAND_BYTES_POOL_LEN];
+
 static inline int rand_get_random_bytes(void *buf_, size_t n) {
     unsigned char *buf = buf_;
-
     int ret;
+
+    if (n > sizeof(zeroes)) {
+        ret = -1;
+        goto exit;
+    }
 
     ret = crypto_ensure_thread_local_ctx_init();
     if (ret) {
         goto exit;
     }
 
-    while (n) {
-        size_t bytes_to_get = MIN(n, MBEDTLS_CTR_DRBG_MAX_REQUEST);
-        ret = mbedtls_ctr_drbg_random(&ctx->drbg_ctx, buf, bytes_to_get);
-        if (ret) {
-            handle_mbedtls_error(ret, "mbedtls_ctr_drbg_random");
-            goto exit;
+    size_t olen;
+    ret = mbedtls_cipher_update(&ctx->cipher_ctx, zeroes, n, buf, &olen);
+    if (ret) {
+        handle_mbedtls_error(ret, "mbedtls_cipher_crypt");
+        goto exit;
+    }
+    for (size_t i = 0; i < sizeof(ctx->rand_counter); i++) {
+        ctx->rand_counter[i]++;
+        if (ctx->rand_counter[i] != 0) {
+            break;
         }
-        buf += bytes_to_get;
-        n -= bytes_to_get;
     }
 
     ret = 0;
