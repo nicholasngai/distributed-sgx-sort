@@ -21,6 +21,7 @@
 #include "enclave/threading.h"
 
 #define SWAP_CHUNK_SIZE 4096
+#define MARK_COINS 2048
 
 static size_t total_length;
 
@@ -597,16 +598,23 @@ static void shuffle(void *args_) {
         ret = errno;
         goto exit_free_marked;
     }
-    for (size_t i = 0; i < end_idx - start_idx; i++) {
-        ret = should_mark(num_to_mark - marked_so_far, total_left, &marked[i]);
+    for (size_t i = 0; i < end_idx - start_idx; i += MARK_COINS) {
+        uint32_t coins[MARK_COINS];
+        size_t elems_to_mark = MIN(end_idx - start_idx - i, MARK_COINS);
+        ret = rand_read(coins, elems_to_mark * sizeof(*coins));
         if (ret) {
-            handle_error_string("Error getting random marked");
+            handle_error_string("Error getting random coins for marking");
             goto exit_free_marked_prefix_sums;
         }
-        marked_so_far += marked[i];
-        total_left--;
 
-        marked_prefix_sums[i - local_start] = marked_in_prev + marked_so_far;
+        for (size_t j = 0; j < MIN(end_idx - start_idx - i, MARK_COINS); j++) {
+            marked[i + j] =
+                ((uint64_t) coins[j] * total_left) >> 32
+                    >= num_to_mark - marked_so_far;
+            marked_so_far += marked[i + j];
+            total_left--;
+            marked_prefix_sums[i + j] = marked_in_prev + marked_so_far;
+        }
     }
 
     /* Obliviously compact. */
