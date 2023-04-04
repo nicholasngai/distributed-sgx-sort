@@ -518,7 +518,8 @@ struct send_and_receive_partitions_args {
     volatile size_t *send_idxs;
     size_t *send_end_idxs;
     volatile size_t recv_idx;
-    volatile ssize_t total_num_recvs;
+    volatile size_t recv_num;
+    size_t total_num_recvs;
     int ret;
 };
 static void send_and_receive_partitions(void *args_, size_t thread_idx) {
@@ -527,8 +528,9 @@ static void send_and_receive_partitions(void *args_, size_t thread_idx) {
     elem_t *out = args->out;
     volatile size_t *send_idxs = args->send_idxs;
     size_t *send_end_idxs = args->send_end_idxs;
+    volatile size_t *recv_num = &args->recv_num;
+    size_t total_num_recvs = args->total_num_recvs;
     volatile size_t *recv_idx = &args->recv_idx;
-    volatile ssize_t *total_num_recvs = &args->total_num_recvs;
     mpi_tls_request_t requests[world_size];
     int ret;
 
@@ -559,9 +561,8 @@ static void send_and_receive_partitions(void *args_, size_t thread_idx) {
 
     /* Post a receive request. */
     size_t num_requests = 0;
-    ssize_t next_num_recvs =
-        __atomic_fetch_sub(total_num_recvs, 1, __ATOMIC_RELAXED);
-    if (next_num_recvs > 0) {
+    size_t our_recv_num = __atomic_fetch_add(recv_num, 1, __ATOMIC_RELAXED);
+    if (our_recv_num < total_num_recvs) {
         ret =
             mpi_tls_irecv_bytes(buf,
                     SAMPLE_PARTITION_BUF_SIZE * sizeof(*buf),
@@ -625,9 +626,9 @@ static void send_and_receive_partitions(void *args_, size_t thread_idx) {
                         __ATOMIC_RELAXED);
             memcpy(out + copy_idx, buf, req_num_received * sizeof(*out));
 
-            ssize_t next_num_recvs =
-                __atomic_fetch_sub(total_num_recvs, 1, __ATOMIC_RELAXED);
-            if (next_num_recvs > 0) {
+            size_t our_recv_num =
+                __atomic_fetch_add(recv_num, 1, __ATOMIC_RELAXED);
+            if (our_recv_num < total_num_recvs) {
                 ret =
                     mpi_tls_irecv_bytes(buf,
                             SAMPLE_PARTITION_BUF_SIZE * sizeof(*buf),
@@ -833,7 +834,7 @@ static int distributed_sample_partition(elem_t *arr, elem_t *out,
     //while (loop) {}
 
     /* Compute receive statistics. */
-    ssize_t total_num_recvs = 0;
+    size_t total_num_recvs = 0;
     for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
             continue;
@@ -847,6 +848,7 @@ static int distributed_sample_partition(elem_t *arr, elem_t *out,
         .send_idxs = send_idxs,
         .send_end_idxs = send_end_idxs,
         .recv_idx = 0,
+        .recv_num = 0,
         .total_num_recvs = total_num_recvs,
         .ret = 0,
     };
