@@ -471,6 +471,8 @@ exit:
 
 struct shuffle_args {
     elem_t *arr;
+    bool *marked;
+    size_t *marked_prefix_sums;
     size_t start;
     size_t length;
     size_t num_threads;
@@ -479,6 +481,8 @@ struct shuffle_args {
 static void shuffle(void *args_) {
     struct shuffle_args *args = args_;
     elem_t *arr = args->arr;
+    bool *marked = args->marked;
+    size_t *marked_prefix_sums = args->marked_prefix_sums;
     size_t start = args->start;
     size_t length = args->length;
     size_t num_threads = args->num_threads;
@@ -585,35 +589,23 @@ static void shuffle(void *args_) {
     size_t end_idx = MIN(start + length, local_start + local_length);
     size_t total_left = end_idx - start_idx;
     size_t marked_so_far = 0;
-    bool *marked = malloc(total_left * sizeof(*marked));
-    if (!marked) {
-        perror("malloc marked arr");
-        ret = errno;
-        goto exit;
-    }
-    size_t *marked_prefix_sums =
-        malloc(total_left * sizeof(*marked_prefix_sums));
-    if (!marked_prefix_sums) {
-        perror("malloc marked prefix sums arr");
-        ret = errno;
-        goto exit_free_marked;
-    }
     for (size_t i = 0; i < end_idx - start_idx; i += MARK_COINS) {
         uint32_t coins[MARK_COINS];
         size_t elems_to_mark = MIN(end_idx - start_idx - i, MARK_COINS);
         ret = rand_read(coins, elems_to_mark * sizeof(*coins));
         if (ret) {
             handle_error_string("Error getting random coins for marking");
-            goto exit_free_marked_prefix_sums;
+            goto exit;
         }
 
         for (size_t j = 0; j < MIN(end_idx - start_idx - i, MARK_COINS); j++) {
-            marked[i + j] =
+            bool cur_marked =
                 ((uint64_t) coins[j] * total_left) >> 32
                     >= num_to_mark - marked_so_far;
-            marked_so_far += marked[i + j];
+            marked_so_far += cur_marked;
+            marked[i + j] = cur_marked;
+            marked_prefix_sums[i + j] = marked_so_far;
             total_left--;
-            marked_prefix_sums[i + j] = marked_in_prev + marked_so_far;
         }
     }
 
@@ -631,23 +623,22 @@ static void shuffle(void *args_) {
     compact(&compact_args);
     if (compact_args.ret) {
         ret = compact_args.ret;
-        goto exit_free_marked_prefix_sums;
+        goto exit;
     }
-
-    free(marked);
-    marked = NULL;
-    free(marked_prefix_sums);
-    marked_prefix_sums = NULL;
 
     /* Recursively shuffle. */
     struct shuffle_args left_args = {
         .arr = arr,
+        .marked = marked,
+        .marked_prefix_sums = marked_prefix_sums,
         .start = start,
         .length = length / 2,
         .ret = 0,
     };
     struct shuffle_args right_args = {
         .arr = arr,
+        .marked = marked + length / 2,
+        .marked_prefix_sums = marked_prefix_sums + length / 2,
         .start = start + length / 2,
         .length = length / 2,
         .ret = 0,
@@ -658,7 +649,7 @@ static void shuffle(void *args_) {
         shuffle(&left_args);
         if (left_args.ret) {
             ret = left_args.ret;
-            goto exit_free_marked_prefix_sums;
+            goto exit;
         }
     } else if (start + length / 2 <= local_start) {
         /* Left is remote; do just the right. */
@@ -666,7 +657,7 @@ static void shuffle(void *args_) {
         shuffle(&right_args);
         if (right_args.ret) {
             ret = right_args.ret;
-            goto exit_free_marked_prefix_sums;
+            goto exit;
         }
     } else if (num_threads > 1) {
         /* Do both in a threaded manner. */
@@ -683,7 +674,7 @@ static void shuffle(void *args_) {
         shuffle(&left_args);
         if (left_args.ret) {
             ret = left_args.ret;
-            goto exit_free_marked_prefix_sums;
+            goto exit;
         }
         thread_wait(&right_work);
     } else {
@@ -693,21 +684,17 @@ static void shuffle(void *args_) {
         shuffle(&left_args);
         if (left_args.ret) {
             ret = left_args.ret;
-            goto exit_free_marked_prefix_sums;
+            goto exit;
         }
         shuffle(&right_args);
         if (right_args.ret) {
             ret = right_args.ret;
-            goto exit_free_marked_prefix_sums;
+            goto exit;
         }
     }
 
     ret = 0;
 
-exit_free_marked_prefix_sums:
-    free(marked_prefix_sums);
-exit_free_marked:
-    free(marked);
 exit:
     {
         int expected = 0;
@@ -768,8 +755,23 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
 
     total_length = length;
 
+    bool *marked = malloc(length * sizeof(*marked));
+    if (!marked) {
+        perror("malloc marked arr");
+        ret = errno;
+        goto exit;
+    }
+    size_t *marked_prefix_sums = malloc(length * sizeof(*marked_prefix_sums));
+    if (!marked_prefix_sums) {
+        perror("malloc marked prefix sums arr");
+        ret = errno;
+        goto exit_free_marked;
+    }
+
     struct shuffle_args shuffle_args = {
         .arr = arr,
+        .marked = marked,
+        .marked_prefix_sums = marked_prefix_sums,
         .start = 0,
         .length = length,
         .num_threads = num_threads,
@@ -779,8 +781,13 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     if (shuffle_args.ret) {
         handle_error_string("Error in recursive shuffle");
         ret = shuffle_args.ret;
-        goto exit;
+        goto exit_free_marked_prefix_sums;
     }
+
+    free(marked);
+    marked = NULL;
+    free(marked_prefix_sums);
+    marked_prefix_sums = NULL;
 
     /* Assign random IDs to ensure uniqueness. */
     struct assign_random_id_args assign_random_id_args = {
@@ -804,14 +811,14 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     if (assign_random_id_args.ret) {
         handle_error_string("Error assigning random ORP IDs");
         ret = assign_random_id_args.ret;
-        goto exit;
+        goto exit_free_marked_prefix_sums;
     }
 
     struct timespec time_shuffle;
     if (clock_gettime(CLOCK_REALTIME, &time_shuffle)) {
         handle_error_string("Error getting time");
         ret = errno;
-        goto exit;
+        goto exit_free_marked_prefix_sums;
     }
 
     /* Nonoblivious sort. This requires MAX(LOCAL_LENGTH * 2, 512) elements for
@@ -820,7 +827,7 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     elem_t *buf = arr + MAX(local_length * 2, 512);
     ret = nonoblivious_sort(arr, buf, length, local_length, num_threads);
     if (ret) {
-        goto exit;
+        goto exit_free_marked_prefix_sums;
     }
 
     /* Copy the output to the final output. */
@@ -831,6 +838,10 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
                 get_time_difference(&time_start, &time_shuffle));
     }
 
+exit_free_marked_prefix_sums:
+    free(marked_prefix_sums);
+exit_free_marked:
+    free(marked);
 exit:
     return ret;
 }
