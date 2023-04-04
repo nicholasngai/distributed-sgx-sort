@@ -266,6 +266,8 @@ static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start
 
 struct compact_args {
     elem_t *arr;
+    bool *marked;
+    size_t *marked_prefix_sums;
     size_t start;
     size_t length;
     size_t offset;
@@ -275,6 +277,8 @@ struct compact_args {
 static void compact(void *args_) {
     struct compact_args *args = args_;
     elem_t *arr = args->arr;
+    bool *marked = args->marked;
+    size_t *marked_prefix_sums = args->marked_prefix_sums;
     size_t start = args->start;
     size_t length = args->length;
     size_t offset = args->offset;
@@ -290,10 +294,7 @@ static void compact(void *args_) {
 
     if (start >= local_start && start + length <= local_start + local_length
             && length == 2) {
-        bool cond =
-            (!arr[start - local_start].marked
-                    & arr[start + 1 - local_start].marked)
-                != (bool) offset;
+        bool cond = (!marked[0] & marked[1]) != (bool) offset;
         o_memswap(&arr[start - local_start], &arr[start + 1 - local_start],
                 sizeof(*arr), cond);
         ret = 0;
@@ -322,13 +323,12 @@ static void compact(void *args_) {
          * middle element. */
         if (world_rank == master_rank) {
             /* We are also the master, so set the local variable. */
-            mid_prefix_sum = arr[mid_idx - local_start].marked_prefix_sum;
+            mid_prefix_sum = marked_prefix_sums[mid_idx - start];
         } else {
             /* Send it to the master. */
             ret =
-                mpi_tls_send_bytes(
-                        &arr[mid_idx - local_start].marked_prefix_sum,
-                        sizeof(arr->marked_prefix_sum), master_rank, tag);
+                mpi_tls_send_bytes(&marked_prefix_sums[mid_idx - start],
+                        sizeof(*marked_prefix_sums), master_rank, tag);
             if (ret) {
                 handle_error_string(
                         "Error sending prefix marked count for %lu from %d to %d",
@@ -353,9 +353,7 @@ static void compact(void *args_) {
         }
 
         /* Compute the number of marked elements. */
-        left_marked_count =
-            mid_prefix_sum - arr[start - local_start].marked_prefix_sum
-                + arr[start - local_start].marked;
+        left_marked_count = mid_prefix_sum - marked_prefix_sums[0] + marked[0];
 
         /* Send it to everyone else. */
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
@@ -385,6 +383,8 @@ static void compact(void *args_) {
     /* Recursively compact. */
     struct compact_args left_args = {
         .arr = arr,
+        .marked = marked,
+        .marked_prefix_sums = marked_prefix_sums,
         .start = start,
         .length = length / 2,
         .offset = offset % (length / 2),
@@ -392,6 +392,8 @@ static void compact(void *args_) {
     };
     struct compact_args right_args = {
         .arr = arr,
+        .marked = marked + length / 2,
+        .marked_prefix_sums = marked_prefix_sums + length / 2,
         .start = start + length / 2,
         .length = length / 2,
         .offset = (offset + left_marked_count) % (length / 2),
@@ -582,23 +584,36 @@ static void shuffle(void *args_) {
     size_t end_idx = MIN(start + length, local_start + local_length);
     size_t total_left = end_idx - start_idx;
     size_t marked_so_far = 0;
-    for (size_t i = start_idx; i < end_idx; i++) {
-        bool marked;
-        ret = should_mark(num_to_mark - marked_so_far, total_left, &marked);
+    bool *marked = malloc(total_left * sizeof(*marked));
+    if (!marked) {
+        perror("malloc marked arr");
+        ret = errno;
+        goto exit;
+    }
+    size_t *marked_prefix_sums =
+        malloc(total_left * sizeof(*marked_prefix_sums));
+    if (!marked_prefix_sums) {
+        perror("malloc marked prefix sums arr");
+        ret = errno;
+        goto exit_free_marked;
+    }
+    for (size_t i = 0; i < end_idx - start_idx; i++) {
+        ret = should_mark(num_to_mark - marked_so_far, total_left, &marked[i]);
         if (ret) {
             handle_error_string("Error getting random marked");
-            goto exit;
+            goto exit_free_marked_prefix_sums;
         }
-        marked_so_far += marked;
+        marked_so_far += marked[i];
         total_left--;
 
-        arr[i - local_start].marked = marked;
-        arr[i - local_start].marked_prefix_sum = marked_in_prev + marked_so_far;
+        marked_prefix_sums[i - local_start] = marked_in_prev + marked_so_far;
     }
 
     /* Obliviously compact. */
     struct compact_args compact_args = {
         .arr = arr,
+        .marked = marked,
+        .marked_prefix_sums = marked_prefix_sums,
         .start = start,
         .length = length,
         .offset = 0,
@@ -608,8 +623,13 @@ static void shuffle(void *args_) {
     compact(&compact_args);
     if (compact_args.ret) {
         ret = compact_args.ret;
-        goto exit;
+        goto exit_free_marked_prefix_sums;
     }
+
+    free(marked);
+    marked = NULL;
+    free(marked_prefix_sums);
+    marked_prefix_sums = NULL;
 
     /* Recursively shuffle. */
     struct shuffle_args left_args = {
@@ -630,7 +650,7 @@ static void shuffle(void *args_) {
         shuffle(&left_args);
         if (left_args.ret) {
             ret = left_args.ret;
-            goto exit;
+            goto exit_free_marked_prefix_sums;
         }
     } else if (start + length / 2 <= local_start) {
         /* Left is remote; do just the right. */
@@ -638,7 +658,7 @@ static void shuffle(void *args_) {
         shuffle(&right_args);
         if (right_args.ret) {
             ret = right_args.ret;
-            goto exit;
+            goto exit_free_marked_prefix_sums;
         }
     } else if (num_threads > 1) {
         /* Do both in a threaded manner. */
@@ -655,7 +675,7 @@ static void shuffle(void *args_) {
         shuffle(&left_args);
         if (left_args.ret) {
             ret = left_args.ret;
-            goto exit;
+            goto exit_free_marked_prefix_sums;
         }
         thread_wait(&right_work);
     } else {
@@ -665,17 +685,21 @@ static void shuffle(void *args_) {
         shuffle(&left_args);
         if (left_args.ret) {
             ret = left_args.ret;
-            goto exit;
+            goto exit_free_marked_prefix_sums;
         }
         shuffle(&right_args);
         if (right_args.ret) {
             ret = right_args.ret;
-            goto exit;
+            goto exit_free_marked_prefix_sums;
         }
     }
 
     ret = 0;
 
+exit_free_marked_prefix_sums:
+    free(marked_prefix_sums);
+exit_free_marked:
+    free(marked);
 exit:
     {
         int expected = 0;

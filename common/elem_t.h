@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 #define ELEM_SIZE 128
-#define ELEM_STRUCT_SIZE 32
+#define ELEM_STRUCT_SIZE 17
 
 typedef struct elem {
     uint64_t key;
@@ -15,10 +15,6 @@ typedef struct elem {
     /* Bucket sort stuff. */
     uint64_t orp_id;
     bool is_dummy;
-
-    /* ORShuffle stuff. */
-    bool marked;
-    size_t marked_prefix_sum;
 
     unsigned char unused[ELEM_SIZE - ELEM_STRUCT_SIZE];
 } elem_t;
