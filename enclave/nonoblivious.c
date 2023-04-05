@@ -14,6 +14,7 @@
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
 #include "enclave/qsort.h"
+#include "enclave/synch.h"
 #include "enclave/threading.h"
 #include "enclave/util.h"
 
@@ -45,12 +46,15 @@ struct mergesort_first_pass_args {
 };
 static void mergesort_first_pass(void *args_, size_t run_idx) {
     struct mergesort_first_pass_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t length = args->length;
+    size_t num_threads = args->num_threads;
 
-    size_t run_start = run_idx * args->length / args->num_threads;
-    size_t run_end = (run_idx + 1) * args->length / args->num_threads;
+    size_t run_start = run_idx * length / num_threads;
+    size_t run_end = (run_idx + 1) * length / num_threads;
 
     /* Sort using libc quicksort. */
-    qsort_glibc(args->arr + run_start, run_end - run_start, sizeof(*args->arr),
+    qsort_glibc(arr + run_start, run_end - run_start, sizeof(*arr),
             mergesort_comparator, NULL);
 }
 
@@ -125,9 +129,27 @@ static int elem_sample_comparator(const elem_t *a, const struct sample *b) {
     return (comp_key << 1) + comp_orp_id;
 }
 
-static int quickselect_helper(elem_t *arr, size_t length,
-        const size_t *targets, struct sample *samples, size_t num_targets,
-        size_t left, size_t right) {
+struct quickselect_args {
+    elem_t *arr;
+    size_t length;
+    const size_t *targets;
+    struct sample *samples;
+    size_t num_targets;
+    size_t left;
+    size_t right;
+    size_t num_threads;
+    volatile int ret;
+};
+static void quickselect_helper(void *args_) {
+    struct quickselect_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t length = args->length;
+    const size_t *targets = args->targets;
+    struct sample *samples = args->samples;
+    size_t num_targets = args->num_targets;
+    size_t left = args->left;
+    size_t right = args->right;
+    size_t num_threads = args->num_threads;
     int ret;
 
     if (!num_targets) {
@@ -229,28 +251,69 @@ static int quickselect_helper(elem_t *arr, size_t length,
         samples[i] = pivot;
     }
 
-    /* Set up next iteration(s) if we have targets on either side. If the next
-     * split is greater than the target, keep the current split and advance the
-     * head of the slice. Else, advance the split and retract the tail of the
-     * slice. */
-    /* Targets less than pivot. */
-    ret =
-        quickselect_helper(arr, length, targets, samples, geq_target_idx,
-                left, partition_right);
-    if (ret) {
-        goto exit;
-    }
-    /* Targets greater than pivot. */
-    ret =
-        quickselect_helper(arr, length, targets + gt_target_idx,
-                samples + gt_target_idx, num_targets - gt_target_idx,
-                partition_left, right);
-    if (ret) {
-        goto exit;
+    /* Recurse. */
+    struct quickselect_args left_args = {
+        .arr = arr,
+        .length = length,
+        .targets = targets,
+        .samples = samples,
+        .num_targets = geq_target_idx,
+        .left = left,
+        .right = partition_right,
+        .num_threads = MAX((num_threads + 1) / 2, 1),
+        .ret = 0,
+    };
+    struct quickselect_args right_args = {
+        .arr = arr,
+        .length = length,
+        .targets = targets + gt_target_idx,
+        .samples = samples + gt_target_idx,
+        .num_targets = num_targets - gt_target_idx,
+        .left = partition_left,
+        .right = right,
+        .num_threads = MAX(num_threads - left_args.num_threads, 1),
+        .ret = 0,
+    };
+    if (num_threads > 1) {
+        struct thread_work right_work = {
+            .type = THREAD_WORK_SINGLE,
+            .single = {
+                .func = quickselect_helper,
+                .arg = &right_args,
+            },
+        };
+        thread_work_push(&right_work);
+
+        quickselect_helper(&left_args);
+        ret = left_args.ret;
+        if (ret) {
+            goto exit;
+        }
+
+        thread_wait(&right_work);
+        ret = right_args.ret;
+        if (ret) {
+            goto exit;
+        }
+    } else {
+        quickselect_helper(&left_args);
+        ret = left_args.ret;
+        if (ret) {
+            goto exit;
+        }
+        quickselect_helper(&right_args);
+        ret = right_args.ret;
+        if (ret) {
+            goto exit;
+        }
     }
 
 exit:
-    return ret;
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
 }
 
 /* Performs a quickselect algorithm to find NUM_TARGETS target element indices
@@ -258,10 +321,22 @@ exit:
  * LENGTH elements. Resulting samples are stored in SAMPLES. TARGETS must be a
  * sorted array. */
 static int quickselect(elem_t *arr, size_t length, size_t *targets,
-        struct sample *samples, size_t num_targets) {
-    int ret =
-        quickselect_helper(arr, length, targets, samples, num_targets, 0,
-                length);
+        struct sample *samples, size_t num_targets, size_t num_threads) {
+    int ret;
+
+    struct quickselect_args args = {
+        .arr = arr,
+        .length = length,
+        .targets = targets,
+        .samples = samples,
+        .num_targets = num_targets,
+        .left = 0,
+        .right = length,
+        .num_threads = num_threads,
+        .ret = 0,
+    };
+    quickselect_helper(&args);
+    ret = args.ret;
     if (ret) {
         handle_error_string("Error in distributed quickselect");
         goto exit;
@@ -271,9 +346,27 @@ exit:
     return ret;
 }
 
-static int quickpartition_helper(elem_t *arr, size_t length,
-        const struct sample *pivots, size_t *pivot_idxs, size_t num_pivots,
-        size_t left, size_t right) {
+struct quickpartition_args {
+    elem_t *arr;
+    size_t length;
+    const struct sample *pivots;
+    size_t *pivot_idxs;
+    size_t num_pivots;
+    size_t left;
+    size_t right;
+    size_t num_threads;
+    volatile int ret;
+};
+static void quickpartition_helper(void *args_) {
+    struct quickpartition_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t length = args->length;
+    const struct sample *pivots = args->pivots;
+    size_t *pivot_idxs = args->pivot_idxs;
+    size_t num_pivots = args->num_pivots;
+    size_t left = args->left;
+    size_t right = args->right;
+    size_t num_threads = args->num_threads;
     int ret;
 
     if (!num_pivots) {
@@ -331,34 +424,91 @@ static int quickpartition_helper(elem_t *arr, size_t length,
     pivot_idxs[num_pivots / 2] = partition_right;
 
     /* Recurse. */
-    /* Targets less than pivot. */
-    ret =
-        quickpartition_helper(arr, length, pivots, pivot_idxs, num_pivots / 2,
-                left, partition_right);
-    if (ret) {
-        goto exit;
-    }
-    /* Targets greater than pivot. */
-    ret =
-        quickpartition_helper(arr, length, pivots + num_pivots / 2 + 1,
-                pivot_idxs + num_pivots / 2 + 1,
-                num_pivots - (num_pivots / 2 + 1), partition_left, right);
-    if (ret) {
-        goto exit;
+    struct quickpartition_args left_args = {
+        .arr = arr,
+        .length = length,
+        .pivots = pivots,
+        .pivot_idxs = pivot_idxs,
+        .num_pivots = num_pivots / 2,
+        .left = left,
+        .right = partition_right,
+        .num_threads = MAX((num_threads + 1) / 2, 1),
+        .ret = 0,
+    };
+    struct quickpartition_args right_args = {
+        .arr = arr,
+        .length = length,
+        .pivots = pivots + num_pivots / 2 + 1,
+        .pivot_idxs = pivot_idxs + num_pivots / 2 + 1,
+        .num_pivots = num_pivots - (num_pivots / 2 + 1),
+        .left = partition_left,
+        .right = right,
+        .num_threads = MAX(num_threads - left_args.num_threads, 1),
+        .ret = 0,
+    };
+    if (num_threads > 1) {
+        struct thread_work right_work = {
+            .type = THREAD_WORK_SINGLE,
+            .single = {
+                .func = quickpartition_helper,
+                .arg = &right_args,
+            },
+        };
+        thread_work_push(&right_work);
+
+        quickpartition_helper(&left_args);
+        ret = left_args.ret;
+        if (ret) {
+            goto exit;
+        }
+
+        thread_wait(&right_work);
+        ret = right_args.ret;
+        if (ret) {
+            goto exit;
+        }
+    } else {
+        quickpartition_helper(&left_args);
+        ret = left_args.ret;
+        if (ret) {
+            goto exit;
+        }
+        quickpartition_helper(&right_args);
+        ret = right_args.ret;
+        if (ret) {
+            goto exit;
+        }
     }
 
 exit:
-    return ret;
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
 }
 
 /* Use a variation of the quickselect algorithm to partition elements according
  * to NUM_PIVOTS pivots in PIVOTS contained in ARR, which contains LENGTH
  * elements. Resulting indices are PIVOT_IDXS. PIVOTS must be a sorted array. */
 static int quickpartition(elem_t *arr, size_t length,
-        const struct sample *pivots, size_t *pivot_idxs, size_t num_pivots) {
-    int ret =
-        quickpartition_helper(arr, length, pivots, pivot_idxs, num_pivots, 0,
-                length);
+        const struct sample *pivots, size_t *pivot_idxs, size_t num_pivots,
+        size_t num_threads) {
+    int ret;
+
+    struct quickpartition_args args = {
+        .arr = arr,
+        .length = length,
+        .pivots = pivots,
+        .pivot_idxs = pivot_idxs,
+        .num_pivots = num_pivots,
+        .left = 0,
+        .right = length,
+        .num_threads = num_threads,
+        .ret = 0,
+    };
+    quickpartition_helper(&args);
+    ret = args.ret;
     if (ret) {
         handle_error_string("Error in distributed quickselect");
         goto exit;
@@ -368,18 +518,189 @@ exit:
     return ret;
 }
 
+struct send_and_receive_partitions_args {
+    elem_t *arr;
+    elem_t *out;
+    volatile size_t *send_idxs;
+    size_t *send_end_idxs;
+    volatile size_t recv_idx;
+    volatile size_t recv_num;
+    size_t total_num_recvs;
+    int ret;
+};
+static void send_and_receive_partitions(void *args_, size_t thread_idx) {
+    struct send_and_receive_partitions_args *args = args_;
+    elem_t *arr = args->arr;
+    elem_t *out = args->out;
+    volatile size_t *send_idxs = args->send_idxs;
+    size_t *send_end_idxs = args->send_end_idxs;
+    volatile size_t *recv_num = &args->recv_num;
+    size_t total_num_recvs = args->total_num_recvs;
+    volatile size_t *recv_idx = &args->recv_idx;
+    mpi_tls_request_t requests[world_size];
+    int ret;
+
+    /* Send elements to their corresponding enclaves. The elements in the array
+     * have already been partitioned, so it's just a matter of sending them over
+     * in chunks. */
+
+    /* Allocate receive buffer. */
+    elem_t *buf = malloc(SAMPLE_PARTITION_BUF_SIZE * sizeof(*buf));
+    if (!buf) {
+        printf("Error allocating buffer");
+        ret = errno;
+        goto exit;
+    }
+
+    /* Copy own partition's elements to the output. */
+    if (thread_idx == 0) {
+        size_t elems_to_copy =
+            send_end_idxs[world_rank] - send_idxs[world_rank];
+        size_t copy_idx =
+            __atomic_fetch_add(recv_idx, elems_to_copy, __ATOMIC_RELAXED);
+        memcpy(out + copy_idx, arr + send_idxs[world_rank],
+                elems_to_copy * sizeof(*out));
+    }
+
+    /* Wait so that thread 0 has defeintely updated RECV_IDX. */
+    thread_wait_for_all();
+
+    /* Post a receive request. */
+    size_t num_requests = 0;
+    size_t our_recv_num = __atomic_fetch_add(recv_num, 1, __ATOMIC_RELAXED);
+    if (our_recv_num < total_num_recvs) {
+        ret =
+            mpi_tls_irecv_bytes(buf,
+                    SAMPLE_PARTITION_BUF_SIZE * sizeof(*buf),
+                    MPI_TLS_ANY_SOURCE,
+                    SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG, &requests[world_rank]);
+        if (ret) {
+            handle_error_string("Error receiving partitioned data");
+            goto exit_free_buf;
+        }
+        num_requests++;
+    } else {
+        requests[world_rank].type = MPI_TLS_NULL;
+    }
+
+    /* Construct initial requests. REQUESTS is used for all send requests except
+     * for REQUESTS[WORLD_RANK], which is our receive request. */
+    for (int i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            continue;
+        }
+
+        size_t our_send_idx =
+            __atomic_fetch_add(&send_idxs[i], SAMPLE_PARTITION_BUF_SIZE,
+                    __ATOMIC_RELAXED);
+        our_send_idx = MIN(our_send_idx, send_end_idxs[i]);
+        size_t elems_to_send =
+            MIN(send_end_idxs[i] - our_send_idx, SAMPLE_PARTITION_BUF_SIZE);
+        if (elems_to_send > 0) {
+            /* Asynchronously send to enclave. */
+            ret =
+                mpi_tls_isend_bytes(arr + our_send_idx,
+                        elems_to_send * sizeof(*arr), i,
+                        SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG, &requests[i]);
+            if (ret) {
+                handle_error_string("Error sending partitioned data");
+                goto exit_free_buf;
+            }
+            num_requests++;
+        } else {
+            requests[i].type = MPI_TLS_NULL;
+        }
+    }
+
+    /* Get completed requests in a loop. */
+    while (num_requests) {
+        size_t index;
+        mpi_tls_status_t status;
+        ret = mpi_tls_waitany(world_size, requests, &index, &status);
+        if (ret) {
+            handle_error_string("Error waiting on partition requests");
+            goto exit_free_buf;
+        }
+
+        if (index == (size_t) world_rank) {
+            /* Receive request completed. */
+
+            /* Copy received elements to buffer. */
+            size_t req_num_received = status.count / sizeof(*out);
+            size_t copy_idx =
+                __atomic_fetch_add(recv_idx, req_num_received,
+                        __ATOMIC_RELAXED);
+            memcpy(out + copy_idx, buf, req_num_received * sizeof(*out));
+
+            size_t our_recv_num =
+                __atomic_fetch_add(recv_num, 1, __ATOMIC_RELAXED);
+            if (our_recv_num < total_num_recvs) {
+                ret =
+                    mpi_tls_irecv_bytes(buf,
+                            SAMPLE_PARTITION_BUF_SIZE * sizeof(*buf),
+                            MPI_TLS_ANY_SOURCE,
+                            SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG,
+                            &requests[index]);
+                if (ret) {
+                    handle_error_string("Error receiving partitioned data");
+                    goto exit_free_buf;
+                }
+            } else {
+                requests[index].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        } else {
+            /* Send request completed. */
+            size_t our_send_idx =
+                __atomic_fetch_add(&send_idxs[index], SAMPLE_PARTITION_BUF_SIZE,
+                        __ATOMIC_RELAXED);
+            our_send_idx = MIN(our_send_idx, send_end_idxs[index]);
+            size_t elems_to_send =
+                MIN(send_end_idxs[index] - our_send_idx,
+                        SAMPLE_PARTITION_BUF_SIZE);
+            if (elems_to_send > 0) {
+                /* Asynchronously send to enclave. */
+                ret =
+                    mpi_tls_isend_bytes(arr + our_send_idx,
+                            elems_to_send * sizeof(*arr), index,
+                            SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG,
+                            &requests[index]);
+                if (ret) {
+                    handle_error_string("Error sending partitioned data");
+                    goto exit_free_buf;
+                }
+            } else {
+                requests[index].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        }
+    }
+
+    ret = 0;
+
+exit_free_buf:
+    free(buf);
+exit:
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
+}
+
 /* Performs a non-oblivious samplesort across all enclaves. */
-static int distributed_sample_partition(elem_t *restrict arr,
-        elem_t *restrict out, size_t local_length,
-        size_t *restrict out_length) {
+static int distributed_sample_partition(elem_t *arr, elem_t *out,
+        size_t local_length, size_t *out_length, size_t num_threads) {
     int ret;
 
     /* This should never be called if this is a single-enclave sort. */
     assert(world_size > 1);
 
     struct sample samples[world_size - 1];
-    size_t sample_idxs[world_size];
     size_t send_idxs[world_size];
+    size_t send_end_idxs[world_size];
+    size_t send_counts[world_size];
+    size_t recv_counts[world_size];
     mpi_tls_request_t requests[world_size];
 
     /* Partition the data. Rank 0 partitions/samples from its own array using
@@ -388,16 +709,16 @@ static int distributed_sample_partition(elem_t *restrict arr,
     if (world_rank == 0) {
         /* Construct targets to and pass to quickselect. */
         for (size_t i = 0; i < (size_t) world_size - 1; i++) {
-            sample_idxs[i] = local_length * (i + 1) / world_size;
+            send_end_idxs[i] = local_length * (i + 1) / world_size;
         }
         ret =
-            quickselect(arr, local_length, sample_idxs, samples,
-                    world_size - 1);
+            quickselect(arr, local_length, send_end_idxs, samples,
+                    world_size - 1, num_threads);
         if (ret) {
             handle_error_string("Error in quickselect");
             goto exit;
         }
-        sample_idxs[world_size - 1] = local_length;
+        send_end_idxs[world_size - 1] = local_length;
 
         /* Send the samples to everyone else. */
         for (int i = 0; i < world_size; i++) {
@@ -426,140 +747,132 @@ static int distributed_sample_partition(elem_t *restrict arr,
 
         /* Partition with quickpartition. */
         ret =
-            quickpartition(arr, local_length, samples, sample_idxs,
-                    world_size - 1);
+            quickpartition(arr, local_length, samples, send_end_idxs,
+                    world_size - 1, num_threads);
         if (ret) {
             handle_error_string("Error in quickpartition");
             goto exit;
         }
-        sample_idxs[world_size - 1] = local_length;
+        send_end_idxs[world_size - 1] = local_length;
     }
 
-    /* Sending starts at the previous sample index (or 0). */
-    memcpy(send_idxs + 1, sample_idxs, (world_size - 1) * sizeof(*send_idxs));
-    send_idxs[0] = 0;
+    /* Compute send counts. */
+    for (int i = 0; i < world_size; i++) {
+        send_counts[i] = send_end_idxs[i] - (i > 0 ? send_end_idxs[i - 1] : 0);
+    }
 
-    /* Send elements to their corresponding enclaves. The elements in the array
-     * have already bee partitioned, so it's just a matter of sending them over
-     * in chunks. */
-
-    /* Copy own partition's elements to the output. */
-    *out_length = sample_idxs[world_rank] - send_idxs[world_rank];
-    memcpy(out, arr + send_idxs[world_rank], *out_length * sizeof(*out));
-    send_idxs[world_rank] = sample_idxs[world_rank];
-
-    /* Construct initial requests. REQUESTS is used for all send requests except
-     * for REQUESTS[WORLD_RANK], which is our receive request. */
+    /* Sum the number of elements that the other enclaves have sent to us. */
+    /* Send our count to all other enclaves. */
+    size_t recv_count;
     for (int i = 0; i < world_size; i++) {
         if (i == world_rank) {
+            /* Post receive. */
             ret =
-                mpi_tls_irecv_bytes(out + *out_length,
-                        SAMPLE_PARTITION_BUF_SIZE * sizeof(*out),
+                mpi_tls_irecv_bytes(&recv_count, sizeof(recv_count),
                         MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
                         &requests[i]);
             if (ret) {
-                handle_error_string("Error receiving partitioned data");
+                handle_error_string(
+                        "Error posting receive for sample partition count into %d",
+                        world_rank);
                 goto exit;
             }
         } else {
-            /* This could be 0, but we would need to send an empty message to
-             * signal the end of our partition. */
-            size_t elems_to_send =
-                MIN(sample_idxs[i] - send_idxs[i], SAMPLE_PARTITION_BUF_SIZE);
-
-            /* Asynchronously send to enclave. */
+            /* Post send. */
             ret =
-                mpi_tls_isend_bytes(arr + send_idxs[i],
-                        elems_to_send * sizeof(*arr), i,
+                mpi_tls_isend_bytes(&send_counts[i], sizeof(send_counts[i]), i,
                         SAMPLE_PARTITION_MPI_TAG, &requests[i]);
             if (ret) {
-                handle_error_string("Error sending partitioned data");
+                handle_error_string(
+                        "Error posting send for sample partition count from %d to %d",
+                        world_rank, i);
                 goto exit;
-            }
-            send_idxs[i] += elems_to_send;
-
-            /* If this block sent less than SAMPLE_PARTITION_BUF_SIZE elements,
-             * then the receiver will take this as the end of our stream, so
-             * increment SEND_IDXS[i] by 1 to indicate we're truly done. */
-            if (elems_to_send < SAMPLE_PARTITION_BUF_SIZE) {
-                send_idxs[i]++;
             }
         }
     }
 
-    /* Get completed requests in a loop. */
-    size_t ranks_still_receiving = world_size - 1;
-    size_t ranks_still_sending = world_size - 1;
-    while (ranks_still_sending || ranks_still_receiving) {
+    /* Loop (WORLD_SIZE - 1) * 2 times for WORLD_SIZE - 1 sends and
+     * WORLD_SIZE - 1 receives. */
+    size_t receives_left = world_size - 1;
+    recv_counts[world_rank] = send_counts[world_rank];
+    *out_length = recv_counts[world_rank];
+    for (int i = 0; i < (world_size - 1) * 2; i++) {
         size_t index;
         mpi_tls_status_t status;
         ret = mpi_tls_waitany(world_size, requests, &index, &status);
         if (ret) {
-            handle_error_string("Error waiting on partition requests");
+            handle_error_string(
+                    "Error waiting on receives for sample partition count");
             goto exit;
         }
 
         if (index == (size_t) world_rank) {
-            /* Receive request completed. */
-            size_t req_num_received = status.count / sizeof(*out);
-            *out_length += req_num_received;
+            recv_counts[status.source] = recv_count;
+            *out_length += recv_count;
+            receives_left--;
 
-            /* If the number of elements received is less than
-             * SAMPLE_PARTITION_BUF_SIZE, that rank has finished sending. */
-            if (req_num_received < SAMPLE_PARTITION_BUF_SIZE) {
-                ranks_still_receiving--;
-            }
-
-            if (ranks_still_receiving > 0) {
+            if (receives_left > 0) {
+                /* Post receive. */
                 ret =
-                    mpi_tls_irecv_bytes(out + *out_length,
-                            SAMPLE_PARTITION_BUF_SIZE * sizeof(*out),
+                    mpi_tls_irecv_bytes(&recv_count, sizeof(recv_count),
                             MPI_TLS_ANY_SOURCE, SAMPLE_PARTITION_MPI_TAG,
                             &requests[index]);
                 if (ret) {
-                    handle_error_string("Error receiving partitioned data");
+                    handle_error_string(
+                            "Error posting receive for sample partition count into %d",
+                            world_rank);
                     goto exit;
                 }
             } else {
                 requests[index].type = MPI_TLS_NULL;
             }
         } else {
-            /* Send request completed. */
-
-            /* If the send index is equal to the sample index, we need to send
-             * an extra message of length 0 to indicate the end of our
-             * partition. We indicate that we've already sent a sentinel message
-             * of length < SAMPLE_PARTITION_BUF_SIZE message by setting
-             * the send index GREATER than the sample index. */
-            bool keep_rank = send_idxs[index] <= sample_idxs[index];
-            if (keep_rank) {
-                size_t elems_to_send =
-                    MIN(sample_idxs[index] - send_idxs[index],
-                            SAMPLE_PARTITION_BUF_SIZE);
-
-                /* Asynchronously send to enclave. */
-                ret =
-                    mpi_tls_isend_bytes(arr + send_idxs[index],
-                            elems_to_send * sizeof(*arr), index,
-                            SAMPLE_PARTITION_MPI_TAG, &requests[index]);
-                if (ret) {
-                    handle_error_string("Error sending partitioned data");
-                    goto exit;
-                }
-                send_idxs[index] += elems_to_send;
-
-                /* If this block sent less than SAMPLE_PARTITION_BUF_SIZE
-                 * elements, then the receiver will take this as the end of our
-                 * stream, so increment SEND_IDXS[INDEX] by 1 to indicate
-                 * we're truly done. */
-                if (elems_to_send < SAMPLE_PARTITION_BUF_SIZE) {
-                    send_idxs[index]++;
-                }
-            } else {
-                requests[index].type = MPI_TLS_NULL;
-                ranks_still_sending--;
-            }
+            requests[index].type = MPI_TLS_NULL;
         }
+    }
+
+    /* Sending starts at the previous sample index (or 0). */
+    memcpy(send_idxs + 1, send_end_idxs, (world_size - 1) * sizeof(*send_idxs));
+    send_idxs[0] = 0;
+
+    //printf("%d\n", getpid());
+    //volatile int loop = 1;
+    //while (loop) {}
+
+    /* Compute receive statistics. */
+    size_t total_num_recvs = 0;
+    for (int i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            continue;
+        }
+        total_num_recvs += CEIL_DIV(recv_counts[i], SAMPLE_PARTITION_BUF_SIZE);
+    }
+
+    struct send_and_receive_partitions_args args = {
+        .arr = arr,
+        .out = out,
+        .send_idxs = send_idxs,
+        .send_end_idxs = send_end_idxs,
+        .recv_idx = 0,
+        .recv_num = 0,
+        .total_num_recvs = total_num_recvs,
+        .ret = 0,
+    };
+    struct thread_work work = {
+        .type = THREAD_WORK_ITER,
+        .iter = {
+            .func = send_and_receive_partitions,
+            .arg = &args,
+            .count = num_threads,
+        },
+    };
+    thread_work_push(&work);
+    thread_work_until_empty();
+    thread_wait(&work);
+    ret = args.ret;
+    if (ret) {
+        handle_error_string("Error sending and receiving partitions");
+        goto exit;
     }
 
 exit:
@@ -866,7 +1179,8 @@ int nonoblivious_sort(elem_t *arr, elem_t *out, size_t length,
      * element, e.g. enclave 0 has the lowest elements, then enclave 1, etc. */
     size_t partition_length;
     ret =
-        distributed_sample_partition(arr, out, local_length, &partition_length);
+        distributed_sample_partition(arr, out, local_length, &partition_length,
+                num_threads);
     if (ret) {
         handle_error_string("Error in distributed sample partitioning");
         goto exit;

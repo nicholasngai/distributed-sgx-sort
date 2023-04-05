@@ -15,6 +15,7 @@
 #include "enclave/mpi_tls.h"
 #include "enclave/nonoblivious.h"
 #include "enclave/parallel_enc.h"
+#include "enclave/synch.h"
 #include "enclave/threading.h"
 #include "enclave/util.h"
 
@@ -78,24 +79,30 @@ struct assign_random_id_args {
 };
 static void assign_random_id(void *args_, size_t i) {
     struct assign_random_id_args *args = args_;
+    const elem_t *arr = args->arr;
+    elem_t *out = args->out;
+    size_t arr_length = args->arr_length;
+    size_t out_length = args->out_length;
+    size_t result_start_idx = args->result_start_idx;
+    size_t num_threads = args->num_threads;
     int ret;
 
-    size_t start = i * args->out_length / args->num_threads;
-    size_t end = (i + 1) * args->out_length / args->num_threads;
+    size_t start = i * out_length / num_threads;
+    size_t end = (i + 1) * out_length / num_threads;
     for (size_t j = start; j < end; j++) {
-        if (j % 2 == 0 && j < args->arr_length * 2) {
+        if (j % 2 == 0 && j < arr_length * 2) {
             /* Copy elem from index j / 2 and assign ORP ID. */
-            memcpy(&args->out[j], &args->arr[j / 2], sizeof(args->out[j]));
-            ret = rand_read(&args->out[j].orp_id, sizeof(args->out[j].orp_id));
+            memcpy(&out[j], &arr[j / 2], sizeof(out[j]));
+            ret = rand_read(&out[j].orp_id, sizeof(out[j].orp_id));
             if (ret) {
                 handle_error_string("Error assigning random ID to elem %lu",
-                        i + args->result_start_idx);
+                        i + result_start_idx);
                 goto exit;
             }
-            args->out[j].is_dummy = false;
+            out[j].is_dummy = false;
         } else {
             /* Use dummy elem. */
-            args->out[j].is_dummy = true;
+            out[j].is_dummy = true;
         }
     }
 
@@ -104,8 +111,8 @@ static void assign_random_id(void *args_, size_t i) {
 exit:
     if (ret) {
         int expected = 0;
-        __atomic_compare_exchange_n(&args->ret, &expected, ret,
-                false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        __atomic_compare_exchange_n(&ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
     }
 }
 
@@ -335,17 +342,22 @@ struct merge_split_idx_args {
 };
 static void merge_split_idx(void *args_, size_t bucket_idx) {
     struct merge_split_idx_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t bit_idx = args->bit_idx;
+    size_t bucket_stride = args->bucket_stride;
+    size_t bucket_offset = args->bucket_offset;
+    size_t num_buckets = args->num_buckets;
     int ret;
 
-    if (args->bit_idx % 2 == 1) {
-        bucket_idx = args->num_buckets / 2 - bucket_idx - 1;
+    if (bit_idx % 2 == 1) {
+        bucket_idx = num_buckets / 2 - bucket_idx - 1;
     }
 
-    size_t bucket = bucket_idx % (args->bucket_stride / 2)
-        + bucket_idx / (args->bucket_stride / 2) * args->bucket_stride
-        + args->bucket_offset;
-    size_t other_bucket = bucket + args->bucket_stride / 2;
-    ret = merge_split(args->arr, bucket, other_bucket, args->bit_idx);
+    size_t bucket =
+        bucket_idx % (bucket_stride / 2)
+            + bucket_idx / (bucket_stride / 2) * bucket_stride + bucket_offset;
+    size_t other_bucket = bucket + bucket_stride / 2;
+    ret = merge_split(arr, bucket, other_bucket, bit_idx);
     if (ret) {
         handle_error_string(
                 "Error in merge split with indices %lu and %lu\n", bucket,
@@ -355,7 +367,8 @@ static void merge_split_idx(void *args_, size_t bucket_idx) {
 
 exit:
     if (ret) {
-        __atomic_compare_exchange_n(&args->ret, &ret, 0, false,
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
                 __ATOMIC_RELAXED, __ATOMIC_RELAXED);
     }
 }
@@ -365,9 +378,17 @@ exit:
  * the paper, since all merge-split operations will be constrained to the same
  * buckets of memory. */
 static int bucket_route(elem_t *arr, size_t num_levels, size_t start_bit_idx) {
-    size_t num_buckets = get_local_bucket_start(world_size);
     int ret;
 
+    size_t bucket_start = get_local_bucket_start(world_rank);
+    size_t num_buckets = get_local_bucket_start(world_rank + 1) - bucket_start;
+    if (1lu << num_levels > num_buckets) {
+        /* If 2 ^ NUM_LEVELS > NUM_BUCKETS, we need to do some merge-splits
+         * across different enclaves, so we round BUCKET_START down to the
+         * nearest multiple of 2 ^ NUM_LEVELS. */
+        bucket_start -= bucket_start % (1 << num_levels);
+        num_buckets = 1 << num_levels;
+    }
     for (size_t bit_idx = 0; bit_idx < num_levels; bit_idx++) {
         size_t bucket_stride = 2u << bit_idx;
 
@@ -376,7 +397,7 @@ static int bucket_route(elem_t *arr, size_t num_levels, size_t start_bit_idx) {
             .arr = arr,
             .bit_idx = start_bit_idx + bit_idx,
             .bucket_stride = bucket_stride,
-            .bucket_offset = 0,
+            .bucket_offset = bucket_start,
             .num_buckets = num_buckets,
         };
         struct thread_work work = {
@@ -409,72 +430,91 @@ exit:
 
 /* Distribute and receive elements from buckets in ARR to buckets in OUT.
  * Bucket i is sent to enclave i % E. */
-static int distributed_bucket_route(elem_t *arr, elem_t *out) {
+struct distributed_bucket_route_args {
+    elem_t *arr;
+    elem_t *out;
+    volatile size_t *send_idxs;
+    volatile size_t recv_idx;
+    volatile int ret;
+};
+static void distributed_bucket_route(void *args_, size_t thread_idx) {
+    struct distributed_bucket_route_args *args = args_;
+    elem_t *arr = args->arr;
+    elem_t *out = args->out;
+    volatile size_t *send_idxs = args->send_idxs;
+    volatile size_t *recv_idx = &args->recv_idx;
     size_t local_bucket_start = get_local_bucket_start(world_rank);
     size_t num_local_buckets =
         get_local_bucket_start(world_rank + 1) - local_bucket_start;
     int ret;
 
     mpi_tls_request_t requests[world_size];
-    size_t request_idxs[world_size];
 
     if (world_size == 1) {
-        memcpy(out, arr, num_local_buckets * BUCKET_SIZE * sizeof(*out));
+        if (thread_idx == 0) {
+            memcpy(out, arr, num_local_buckets * BUCKET_SIZE * sizeof(*out));
+        }
         ret = 0;
         goto exit;
     }
 
-    elem_t *buf = malloc(BUCKET_SIZE * 2 * sizeof(*buf));
-    if (!buf) {
-        handle_error_string("Error allocating buffer");
-        ret = errno;
-        goto exit;
-    }
+    /* Wait so that thread 0 has defeintely updated RECV_IDX. */
+    thread_wait_for_all();
 
-    /* Send and receive buckets according to the rules above. Note that we are
-     * iterating by enclave instead of by bucket. */
-    size_t num_requests = 0;
-    request_idxs[world_rank] = 0;
-    for (size_t i = 0; i < (size_t) world_size; i++) {
-        requests[i].type = MPI_TLS_NULL;
-    }
-    for (size_t i = 0; i < MIN(num_local_buckets, (size_t) world_size); i++) {
-        int rank = (world_rank * num_local_buckets + i) % world_size;
-        if (rank == world_rank) {
-            /* Copy our own buckets to the output, if any. */
-            for (size_t j = i; j < num_local_buckets; j += world_size) {
-                memcpy(out + request_idxs[rank] * BUCKET_SIZE,
-                        arr + j * BUCKET_SIZE, BUCKET_SIZE * sizeof(*out));
-                request_idxs[rank]++;
-            }
-        } else {
-            /* Post a send request to the remote rank containing the first
-             * bucket. */
-            request_idxs[rank] = i;
-            elem_t *bucket = arr + request_idxs[rank] * BUCKET_SIZE;
-
-            ret = mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
-                    rank, BUCKET_DISTRIBUTE_MPI_TAG, &requests[rank]);
-            if (ret) {
-                handle_error_string("Error sending bucket %lu to %d from %d",
-                        request_idxs[rank] + local_bucket_start, rank,
-                        world_rank);
-                goto exit_free_buf;
-            }
-            num_requests++;
+    /* Copy our own buckets to the output if any. */
+    if (thread_idx == 0) {
+        for (size_t j = send_idxs[world_rank]; j < num_local_buckets;
+                j += world_size) {
+            size_t copy_idx =
+                __atomic_fetch_add(recv_idx, 1, __ATOMIC_RELAXED);
+            memcpy(out + copy_idx * BUCKET_SIZE, arr + j * BUCKET_SIZE,
+                    BUCKET_SIZE * sizeof(*out));
         }
     }
 
     /* Post a receive request for the current bucket. */
-    ret =
-        mpi_tls_irecv_bytes(buf, BUCKET_SIZE * sizeof(*buf),
-                MPI_TLS_ANY_SOURCE, BUCKET_DISTRIBUTE_MPI_TAG,
-                &requests[world_rank]);
-    if (ret) {
-        handle_error_string("Error posting receive into %d", world_rank);
-        goto exit_free_buf;
+    size_t num_requests = 0;
+    size_t our_recv_idx = __atomic_fetch_add(recv_idx, 1, __ATOMIC_RELAXED);
+    if (our_recv_idx < num_local_buckets) {
+        ret =
+            mpi_tls_irecv_bytes(out + our_recv_idx * BUCKET_SIZE,
+                    BUCKET_SIZE * sizeof(*out), MPI_TLS_ANY_SOURCE,
+                    BUCKET_DISTRIBUTE_MPI_TAG, &requests[world_rank]);
+        if (ret) {
+            handle_error_string("Error posting receive into %d", world_rank);
+            goto exit;
+        }
+        num_requests++;
+    } else {
+        requests[world_rank].type = MPI_TLS_NULL;
     }
-    num_requests++;
+
+    /* Send and receive buckets. */
+    for (int i = 0; i < world_size; i++) {
+        if (i == world_rank) {
+            continue;
+        }
+
+        /* Post a send request to the remote rank containing the first
+         * bucket. */
+        size_t our_send_idx =
+            __atomic_fetch_add(&send_idxs[i], world_size, __ATOMIC_RELAXED);
+        if (our_send_idx < num_local_buckets) {
+            ret =
+                mpi_tls_isend_bytes(arr + our_send_idx * BUCKET_SIZE,
+                        BUCKET_SIZE * sizeof(*arr), i,
+                        BUCKET_DISTRIBUTE_MPI_TAG, &requests[i]);
+            if (ret) {
+                handle_error_string(
+                        "Error sending bucket %lu to %d from %d",
+                        our_send_idx + local_bucket_start, i, world_rank);
+                goto exit;
+            }
+            num_requests++;
+        } else {
+            requests[i].type = MPI_TLS_NULL;
+        }
+    }
 
     while (num_requests) {
         size_t index;
@@ -482,27 +522,24 @@ static int distributed_bucket_route(elem_t *arr, elem_t *out) {
         ret = mpi_tls_waitany(world_size, requests, &index, &status);
         if (ret) {
             handle_error_string("Error waiting on requests");
-            goto exit_free_buf;
+            goto exit;
         }
 
         if (index == (size_t) world_rank) {
             /* This was the receive request. */
 
-            /* Write the received bucket out. */
-            memcpy(out + request_idxs[index] * BUCKET_SIZE, buf,
-                    BUCKET_SIZE * sizeof(*out));
-            request_idxs[index]++;
-
-            if (request_idxs[index] < num_local_buckets) {
+            size_t our_recv_idx =
+                __atomic_fetch_add(recv_idx, 1, __ATOMIC_RELAXED);
+            if (our_recv_idx < num_local_buckets) {
                 /* Post receive for the next bucket. */
                 ret =
-                    mpi_tls_irecv_bytes(buf, BUCKET_SIZE * sizeof(*buf),
-                            MPI_TLS_ANY_SOURCE, BUCKET_DISTRIBUTE_MPI_TAG,
-                            &requests[index]);
+                    mpi_tls_irecv_bytes(out + our_recv_idx * BUCKET_SIZE,
+                            BUCKET_SIZE * sizeof(*out), MPI_TLS_ANY_SOURCE,
+                            BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string("Error posting receive into %d",
                             (int) index);
-                    goto exit_free_buf;
+                    goto exit;
                 }
             } else {
                 /* Nullify the receiving request. */
@@ -512,20 +549,20 @@ static int distributed_bucket_route(elem_t *arr, elem_t *out) {
         } else {
             /* This was a send request. */
 
-            request_idxs[index] += world_size;
-
-            if (request_idxs[index] < num_local_buckets) {
-                elem_t *bucket = arr + request_idxs[index] * BUCKET_SIZE;
-
+            size_t our_send_idx =
+                __atomic_fetch_add(&send_idxs[index], world_size,
+                        __ATOMIC_RELAXED);
+            if (our_send_idx < num_local_buckets) {
                 ret =
-                    mpi_tls_isend_bytes(bucket, BUCKET_SIZE * sizeof(*bucket),
-                            index, BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
+                    mpi_tls_isend_bytes(arr + our_send_idx * BUCKET_SIZE,
+                            BUCKET_SIZE * sizeof(*arr), index,
+                            BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string(
                             "Error sending bucket %lu from %d to %d",
-                            request_idxs[index] + local_bucket_start,
-                            world_rank, (int) index);
-                    goto exit_free_buf;
+                            our_send_idx + local_bucket_start, world_rank,
+                            (int) index);
+                    goto exit;
                 }
             } else {
                 /* Nullify the sending request. */
@@ -535,10 +572,14 @@ static int distributed_bucket_route(elem_t *arr, elem_t *out) {
         }
     }
 
-exit_free_buf:
-    free(buf);
+    ret = 0;
+
 exit:
-    return ret;
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
 }
 
 /* Compares elements first by sorting real elements before dummy elements, and
@@ -566,10 +607,14 @@ struct permute_and_compress_args {
 };
 static void permute_and_compress(void *args_, size_t bucket_idx) {
     struct permute_and_compress_args *args = args_;
+    elem_t *arr = args->arr;
+    elem_t *out = args->out;
+    size_t start_idx = args->start_idx;
+    size_t *compress_idx = args->compress_idx;
     int ret;
 
-    o_sort(args->arr + bucket_idx * BUCKET_SIZE, BUCKET_SIZE,
-            sizeof(*args->arr), permute_comparator, NULL);
+    o_sort(arr + bucket_idx * BUCKET_SIZE, BUCKET_SIZE, sizeof(*arr),
+            permute_comparator, NULL);
 
     /* Assign random ORP IDs and Count real elements. */
     size_t num_real_elems = 0;
@@ -578,30 +623,30 @@ static void permute_and_compress(void *args_, size_t bucket_idx) {
          * are sorted before the dummy elements at this point. This
          * non-oblivious comparison is fine since it's fine to leak how many
          * elements end up in each bucket. */
-        if (args->arr[bucket_idx * BUCKET_SIZE + i].is_dummy) {
+        if (arr[bucket_idx * BUCKET_SIZE + i].is_dummy) {
             num_real_elems = i;
             break;
         }
 
         /* Assign random ORP ID. */
         ret =
-            rand_read(&args->arr[bucket_idx * BUCKET_SIZE + i].orp_id,
+            rand_read(&arr[bucket_idx * BUCKET_SIZE + i].orp_id,
                     sizeof(buffer[i].orp_id));
         if (ret) {
             handle_error_string("Error assigning random ID to %lu",
-                    bucket_idx * BUCKET_SIZE + args->start_idx);
+                    bucket_idx * BUCKET_SIZE + start_idx);
             goto exit;
         }
     }
 
     /* Fetch the next index to copy to. */
     size_t out_idx =
-        __atomic_fetch_add(args->compress_idx, num_real_elems,
+        __atomic_fetch_add(compress_idx, num_real_elems,
                 __ATOMIC_RELAXED);
 
     /* Copy the elements to the output. */
-    memcpy(args->out + out_idx, args->arr + bucket_idx * BUCKET_SIZE,
-            num_real_elems * sizeof(*args->out));
+    memcpy(out + out_idx, arr + bucket_idx * BUCKET_SIZE,
+            num_real_elems * sizeof(*out));
 
 exit:
     if (ret) {
@@ -624,6 +669,8 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         get_local_bucket_start(world_rank + 1) - local_bucket_start;
     size_t local_start = local_bucket_start * BUCKET_SIZE;
     size_t local_length = num_local_buckets * BUCKET_SIZE;
+
+    size_t send_idxs[world_size];
 
     elem_t *buf = arr + local_length;
 
@@ -672,7 +719,29 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
-    ret = distributed_bucket_route(buf, arr);
+    /* Distributed bucket routing. */
+    for (int i = 0; i < world_size; i++) {
+        send_idxs[i] = (i - local_bucket_start % world_size) % world_size;
+    }
+    struct distributed_bucket_route_args args = {
+        .arr = buf,
+        .out = arr,
+        .send_idxs = send_idxs,
+        .recv_idx = 0,
+        .ret = 0,
+    };
+    struct thread_work work = {
+        .type = THREAD_WORK_ITER,
+        .iter = {
+            .func = distributed_bucket_route,
+            .arg = &args,
+            .count = num_threads,
+        },
+    };
+    thread_work_push(&work);
+    thread_work_until_empty();
+    thread_wait(&work);
+    ret = args.ret;
     if (ret) {
         handle_error_string("Error distributing elements in butterfly network");
         goto exit;

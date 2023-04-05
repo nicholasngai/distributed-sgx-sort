@@ -26,9 +26,7 @@ int world_size;
 static elem_t *arr;
 static size_t total_length;
 
-unsigned char key[16];
-
-volatile enum sort_type sort_type;
+static volatile enum sort_type sort_type;
 
 int ecall_sort_init(int world_rank_, int world_size_, size_t num_threads) {
     int ret;

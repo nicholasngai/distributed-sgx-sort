@@ -17,8 +17,8 @@ typedef struct mpi_tls_request {
 
     void *buf;
     size_t count;
-    size_t bio_len;
-    void *bio;
+    struct mpi_tls_msg *msg;
+    size_t msg_len;
 } mpi_tls_request_t;
 
 typedef ocall_mpi_status_t mpi_tls_status_t;
@@ -48,8 +48,9 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
 
 #define BUCKET_DISTRIBUTE_MPI_TAG 1
 #define SAMPLE_PARTITION_MPI_TAG 2
-#define QUICKSELECT_MPI_TAG 3
-#define BALANCE_MPI_TAG 4
-#define OCOMPACT_MARKED_COUNT_MPI_TAG 5
+#define SAMPLE_PARTITION_DISTRIBUTE_MPI_TAG 3
+#define QUICKSELECT_MPI_TAG 4
+#define BALANCE_MPI_TAG 5
+#define OCOMPACT_MARKED_COUNT_MPI_TAG 6
 
 #endif /* distributed-sgx-sort/enclave/mpi_tls.h */

@@ -32,7 +32,8 @@ ENCLAVE_OBJS = \
 	$(ENCLAVE_DIR)/qsort.o \
 	$(ENCLAVE_DIR)/synch.o \
 	$(ENCLAVE_DIR)/threading.o \
-	$(ENCLAVE_DIR)/util.o
+	$(ENCLAVE_DIR)/util.o \
+	$(ENCLAVE_DIR)/window.o
 ENCLAVE_DEPS = $(ENCLAVE_OBJS:.o=.d)
 ENCLAVE_KEY = $(ENCLAVE_DIR)/$(APP_NAME).pem
 ENCLAVE_PUBKEY = $(ENCLAVE_KEY:.pem=.pub)

@@ -1,4 +1,7 @@
 #include "enclave/orshuffle.h"
+
+#define LIBOBLIVIOUS_CMOV
+
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -79,42 +82,47 @@ exit:
 
 /* Swapping. */
 
-struct swap_local_range_args {
+static int swap_local_range(elem_t *arr, size_t length, size_t a, size_t b,
+        size_t count, size_t offset, size_t left_marked_count) {
+    size_t local_start = get_local_start(world_rank);
+    int ret;
+
+    bool s =
+        (offset % (length / 2) + left_marked_count >= length / 2)
+            != (offset >= length / 2);
+
+    for (size_t i = 0; i < count; i++) {
+        bool cond = s != (a + i >= (offset + left_marked_count) % (length / 2));
+        o_memswap(&arr[a + i - local_start], &arr[b + i - local_start],
+                sizeof(*arr), cond);
+    }
+
+    ret = 0;
+
+    return ret;
+}
+
+struct swap_remote_range_args {
     elem_t *arr;
     size_t length;
-    size_t a;
-    size_t b;
+    size_t local_idx;
+    size_t remote_idx;
     size_t count;
     size_t offset;
     size_t left_marked_count;
     size_t num_threads;
+    volatile int ret;
 };
-static void swap_local_range(void *args_, size_t i) {
-    struct swap_local_range_args *args = args_;
-    size_t local_start = get_local_start(world_rank);
-
-    bool s =
-        (args->offset % (args->length / 2) + args->left_marked_count
-                >= args->length / 2)
-            != (args->offset >= args->length / 2);
-
-    size_t start = i * args->count / args->num_threads;
-    size_t end = (i + 1) * args->count / args->num_threads;
-    for (size_t j = start; j < end; j++) {
-        bool cond =
-            s
-                != (args->a + j
-                        >= (args->offset + args->left_marked_count)
-                            % (args->length / 2));
-        o_memswap(&args->arr[args->a + j - local_start],
-                &args->arr[args->b + j - local_start],
-                sizeof(*args->arr), cond);
-    }
-}
-
-static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
-        size_t remote_idx, size_t count, size_t offset,
-        size_t left_marked_count) {
+static void swap_remote_range(void *args_, size_t thread_idx) {
+    struct swap_remote_range_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t length = args->length;
+    size_t local_idx = args->local_idx;
+    size_t remote_idx = args->remote_idx;
+    size_t count = args->count;
+    size_t offset = args->offset;
+    size_t left_marked_count = args->left_marked_count;
+    size_t num_threads = args->num_threads;
     size_t local_start = get_local_start(world_rank);
     int remote_rank = get_index_address(remote_idx);
     int ret;
@@ -124,13 +132,18 @@ static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
 
     /* Swap elems in maximum chunk sizes of SWAP_CHUNK_SIZE and iterate until no
      * count is remaining. */
-    while (count) {
-        size_t elems_to_swap = MIN(count, SWAP_CHUNK_SIZE);
+    size_t start = thread_idx * count / num_threads;
+    size_t end = (thread_idx + 1) * count / num_threads;
+    size_t our_local_idx = local_idx + start;
+    size_t our_remote_idx = remote_idx + start;
+    size_t our_count = end - start;
+    while (our_count) {
+        size_t elems_to_swap = MIN(our_count, SWAP_CHUNK_SIZE);
 
         /* Post receive for remote elems to buffer. */
         mpi_tls_request_t request;
         ret = mpi_tls_irecv_bytes(buffer,
-                elems_to_swap * sizeof(*buffer), remote_rank, local_idx,
+                elems_to_swap * sizeof(*buffer), remote_rank, our_local_idx,
                 &request);
         if (ret) {
             handle_error_string("Error receiving elem bytes");
@@ -139,8 +152,8 @@ static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
 
         /* Send local elems to the remote. */
         ret =
-            mpi_tls_send_bytes(arr + local_idx - local_start,
-                    elems_to_swap * sizeof(*arr), remote_rank, remote_idx);
+            mpi_tls_send_bytes(arr + our_local_idx - local_start,
+                    elems_to_swap * sizeof(*arr), remote_rank, our_remote_idx);
         if (ret) {
             handle_error_string("Error sending elem bytes");
             goto exit;
@@ -158,23 +171,27 @@ static int swap_remote_range(elem_t *arr, size_t length, size_t local_idx,
          * lower, then we swap if the local element is lower. Likewise, if the
          * local index is higher, than we swap if the local element is higher.
          * If descending, everything is reversed. */
-        size_t min_idx = MIN(local_idx, remote_idx);
+        size_t min_idx = MIN(our_local_idx, our_remote_idx);
         for (size_t i = 0; i < elems_to_swap; i++) {
             bool cond = s != (min_idx + i >= (offset + left_marked_count) % (length / 2));
-            o_memcpy(&arr[local_idx + i - local_start], &buffer[i],
+            o_memcpy(&arr[our_local_idx + i - local_start], &buffer[i],
                     sizeof(*arr), cond);
         }
 
-        /* Bump pointers, decrement count, and continue. */
-        local_idx += elems_to_swap;
-        remote_idx += elems_to_swap;
-        count -= elems_to_swap;
+        /* Bump pointers, decrement our_count, and continue. */
+        our_local_idx += elems_to_swap;
+        our_remote_idx += elems_to_swap;
+        our_count -= elems_to_swap;
     }
 
     ret = 0;
 
 exit:
-    return ret;
+    if (ret) {
+        int expected = 0;
+        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    }
 }
 
 static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start,
@@ -192,41 +209,62 @@ static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start
     bool b_is_local = b_start < local_end && b_start + count > local_start;
 
     if (a_is_local && b_is_local) {
-        struct swap_local_range_args args = {
+        return swap_local_range(arr, length, a_start, b_start, count, offset,
+                left_marked_count);
+    } else if (a_is_local) {
+        size_t a_local_start = MAX(a_start, local_start);
+        size_t a_local_end = MIN(a_start + count, local_end);
+        struct swap_remote_range_args args = {
             .arr = arr,
             .length = length,
-            .a = a_start,
-            .b = b_start,
-            .count = count,
+            .local_idx = a_local_start,
+            .remote_idx = b_start + a_local_start - a_start,
+            .count = a_local_end - a_local_start,
             .offset = offset,
             .left_marked_count = left_marked_count,
             .num_threads = num_threads,
+            .ret = 0,
         };
         struct thread_work work;
         if (num_threads > 1) {
             work.type = THREAD_WORK_ITER;
-            work.iter.func = swap_local_range;
+            work.iter.func = swap_remote_range;
             work.iter.arg = &args;
             work.iter.count = num_threads - 1;
             thread_work_push(&work);
         }
-        swap_local_range(&args, num_threads - 1);
+        swap_remote_range(&args, num_threads - 1);
         if (num_threads > 1) {
             thread_wait(&work);
         }
-        return 0;
-    } else if (a_is_local) {
-        size_t a_local_start = MAX(a_start, local_start);
-        size_t a_local_end = MIN(a_start + count, local_end);
-        return swap_remote_range(arr, length, a_local_start,
-                b_start + a_local_start - a_start,
-                a_local_end - a_local_start, offset, left_marked_count);
+        return args.ret;
     } else if (b_is_local) {
         size_t b_local_start = MAX(b_start, local_start);
         size_t b_local_end = MIN(b_start + count, local_end);
-        return swap_remote_range(arr, length, b_local_start,
-                a_start + b_local_start - b_start,
-                b_local_end - b_local_start, offset, left_marked_count);
+        struct swap_remote_range_args args = {
+            .arr = arr,
+            .length = length,
+            .local_idx = b_local_start,
+            .remote_idx = a_start + b_local_start - b_start,
+            .count = b_local_end - b_local_start,
+            .offset = offset,
+            .left_marked_count = left_marked_count,
+            .num_threads = num_threads,
+            .ret = 0,
+        };
+        struct thread_work work;
+        if (num_threads > 1) {
+            work.type = THREAD_WORK_ITER;
+            work.iter.func = swap_remote_range;
+            work.iter.arg = &args;
+            work.iter.count = num_threads - 1;
+            thread_work_push(&work);
+        }
+        swap_remote_range(&args, num_threads - 1);
+        if (num_threads > 1) {
+            thread_wait(&work);
+        }
+        return args.ret;
     } else {
         return 0;
     }
@@ -242,29 +280,33 @@ struct compact_args {
 };
 static void compact(void *args_) {
     struct compact_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t start = args->start;
+    size_t length = args->length;
+    size_t offset = args->offset;
+    size_t num_threads = args->num_threads;
     size_t local_start = get_local_start(world_rank);
     size_t local_length = get_local_start(world_rank + 1) - local_start;
     int ret;
 
-    if (args->length < 2) {
+    if (length < 2) {
         ret = 0;
         goto exit;
     }
 
-    if (args->start >= local_start
-            && args->start + args->length <= local_start + local_length
-            && args->length == 2) {
+    if (start >= local_start && start + length <= local_start + local_length
+            && length == 2) {
         bool cond =
-            (!args->arr[args->start].marked & args->arr[args->start + 1].marked)
-                != (bool) args->offset;
-        o_memswap(&args->arr[args->start], &args->arr[args->start + 1],
-                sizeof(*args->arr), cond);
+            (!arr[start - local_start].marked
+                    & arr[start + 1 - local_start].marked)
+                != (bool) offset;
+        o_memswap(&arr[start - local_start], &arr[start + 1 - local_start],
+                sizeof(*arr), cond);
         ret = 0;
         goto exit;
     }
 
-    if (args->start >= local_start + local_length
-            || args->start + args->length <= local_start) {
+    if (start >= local_start + local_length || start + length <= local_start) {
         ret = 0;
         goto exit;
     }
@@ -272,14 +314,13 @@ static void compact(void *args_) {
     /* Get number of elements in the left half that are marked. The elements
      * contains the prefix sums, so taking the final prefix sum minus the first
      * prefix sum plus 1 if first element is marked should be sufficient. */
-    int master_rank = get_index_address(args->start);
-    int final_rank = get_index_address(args->start + args->length - 1);
-    size_t mid_idx = args->start + args->length / 2 - 1;
+    int master_rank = get_index_address(start);
+    int final_rank = get_index_address(start + length - 1);
+    size_t mid_idx = start + length / 2 - 1;
     int mid_rank = get_index_address(mid_idx);
     /* Use START + LENGTH / 2 as the tag (the midpoint index) since that's
      * guaranteed to be unique across iterations. */
-    int tag =
-        OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2);
+    int tag = OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (start + length / 2);
     size_t left_marked_count;
     size_t mid_prefix_sum;
     if (world_rank == mid_rank) {
@@ -287,13 +328,13 @@ static void compact(void *args_) {
          * middle element. */
         if (world_rank == master_rank) {
             /* We are also the master, so set the local variable. */
-            mid_prefix_sum = args->arr[mid_idx - local_start].marked_prefix_sum;
+            mid_prefix_sum = arr[mid_idx - local_start].marked_prefix_sum;
         } else {
             /* Send it to the master. */
             ret =
                 mpi_tls_send_bytes(
-                        &args->arr[mid_idx - local_start].marked_prefix_sum,
-                        sizeof(args->arr->marked_prefix_sum), master_rank, tag);
+                        &arr[mid_idx - local_start].marked_prefix_sum,
+                        sizeof(arr->marked_prefix_sum), master_rank, tag);
             if (ret) {
                 handle_error_string(
                         "Error sending prefix marked count for %lu from %d to %d",
@@ -312,16 +353,15 @@ static void compact(void *args_) {
             if (ret) {
                 handle_error_string(
                         "Error receiving prefix marked count for %lu from %d into %d",
-                        args->start, final_rank, world_rank);
+                        start, final_rank, world_rank);
                 goto exit;
             }
         }
 
         /* Compute the number of marked elements. */
         left_marked_count =
-            mid_prefix_sum
-                - args->arr[args->start - local_start].marked_prefix_sum
-                + args->arr[args->start - local_start].marked;
+            mid_prefix_sum - arr[start - local_start].marked_prefix_sum
+                + arr[start - local_start].marked;
 
         /* Send it to everyone else. */
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
@@ -350,39 +390,39 @@ static void compact(void *args_) {
 
     /* Recursively compact. */
     struct compact_args left_args = {
-        .arr = args->arr,
-        .start = args->start,
-        .length = args->length / 2,
-        .offset = args->offset % (args->length / 2),
+        .arr = arr,
+        .start = start,
+        .length = length / 2,
+        .offset = offset % (length / 2),
         .ret = 0,
     };
     struct compact_args right_args = {
-        .arr = args->arr,
-        .start = args->start + args->length / 2,
-        .length = args->length / 2,
-        .offset = (args->offset + left_marked_count) % (args->length / 2),
+        .arr = arr,
+        .start = start + length / 2,
+        .length = length / 2,
+        .offset = (offset + left_marked_count) % (length / 2),
         .ret = 0,
     };
-    if (args->start + args->length / 2 >= local_start + local_length) {
+    if (start + length / 2 >= local_start + local_length) {
         /* Right is remote; do just the left. */
-        left_args.num_threads = args->num_threads;
+        left_args.num_threads = num_threads;
         compact(&left_args);
         if (left_args.ret) {
             ret = left_args.ret;
             goto exit;
         }
-    } else if (args->start + args->length / 2 <= local_start) {
+    } else if (start + length / 2 <= local_start) {
         /* Left is remote; do just the right. */
-        right_args.num_threads = args->num_threads;
+        right_args.num_threads = num_threads;
         compact(&right_args);
         if (right_args.ret) {
             ret = right_args.ret;
             goto exit;
         }
-    } else if (args->num_threads > 1) {
+    } else if (num_threads > 1) {
         /* Do both in a threaded manner. */
-        left_args.num_threads = args->num_threads / 2;
-        right_args.num_threads = args->num_threads / 2;
+        left_args.num_threads = num_threads / 2;
+        right_args.num_threads = num_threads / 2;
         struct thread_work right_work = {
             .type = THREAD_WORK_SINGLE,
             .single = {
@@ -415,13 +455,12 @@ static void compact(void *args_) {
 
     /* Swap. */
     ret =
-        swap_range(args->arr, args->length, args->start,
-                args->start + args->length / 2, args->length / 2, args->offset,
-                left_marked_count, args->num_threads);
+        swap_range(arr, length, start, start + length / 2, length / 2, offset,
+                left_marked_count, num_threads);
     if (ret) {
         handle_error_string(
-                "Error swapping range with start %lu and length %lu",
-                args->start, args->start + args->length / 2);
+                "Error swapping range with start %lu and length %lu", start,
+                start + length / 2);
         goto exit;
     }
 
@@ -442,30 +481,32 @@ struct shuffle_args {
 };
 static void shuffle(void *args_) {
     struct shuffle_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t start = args->start;
+    size_t length = args->length;
+    size_t num_threads = args->num_threads;
     size_t local_start = get_local_start(world_rank);
     size_t local_length = get_local_start(world_rank + 1) - local_start;
     int ret;
 
-    if (args->length < 2) {
+    if (length < 2) {
         ret = 0;
         goto exit;
     }
 
-    if (args->start >= local_start
-            && args->start + args->length <= local_start + local_length
-            && args->length == 2) {
+    if (start >= local_start && start + length <= local_start + local_length
+            && length == 2) {
         bool cond;
         ret = rand_bit(&cond);
         if (ret) {
             goto exit;
         }
-        o_memswap(&args->arr[args->start], &args->arr[args->start + 1],
-                sizeof(*args->arr), cond);
+        o_memswap(&arr[start - local_start], &arr[start + 1 - local_start],
+                sizeof(*arr), cond);
         goto exit;
     }
 
-    if (args->start >= local_start + local_length
-            || args->start + args->length <= local_start) {
+    if (start >= local_start + local_length || start + length <= local_start) {
         ret = 0;
         goto exit;
     }
@@ -475,15 +516,14 @@ static void shuffle(void *args_) {
         size_t num_to_mark;
         size_t marked_in_prev;
     };
-    int master_rank = get_index_address(args->start);
-    int final_rank = get_index_address(args->start + args->length - 1);
-    int tag =
-        OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (args->start + args->length / 2);
+    int master_rank = get_index_address(start);
+    int final_rank = get_index_address(start + length - 1);
+    int tag = OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (start + length / 2);
     size_t num_to_mark;
     size_t marked_in_prev;
     if (master_rank == final_rank) {
         /* For single enclave, the number of elements is just half. */
-        num_to_mark = args->length / 2;
+        num_to_mark = length / 2;
         marked_in_prev = 0;
     } else if (world_rank == master_rank) {
         /* If we are the first enclave containing this slice, do a bunch of
@@ -492,13 +532,13 @@ static void shuffle(void *args_) {
         size_t enclave_mark_counts[world_size];
         memset(enclave_mark_counts, '\0', sizeof(enclave_mark_counts));
 
-        size_t total_left_to_mark = args->length / 2;
-        size_t total_left = args->length;
+        size_t total_left_to_mark = length / 2;
+        size_t total_left = length;
         for (int rank = master_rank; rank <= final_rank; rank++) {
             size_t rank_start = get_local_start(rank);
             size_t rank_end = get_local_start(rank + 1);
-            for (size_t i = MAX(args->start, rank_start);
-                    i < MIN(args->start + args->length, rank_end); i++) {
+            for (size_t i = MAX(start, rank_start);
+                    i < MIN(start + length, rank_end); i++) {
                 bool marked;
                 ret = should_mark(total_left_to_mark, total_left, &marked);
                 if (ret) {
@@ -544,8 +584,8 @@ static void shuffle(void *args_) {
     }
 
     /* Mark exactly NUM_TO_MARK elems in our partition. */
-    size_t start_idx = MAX(args->start, local_start);
-    size_t end_idx = MIN(args->start + args->length, local_start + local_length);
+    size_t start_idx = MAX(start, local_start);
+    size_t end_idx = MIN(start + length, local_start + local_length);
     size_t total_left = end_idx - start_idx;
     size_t marked_so_far = 0;
     for (size_t i = start_idx; i < end_idx; i++) {
@@ -558,18 +598,17 @@ static void shuffle(void *args_) {
         marked_so_far += marked;
         total_left--;
 
-        args->arr[i - local_start].marked = marked;
-        args->arr[i - local_start].marked_prefix_sum =
-            marked_in_prev + marked_so_far;
+        arr[i - local_start].marked = marked;
+        arr[i - local_start].marked_prefix_sum = marked_in_prev + marked_so_far;
     }
 
     /* Obliviously compact. */
     struct compact_args compact_args = {
-        .arr = args->arr,
-        .start = args->start,
-        .length = args->length,
+        .arr = arr,
+        .start = start,
+        .length = length,
         .offset = 0,
-        .num_threads = args->num_threads,
+        .num_threads = num_threads,
         .ret = 0,
     };
     compact(&compact_args);
@@ -580,37 +619,37 @@ static void shuffle(void *args_) {
 
     /* Recursively shuffle. */
     struct shuffle_args left_args = {
-        .arr = args->arr,
-        .start = args->start,
-        .length = args->length / 2,
+        .arr = arr,
+        .start = start,
+        .length = length / 2,
         .ret = 0,
     };
     struct shuffle_args right_args = {
-        .arr = args->arr,
-        .start = args->start + args->length / 2,
-        .length = args->length / 2,
+        .arr = arr,
+        .start = start + length / 2,
+        .length = length / 2,
         .ret = 0,
     };
-    if (args->start + args->length / 2 >= local_start + local_length) {
+    if (start + length / 2 >= local_start + local_length) {
         /* Right is remote; do just the left. */
-        left_args.num_threads = args->num_threads;
+        left_args.num_threads = num_threads;
         shuffle(&left_args);
         if (left_args.ret) {
             ret = left_args.ret;
             goto exit;
         }
-    } else if (args->start + args->length / 2 <= local_start) {
+    } else if (start + length / 2 <= local_start) {
         /* Left is remote; do just the right. */
-        right_args.num_threads = args->num_threads;
+        right_args.num_threads = num_threads;
         shuffle(&right_args);
         if (right_args.ret) {
             ret = right_args.ret;
             goto exit;
         }
-    } else if (args->num_threads > 1) {
+    } else if (num_threads > 1) {
         /* Do both in a threaded manner. */
-        left_args.num_threads = args->num_threads / 2;
-        right_args.num_threads = args->num_threads / 2;
+        left_args.num_threads = num_threads / 2;
+        right_args.num_threads = num_threads / 2;
         struct thread_work right_work = {
             .type = THREAD_WORK_SINGLE,
             .single = {
@@ -662,15 +701,19 @@ struct assign_random_id_args {
 };
 static void assign_random_id(void *args_, size_t i) {
     struct assign_random_id_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t length = args->length;
+    size_t start_idx = args->start_idx;
+    size_t num_threads = args->num_threads;
     int ret;
 
-    size_t start = i * args->length / args->num_threads;
-    size_t end = (i + 1) * args->length / args->num_threads;
+    size_t start = i * length / num_threads;
+    size_t end = (i + 1) * length / num_threads;
     for (size_t j = start; j < end; j++) {
-        ret = rand_read(&args->arr[j].orp_id, sizeof(args->arr[j].orp_id));
+        ret = rand_read(&arr[j].orp_id, sizeof(arr[j].orp_id));
         if (ret) {
             handle_error_string("Error assigning random ID to elem %lu",
-                    i + args->start_idx);
+                    i + start_idx);
             goto exit;
         }
     }
