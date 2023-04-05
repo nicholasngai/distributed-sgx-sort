@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <liboblivious/primitives.h>
-#include "common/crypto.h"
 #include "common/defs.h"
 #include "common/elem_t.h"
 #include "common/error.h"
@@ -8,6 +7,7 @@
 #include "common/util.h"
 #include "enclave/bitonic.h"
 #include "enclave/bucket.h"
+#include "enclave/crypto.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/opaque.h"
 #include "enclave/orshuffle.h"

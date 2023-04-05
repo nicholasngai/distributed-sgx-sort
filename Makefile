@@ -6,7 +6,6 @@ APP_NAME = parallel
 
 COMMON_DIR = common
 COMMON_OBJS = \
-	$(COMMON_DIR)/crypto.o \
 	$(COMMON_DIR)/error.o \
 	$(COMMON_DIR)/util.o
 COMMON_DEPS = $(COMMON_OBJS:.o=.d)
@@ -25,6 +24,7 @@ ENCLAVE_OBJS = \
 	$(ENCLAVE_DIR)/parallel_enc.o \
 	$(ENCLAVE_DIR)/bitonic.o \
 	$(ENCLAVE_DIR)/bucket.o \
+	$(ENCLAVE_DIR)/crypto.o \
 	$(ENCLAVE_DIR)/mpi_tls.o \
 	$(ENCLAVE_DIR)/nonoblivious.o \
 	$(ENCLAVE_DIR)/opaque.o \

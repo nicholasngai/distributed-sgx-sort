@@ -8,11 +8,11 @@
 #include <time.h>
 #include <liboblivious/algorithms.h>
 #include <liboblivious/primitives.h>
-#include "common/crypto.h"
 #include "common/defs.h"
 #include "common/elem_t.h"
 #include "common/error.h"
 #include "common/util.h"
+#include "enclave/crypto.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/nonoblivious.h"
 #include "enclave/parallel_enc.h"

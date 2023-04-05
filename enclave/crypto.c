@@ -1,4 +1,4 @@
-#include "crypto.h"
+#include "enclave/crypto.h"
 #include <limits.h>
 #include <stddef.h>
 #include <string.h>
