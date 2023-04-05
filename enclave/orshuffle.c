@@ -265,6 +265,142 @@ static int swap_range(elem_t *arr, size_t length, size_t a_start, size_t b_start
     }
 }
 
+static int compact_single(elem_t *arr, bool *marked,
+        size_t *marked_prefix_sums, size_t start, size_t length,
+        size_t offset) {
+    size_t local_start = get_local_start(world_rank);
+    size_t local_length = get_local_start(world_rank + 1) - local_start;
+    int ret;
+
+    if (length < 2) {
+        ret = 0;
+        goto exit;
+    }
+
+    if (start >= local_start && start + length <= local_start + local_length
+            && length == 2) {
+        bool cond = (!marked[0] & marked[1]) != (bool) offset;
+        o_memswap(&arr[start - local_start], &arr[start + 1 - local_start],
+                sizeof(*arr), cond);
+        ret = 0;
+        goto exit;
+    }
+
+    if (start >= local_start + local_length || start + length <= local_start) {
+        ret = 0;
+        goto exit;
+    }
+
+    /* Get number of elements in the left half that are marked. The elements
+     * contains the prefix sums, so taking the final prefix sum minus the first
+     * prefix sum plus 1 if first element is marked should be sufficient. */
+    int master_rank = get_index_address(start);
+    int final_rank = get_index_address(start + length - 1);
+    size_t mid_idx = start + length / 2 - 1;
+    int mid_rank = get_index_address(mid_idx);
+    /* Use START + LENGTH / 2 as the tag (the midpoint index) since that's
+     * guaranteed to be unique across iterations. */
+    int tag = OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (start + length / 2);
+    size_t left_marked_count;
+    size_t mid_prefix_sum;
+    if (world_rank == mid_rank) {
+        /* Send the middle prefix sum to the master rank, since we have the
+         * middle element. */
+        if (world_rank == master_rank) {
+            /* We are also the master, so set the local variable. */
+            mid_prefix_sum = marked_prefix_sums[mid_idx - start];
+        } else {
+            /* Send it to the master. */
+            ret =
+                mpi_tls_send_bytes(&marked_prefix_sums[mid_idx - start],
+                        sizeof(*marked_prefix_sums), master_rank, tag);
+            if (ret) {
+                handle_error_string(
+                        "Error sending prefix marked count for %lu from %d to %d",
+                        mid_idx, world_rank, master_rank);
+                goto exit;
+            }
+        }
+    }
+    if (world_rank == master_rank) {
+        /* If we don't have the middle element, receive the middle prefix
+         * sum. */
+        if (world_rank != mid_rank) {
+            ret =
+                mpi_tls_recv_bytes(&mid_prefix_sum, sizeof(mid_prefix_sum),
+                        mid_rank, tag, MPI_TLS_STATUS_IGNORE);
+            if (ret) {
+                handle_error_string(
+                        "Error receiving prefix marked count for %lu from %d into %d",
+                        start, final_rank, world_rank);
+                goto exit;
+            }
+        }
+
+        /* Compute the number of marked elements. */
+        left_marked_count = mid_prefix_sum - marked_prefix_sums[0] + marked[0];
+
+        /* Send it to everyone else. */
+        for (int rank = master_rank + 1; rank <= final_rank; rank++) {
+            ret =
+                mpi_tls_send_bytes(&left_marked_count,
+                        sizeof(left_marked_count), rank, tag);
+            if (ret) {
+                handle_error_string(
+                        "Error sending total marked count from %d to %d",
+                        world_rank, rank);
+                goto exit;
+            }
+        }
+    } else {
+        /* Receive the left marked count from the master. */
+        ret =
+            mpi_tls_recv_bytes(&left_marked_count, sizeof(left_marked_count),
+                    master_rank, tag, MPI_TLS_STATUS_IGNORE);
+        if (ret) {
+            handle_error_string(
+                    "Error receiving total marked count from %d into %d",
+                    world_rank, master_rank);
+            goto exit;
+        }
+    }
+
+    /* Recursively compact. */
+    if (start + length / 2 > local_start) {
+        /* Left has local elements. */
+        ret =
+            compact_single(arr, marked, marked_prefix_sums, start, length / 2,
+                offset % (length / 2));
+        if (ret) {
+            goto exit;
+        }
+    }
+    if (start + length / 2 < local_start + local_length) {
+        /* Right has local elements. */
+        ret =
+            compact_single(arr, marked + length / 2,
+                    marked_prefix_sums + length / 2, start + length / 2,
+                    length / 2, offset % (length / 2));
+        if (ret) {
+            goto exit;
+        }
+    }
+
+    /* Swap. */
+    ret =
+        swap_range(arr, length, start, start + length / 2, length / 2, offset,
+                left_marked_count, 1);
+    if (ret) {
+        handle_error_string(
+                "Error swapping range with start %lu and length %lu", start,
+                start + length / 2);
+        goto exit;
+    }
+
+exit:
+    return ret;
+}
+
 struct compact_args {
     elem_t *arr;
     bool *marked;
@@ -287,6 +423,13 @@ static void compact(void *args_) {
     size_t local_start = get_local_start(world_rank);
     size_t local_length = get_local_start(world_rank + 1) - local_start;
     int ret;
+
+    if (num_threads == 1) {
+        ret =
+            compact_single(arr, marked, marked_prefix_sums, start, length,
+                    offset);
+        goto exit;
+    }
 
     if (length < 2) {
         ret = 0;
@@ -469,6 +612,163 @@ exit:
     }
 }
 
+static int shuffle_single(elem_t *arr, bool *marked, size_t *marked_prefix_sums,
+        size_t start, size_t length) {
+    size_t local_start = get_local_start(world_rank);
+    size_t local_length = get_local_start(world_rank + 1) - local_start;
+    int ret;
+
+    if (length < 2) {
+        ret = 0;
+        goto exit;
+    }
+
+    if (start >= local_start && start + length <= local_start + local_length
+            && length == 2) {
+        bool cond;
+        ret = rand_bit(&cond);
+        if (ret) {
+            goto exit;
+        }
+        o_memswap(&arr[start - local_start], &arr[start + 1 - local_start],
+                sizeof(*arr), cond);
+        goto exit;
+    }
+
+    if (start >= local_start + local_length || start + length <= local_start) {
+        ret = 0;
+        goto exit;
+    }
+
+    /* Get the number of elements to mark in this enclave. */
+    struct mark_count_payload {
+        size_t num_to_mark;
+        size_t marked_in_prev;
+    };
+    int master_rank = get_index_address(start);
+    int final_rank = get_index_address(start + length - 1);
+    int tag = OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (start + length / 2);
+    size_t num_to_mark;
+    size_t marked_in_prev;
+    if (master_rank == final_rank) {
+        /* For single enclave, the number of elements is just half. */
+        num_to_mark = length / 2;
+        marked_in_prev = 0;
+    } else if (world_rank == master_rank) {
+        /* If we are the first enclave containing this slice, do a bunch of
+         * random sampling to figure out how many elements each enclave should
+         * mark and send them to each enclave. */
+        size_t enclave_mark_counts[world_size];
+        memset(enclave_mark_counts, '\0', sizeof(enclave_mark_counts));
+
+        size_t total_left_to_mark = length / 2;
+        size_t total_left = length;
+        for (int rank = master_rank; rank <= final_rank; rank++) {
+            size_t rank_start = get_local_start(rank);
+            size_t rank_end = get_local_start(rank + 1);
+            for (size_t i = MAX(start, rank_start);
+                    i < MIN(start + length, rank_end); i++) {
+                bool marked;
+                ret = should_mark(total_left_to_mark, total_left, &marked);
+                if (ret) {
+                    handle_error_string("Error getting random marked");
+                    goto exit;
+                }
+                total_left_to_mark -= marked;
+                total_left--;
+                enclave_mark_counts[rank] += marked;
+            }
+        }
+
+        marked_in_prev = enclave_mark_counts[master_rank];
+        for (int rank = master_rank + 1; rank <= final_rank; rank++) {
+            struct mark_count_payload payload = {
+                .num_to_mark = enclave_mark_counts[rank],
+                .marked_in_prev = marked_in_prev,
+            };
+            ret = mpi_tls_send_bytes(&payload, sizeof(payload), rank, tag);
+            if (ret) {
+                handle_error_string("Error sending mark count from %d to %d",
+                        world_rank, rank);
+                goto exit;
+            }
+            marked_in_prev += enclave_mark_counts[rank];
+        }
+
+        num_to_mark = enclave_mark_counts[0];
+        marked_in_prev = 0;
+    } else {
+        /* Else, receive the number of elements from the master. */
+        struct mark_count_payload payload;
+        ret =
+            mpi_tls_recv_bytes(&payload, sizeof(payload), master_rank,
+                    tag, MPI_TLS_STATUS_IGNORE);
+        if (ret) {
+            handle_error_string("Error receiving mark count from %d into %d\n",
+                    master_rank, world_rank);
+            goto exit;
+        }
+        num_to_mark = payload.num_to_mark;
+        marked_in_prev = payload.marked_in_prev;
+    }
+
+    /* Mark exactly NUM_TO_MARK elems in our partition. */
+    size_t start_idx = MAX(start, local_start);
+    size_t end_idx = MIN(start + length, local_start + local_length);
+    size_t total_left = end_idx - start_idx;
+    size_t marked_so_far = 0;
+    for (size_t i = 0; i < end_idx - start_idx; i += MARK_COINS) {
+        uint32_t coins[MARK_COINS];
+        size_t elems_to_mark = MIN(end_idx - start_idx - i, MARK_COINS);
+        ret = rand_read(coins, elems_to_mark * sizeof(*coins));
+        if (ret) {
+            handle_error_string("Error getting random coins for marking");
+            goto exit;
+        }
+
+        for (size_t j = 0; j < MIN(end_idx - start_idx - i, MARK_COINS); j++) {
+            bool cur_marked =
+                ((uint64_t) coins[j] * total_left) >> 32
+                    >= num_to_mark - marked_so_far;
+            marked_so_far += cur_marked;
+            marked[i + j] = cur_marked;
+            marked_prefix_sums[i + j] = marked_so_far;
+            total_left--;
+        }
+    }
+
+    /* Obliviously compact. */
+    ret = compact_single(arr, marked, marked_prefix_sums, start, length, 0);
+    if (ret) {
+        goto exit;
+    }
+
+    /* Recursively shuffle. */
+    if (start + length / 2 > local_start) {
+        /* Left has local elements. */
+        ret =
+            shuffle_single(arr, marked, marked_prefix_sums, start, length / 2);
+        if (ret) {
+            goto exit;
+        }
+    }
+    if (start + length / 2 < local_start + local_length) {
+        /* Right has local elements. */
+        ret =
+            shuffle_single(arr, marked + length / 2,
+                    marked_prefix_sums + length / 2, start + length / 2,
+                    length / 2);
+        if (ret) {
+            goto exit;
+        }
+    }
+
+    ret = 0;
+
+exit:
+    return ret;
+}
+
 struct shuffle_args {
     elem_t *arr;
     bool *marked;
@@ -489,6 +789,11 @@ static void shuffle(void *args_) {
     size_t local_start = get_local_start(world_rank);
     size_t local_length = get_local_start(world_rank + 1) - local_start;
     int ret;
+
+    if (num_threads == 1) {
+        ret = shuffle_single(arr, marked, marked_prefix_sums, start, length);
+        goto exit;
+    }
 
     if (length < 2) {
         ret = 0;
@@ -659,8 +964,8 @@ static void shuffle(void *args_) {
             ret = right_args.ret;
             goto exit;
         }
-    } else if (num_threads > 1) {
-        /* Do both in a threaded manner. */
+    } else {
+        /* Do both. */
         left_args.num_threads = num_threads / 2;
         right_args.num_threads = num_threads / 2;
         struct thread_work right_work = {
@@ -677,20 +982,6 @@ static void shuffle(void *args_) {
             goto exit;
         }
         thread_wait(&right_work);
-    } else {
-        /* Do both in our own thread. */
-        left_args.num_threads = 1;
-        right_args.num_threads = 1;
-        shuffle(&left_args);
-        if (left_args.ret) {
-            ret = left_args.ret;
-            goto exit;
-        }
-        shuffle(&right_args);
-        if (right_args.ret) {
-            ret = right_args.ret;
-            goto exit;
-        }
     }
 
     ret = 0;
