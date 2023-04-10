@@ -389,7 +389,6 @@ static void compact(void *args_) {
         .start = start,
         .length = length / 2,
         .offset = offset % (length / 2),
-        .ret = 0,
     };
     struct compact_args right_args = {
         .arr = arr,
@@ -398,7 +397,6 @@ static void compact(void *args_) {
         .start = start + length / 2,
         .length = length / 2,
         .offset = (offset + left_marked_count) % (length / 2),
-        .ret = 0,
     };
     if (start + length / 2 >= local_start + local_length) {
         /* Right is remote; do just the left. */
@@ -474,11 +472,7 @@ static void compact(void *args_) {
     }
 
 exit:
-    {
-        int expected = 0;
-        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
-                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-    }
+    args->ret = ret;
 }
 
 struct shuffle_args {
@@ -630,7 +624,6 @@ static void shuffle(void *args_) {
         .length = length,
         .offset = 0,
         .num_threads = num_threads,
-        .ret = 0,
     };
     compact(&compact_args);
     if (compact_args.ret) {
@@ -643,13 +636,11 @@ static void shuffle(void *args_) {
         .arr = arr,
         .start = start,
         .length = length / 2,
-        .ret = 0,
     };
     struct shuffle_args right_args = {
         .arr = arr,
         .start = start + length / 2,
         .length = length / 2,
-        .ret = 0,
     };
     if (start + length / 2 >= local_start + local_length) {
         /* Right is remote; do just the left. */
@@ -716,11 +707,7 @@ static void shuffle(void *args_) {
     ret = 0;
 
 exit:
-    {
-        int expected = 0;
-        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
-                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-    }
+    args->ret = ret;
 }
 
 /* For assign random ORP IDs to ARR[i * LENGTH / NUM_THREADS] to
@@ -795,7 +782,6 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
         .start = 0,
         .length = length,
         .num_threads = num_threads,
-        .ret = 0,
     };
     shuffle(&shuffle_args);
     if (shuffle_args.ret) {
