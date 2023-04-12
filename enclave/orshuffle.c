@@ -804,13 +804,14 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
 
     total_length = length;
 
-    bool *marked = malloc(length * sizeof(*marked));
+    bool *marked = malloc(local_length * sizeof(*marked));
     if (!marked) {
         perror("malloc marked arr");
         ret = errno;
         goto exit;
     }
-    size_t *marked_prefix_sums = malloc(length * sizeof(*marked_prefix_sums));
+    size_t *marked_prefix_sums =
+        malloc(local_length * sizeof(*marked_prefix_sums));
     if (!marked_prefix_sums) {
         perror("malloc marked prefix sums arr");
         ret = errno;
