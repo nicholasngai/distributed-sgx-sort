@@ -6,15 +6,16 @@
 #include <limits.h>
 #include <time.h>
 
-static inline unsigned long next_pow2l(unsigned long x) {
+static inline unsigned long long next_pow2ll(unsigned long long x) {
 #ifdef __GNUC__
-    unsigned long next = 1 << (sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1);
+    unsigned long long next =
+        1llu << (sizeof(x) * CHAR_BIT - __builtin_clzll(x) - 1);
     if (next < x) {
         next <<= 1;
     }
     return next;
 #else
-    unsigned long next = 1;
+    unsigned long long next = 1;
     while (next < x) {
         next <<= 1;
     }
@@ -22,11 +23,11 @@ static inline unsigned long next_pow2l(unsigned long x) {
 #endif
 }
 
-static inline unsigned long log2li(unsigned long x) {
+static inline unsigned long long log2ll(unsigned long long x) {
 #ifdef __GNUC__
-    return sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1;
+    return sizeof(x) * CHAR_BIT - __builtin_clzll(x) - 1;
 #else
-    unsigned long log = -1;
+    unsigned long long log = -1;
     while (x) {
         log++;
         x >>= 1;

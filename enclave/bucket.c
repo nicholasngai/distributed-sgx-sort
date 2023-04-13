@@ -26,14 +26,14 @@ static thread_local elem_t *buffer;
 
 static int get_bucket_rank(size_t bucket) {
     size_t num_buckets =
-        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE,
+        MAX(next_pow2ll(total_length) * 2 / BUCKET_SIZE,
                 (size_t) world_size * 2);
     return bucket * world_size / num_buckets;
 }
 
 static size_t get_local_bucket_start(int rank) {
     size_t num_buckets =
-        MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE,
+        MAX(next_pow2ll(total_length) * 2 / BUCKET_SIZE,
                 (size_t) world_size * 2);
     return (rank * num_buckets + world_size - 1) / world_size;
 }
@@ -682,7 +682,7 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
-    size_t route_levels1 = log2li(world_size);
+    size_t route_levels1 = log2ll(world_size);
     ret = bucket_route(buf, route_levels1, 0);
     if (ret) {
         handle_error_string("Error routing elements through butterfly network");
@@ -717,7 +717,7 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
-    size_t route_levels2 = log2li(num_local_buckets);
+    size_t route_levels2 = log2ll(num_local_buckets);
     ret = bucket_route(arr, route_levels2, route_levels1);
     if (ret) {
         handle_error_string("Error routing elements through butterfly network");

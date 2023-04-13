@@ -76,7 +76,7 @@ int ecall_sort_alloc_arr(size_t total_length_, enum sort_type sort_type) {
              * number of enclaves (since each enclaves needs at least two
              * buckets. */
             size_t num_buckets =
-                MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE,
+                MAX(next_pow2ll(total_length) * 2 / BUCKET_SIZE,
                         (size_t) world_size * 2);
             size_t local_num_buckets =
                 num_buckets * (world_rank + 1) / world_size
