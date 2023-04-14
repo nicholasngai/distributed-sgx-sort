@@ -57,6 +57,24 @@ static size_t get_local_start(int rank) {
     return (rank * total_length + world_size - 1) / world_size;
 }
 
+/* Marking helper. */
+
+static int should_mark(size_t left_to_mark, size_t total_left, bool *result) {
+    int ret;
+
+    uint32_t r;
+    ret = rand_read(&r, sizeof(r));
+    if (ret) {
+        handle_error_string("Error reading random value");
+        goto exit;
+    }
+
+    *result = ((uint64_t) r * total_left) >> 32 >= left_to_mark;
+
+exit:
+    return ret;
+}
+
 /* Swapping. */
 
 static int swap_local_range(elem_t *arr, size_t length, size_t a, size_t b,
@@ -461,8 +479,8 @@ struct shuffle_args {
     elem_t *arr;
     bool *marked;
     size_t *marked_prefix_sums;
+    size_t start;
     size_t length;
-    size_t partitions;
     size_t num_threads;
     int ret;
 };
@@ -471,40 +489,122 @@ static void shuffle(void *args_) {
     elem_t *arr = args->arr;
     bool *marked = args->marked;
     size_t *marked_prefix_sums = args->marked_prefix_sums;
+    size_t start = args->start;
     size_t length = args->length;
-    size_t partitions = args->partitions;
     size_t num_threads = args->num_threads;
+    size_t local_start = get_local_start(world_rank);
+    size_t local_length = get_local_start(world_rank + 1) - local_start;
     int ret;
 
-    if (partitions <= 1 || length < 2) {
+    if (length < 2) {
         ret = 0;
         goto exit;
     }
 
-    if (length == 2) {
+    if (start >= local_start && start + length <= local_start + local_length
+            && length == 2) {
         bool cond;
         ret = rand_bit(&cond);
         if (ret) {
             goto exit;
         }
-        o_memswap(&arr[0], &arr[1], sizeof(*arr), cond);
+        o_memswap(&arr[start - local_start], &arr[start + 1 - local_start],
+                sizeof(*arr), cond);
         goto exit;
     }
 
-    /* Mark exactly LENGTH / 2 elems in our partition. */
-    size_t num_to_mark = length / 2;
-    size_t total_left = length;
+    if (start >= local_start + local_length || start + length <= local_start) {
+        ret = 0;
+        goto exit;
+    }
+
+    /* Get the number of elements to mark in this enclave. */
+    struct mark_count_payload {
+        size_t num_to_mark;
+        size_t marked_in_prev;
+    };
+    int master_rank = get_index_address(start);
+    int final_rank = get_index_address(start + length - 1);
+    int tag = OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (start + length / 2);
+    size_t num_to_mark;
+    size_t marked_in_prev;
+    if (master_rank == final_rank) {
+        /* For single enclave, the number of elements is just half. */
+        num_to_mark = length / 2;
+        marked_in_prev = 0;
+    } else if (world_rank == master_rank) {
+        /* If we are the first enclave containing this slice, do a bunch of
+         * random sampling to figure out how many elements each enclave should
+         * mark and send them to each enclave. */
+        size_t enclave_mark_counts[world_size];
+        memset(enclave_mark_counts, '\0', sizeof(enclave_mark_counts));
+
+        size_t total_left_to_mark = length / 2;
+        size_t total_left = length;
+        for (int rank = master_rank; rank <= final_rank; rank++) {
+            size_t rank_start = get_local_start(rank);
+            size_t rank_end = get_local_start(rank + 1);
+            for (size_t i = MAX(start, rank_start);
+                    i < MIN(start + length, rank_end); i++) {
+                bool marked;
+                ret = should_mark(total_left_to_mark, total_left, &marked);
+                if (ret) {
+                    handle_error_string("Error getting random marked");
+                    goto exit;
+                }
+                total_left_to_mark -= marked;
+                total_left--;
+                enclave_mark_counts[rank] += marked;
+            }
+        }
+
+        marked_in_prev = enclave_mark_counts[master_rank];
+        for (int rank = master_rank + 1; rank <= final_rank; rank++) {
+            struct mark_count_payload payload = {
+                .num_to_mark = enclave_mark_counts[rank],
+                .marked_in_prev = marked_in_prev,
+            };
+            ret = mpi_tls_send_bytes(&payload, sizeof(payload), rank, tag);
+            if (ret) {
+                handle_error_string("Error sending mark count from %d to %d",
+                        world_rank, rank);
+                goto exit;
+            }
+            marked_in_prev += enclave_mark_counts[rank];
+        }
+
+        num_to_mark = enclave_mark_counts[0];
+        marked_in_prev = 0;
+    } else {
+        /* Else, receive the number of elements from the master. */
+        struct mark_count_payload payload;
+        ret =
+            mpi_tls_recv_bytes(&payload, sizeof(payload), master_rank,
+                    tag, MPI_TLS_STATUS_IGNORE);
+        if (ret) {
+            handle_error_string("Error receiving mark count from %d into %d\n",
+                    master_rank, world_rank);
+            goto exit;
+        }
+        num_to_mark = payload.num_to_mark;
+        marked_in_prev = payload.marked_in_prev;
+    }
+
+    /* Mark exactly NUM_TO_MARK elems in our partition. */
+    size_t start_idx = MAX(start, local_start);
+    size_t end_idx = MIN(start + length, local_start + local_length);
+    size_t total_left = end_idx - start_idx;
     size_t marked_so_far = 0;
-    for (size_t i = 0; i < length; i += MARK_COINS) {
+    for (size_t i = 0; i < end_idx - start_idx; i += MARK_COINS) {
         uint32_t coins[MARK_COINS];
-        size_t elems_to_mark = MIN(length - i, MARK_COINS);
+        size_t elems_to_mark = MIN(end_idx - start_idx - i, MARK_COINS);
         ret = rand_read(coins, elems_to_mark * sizeof(*coins));
         if (ret) {
             handle_error_string("Error getting random coins for marking");
             goto exit;
         }
 
-        for (size_t j = 0; j < MIN(length - i, MARK_COINS); j++) {
+        for (size_t j = 0; j < MIN(end_idx - start_idx - i, MARK_COINS); j++) {
             bool cur_marked =
                 ((uint64_t) coins[j] * total_left) >> 32
                     >= num_to_mark - marked_so_far;
@@ -520,6 +620,7 @@ static void shuffle(void *args_) {
         .arr = arr,
         .marked = marked,
         .marked_prefix_sums = marked_prefix_sums,
+        .start = start,
         .length = length,
         .offset = 0,
         .num_threads = num_threads,
@@ -533,15 +634,35 @@ static void shuffle(void *args_) {
     /* Recursively shuffle. */
     struct shuffle_args left_args = {
         .arr = arr,
+        .start = start,
         .length = length / 2,
-        .partitions = partitions / 2,
     };
     struct shuffle_args right_args = {
-        .arr = arr + length / 2,
+        .arr = arr,
+        .start = start + length / 2,
         .length = length / 2,
-        .partitions = partitions / 2,
     };
-    if (num_threads > 1) {
+    if (start + length / 2 >= local_start + local_length) {
+        /* Right is remote; do just the left. */
+        left_args.marked = marked,
+        left_args.marked_prefix_sums = marked_prefix_sums,
+        left_args.num_threads = num_threads;
+        shuffle(&left_args);
+        if (left_args.ret) {
+            ret = left_args.ret;
+            goto exit;
+        }
+    } else if (start + length / 2 <= local_start) {
+        /* Left is remote; do just the right. */
+        right_args.marked = marked,
+        right_args.marked_prefix_sums = marked_prefix_sums,
+        right_args.num_threads = num_threads;
+        shuffle(&right_args);
+        if (right_args.ret) {
+            ret = right_args.ret;
+            goto exit;
+        }
+    } else if (num_threads > 1) {
         /* Do both in a threaded manner. */
         left_args.marked = marked,
         left_args.marked_prefix_sums = marked_prefix_sums,
@@ -589,168 +710,6 @@ exit:
     args->ret = ret;
 }
 
-/* Distribute and receive elements partitions ARR to partitions in OUT. There
- * should be WORLD_SIZE equally-sized partitions in ARR. */
-struct distribute_partitions_args {
-    elem_t *arr;
-    elem_t *out;
-    size_t length;
-    volatile size_t *send_idxs;
-    volatile size_t recv_idx;
-    volatile int ret;
-};
-static void distribute_partitions(void *args_, size_t thread_idx) {
-    struct distribute_partitions_args *args = args_;
-    elem_t *arr = args->arr;
-    elem_t *out = args->out;
-    volatile size_t *send_idxs = args->send_idxs;
-    volatile size_t *recv_idx = &args->recv_idx;
-    size_t local_start = get_local_start(world_rank);
-    size_t local_length = get_local_start(world_rank + 1) - local_start;
-    int ret;
-
-    mpi_tls_request_t requests[world_size];
-
-    if (world_size == 1) {
-        if (thread_idx == 0) {
-            memcpy(out, arr, local_length * sizeof(*out));
-        }
-        ret = 0;
-        goto exit;
-    }
-
-    //if (world_rank == 0) {
-    //    printf("%d\n", getpid());
-    //    volatile int loop = 1;
-    //    while (loop) {}
-    //}
-
-    /* Copy our own partition to the output if any. */
-    size_t recv_size = MIN(local_length / world_size, SWAP_CHUNK_SIZE);
-    if (thread_idx == 0) {
-        size_t elems_to_copy =
-            local_length * (world_rank + 1) / world_size
-                - local_length * world_rank / world_size;
-        size_t copy_idx =
-            __atomic_fetch_add(recv_idx, elems_to_copy, __ATOMIC_RELAXED);
-        memcpy(out + copy_idx, arr + send_idxs[world_rank],
-                elems_to_copy * sizeof(*out));
-    }
-
-    /* Wait so that thread 0 has defeintely updated RECV_IDX. */
-    thread_wait_for_all();
-
-    /* Post a receive request for the current partition. */
-    size_t num_requests = 0;
-    size_t our_recv_idx =
-        __atomic_fetch_add(recv_idx, recv_size, __ATOMIC_RELAXED);
-    if (our_recv_idx < local_length) {
-        ret =
-            mpi_tls_irecv_bytes(out + our_recv_idx,
-                    recv_size * sizeof(*out), MPI_TLS_ANY_SOURCE,
-                    BUCKET_DISTRIBUTE_MPI_TAG, &requests[world_rank]);
-        if (ret) {
-            handle_error_string("Error posting receive into %d", world_rank);
-            goto exit;
-        }
-        num_requests++;
-    } else {
-        requests[world_rank].type = MPI_TLS_NULL;
-    }
-
-    /* Send and receive partitions. */
-    for (int i = 0; i < world_size; i++) {
-        if (i == world_rank) {
-            continue;
-        }
-
-        /* Post a send request to the remote rank containing the first
-         * partitions. */
-        size_t our_send_idx =
-            __atomic_fetch_add(&send_idxs[i], recv_size, __ATOMIC_RELAXED);
-        if (our_send_idx < (i + 1) * local_length / world_size) {
-            ret =
-                mpi_tls_isend_bytes(arr + our_send_idx,
-                        recv_size * sizeof(*arr), i, BUCKET_DISTRIBUTE_MPI_TAG,
-                        &requests[i]);
-            if (ret) {
-                handle_error_string(
-                        "Error sending chunk starting with %lu to %d from %d",
-                        our_send_idx + local_start, i, world_rank);
-                goto exit;
-            }
-            num_requests++;
-        } else {
-            requests[i].type = MPI_TLS_NULL;
-        }
-    }
-
-    while (num_requests) {
-        size_t index;
-        mpi_tls_status_t status;
-        ret = mpi_tls_waitany(world_size, requests, &index, &status);
-        if (ret) {
-            handle_error_string("Error waiting on requests");
-            goto exit;
-        }
-
-        if (index == (size_t) world_rank) {
-            /* This was the receive request. */
-
-            size_t our_recv_idx =
-                __atomic_fetch_add(recv_idx, recv_size, __ATOMIC_RELAXED);
-            if (our_recv_idx < local_length) {
-                /* Post receive for the next partitions. */
-                ret =
-                    mpi_tls_irecv_bytes(out + our_recv_idx,
-                            recv_size * sizeof(*out), MPI_TLS_ANY_SOURCE,
-                            BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
-                if (ret) {
-                    handle_error_string("Error posting receive into %d",
-                            (int) index);
-                    goto exit;
-                }
-            } else {
-                /* Nullify the receiving request. */
-                requests[index].type = MPI_TLS_NULL;
-                num_requests--;
-            }
-        } else {
-            /* This was a send request. */
-
-            size_t our_send_idx =
-                __atomic_fetch_add(&send_idxs[index], recv_size,
-                        __ATOMIC_RELAXED);
-            if (our_send_idx < (index + 1) * local_length / world_size) {
-                ret =
-                    mpi_tls_isend_bytes(arr + our_send_idx,
-                            recv_size * sizeof(*arr), index,
-                            BUCKET_DISTRIBUTE_MPI_TAG, &requests[index]);
-                if (ret) {
-                    handle_error_string(
-                            "Error sending chunk starting with %lu to %d from %d",
-                            our_send_idx + local_start, world_rank,
-                            (int) index);
-                    goto exit;
-                }
-            } else {
-                /* Nullify the sending request. */
-                requests[index].type = MPI_TLS_NULL;
-                num_requests--;
-            }
-        }
-    }
-
-    ret = 0;
-
-exit:
-    if (ret) {
-        int expected = 0;
-        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
-                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
-    }
-}
-
 /* For assign random ORP IDs to ARR[i * LENGTH / NUM_THREADS] to
  * ARR[(i + 1) * LENGTH / NUM_THREADS]. */
 struct assign_random_id_args {
@@ -792,7 +751,6 @@ exit:
 int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     size_t local_start = length * world_rank / world_size;
     size_t local_length = length * (world_rank + 1) / world_size - local_start;
-    elem_t *buf = arr + MAX(local_length * 2, 512);
     int ret;
 
     struct timespec time_start;
@@ -818,72 +776,19 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit_free_marked;
     }
 
-    /* Construct WORLD_SIZE random partitions. */
-    {
-        struct shuffle_args args = {
-            .arr = arr,
-            .marked = marked,
-            .marked_prefix_sums = marked_prefix_sums,
-            .length = local_length,
-            .partitions = world_size,
-            .num_threads = num_threads,
-        };
-        shuffle(&args);
-        if (args.ret) {
-            handle_error_string("Error in recursive shuffle");
-            ret = args.ret;
-            goto exit_free_marked_prefix_sums;
-        }
-    }
-
-    /* Distribute partitions. */
-    {
-        size_t send_idxs[world_size];
-        for (int i = 0; i < world_size; i++) {
-            send_idxs[i] = i * local_length / world_size;
-        }
-        struct distribute_partitions_args args = {
-            .arr = arr,
-            .out = buf,
-            .length = length,
-            .send_idxs = send_idxs,
-            .recv_idx = 0,
-            .ret = 0,
-        };
-        struct thread_work work = {
-            .type = THREAD_WORK_ITER,
-            .iter = {
-                .func = distribute_partitions,
-                .arg = &args,
-                .count = num_threads,
-            },
-        };
-        thread_work_push(&work);
-        thread_work_until_empty();
-        thread_wait(&work);
-        if (args.ret) {
-            handle_error_string("Error in partition distribution");
-            ret = args.ret;
-            goto exit_free_marked_prefix_sums;
-        }
-    }
-
-    /* Shuffle elements fully (PARTITIONS = LOCAL_LENGTH). */
-    {
-        struct shuffle_args args = {
-            .arr = buf,
-            .marked = marked,
-            .marked_prefix_sums = marked_prefix_sums,
-            .length = local_length,
-            .partitions = local_length,
-            .num_threads = num_threads,
-        };
-        shuffle(&args);
-        if (args.ret) {
-            handle_error_string("Error in recursive shuffle");
-            ret = args.ret;
-            goto exit_free_marked_prefix_sums;
-        }
+    struct shuffle_args shuffle_args = {
+        .arr = arr,
+        .marked = marked,
+        .marked_prefix_sums = marked_prefix_sums,
+        .start = 0,
+        .length = length,
+        .num_threads = num_threads,
+    };
+    shuffle(&shuffle_args);
+    if (shuffle_args.ret) {
+        handle_error_string("Error in recursive shuffle");
+        ret = shuffle_args.ret;
+        goto exit_free_marked_prefix_sums;
     }
 
     free(marked);
@@ -926,6 +831,7 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
     /* Nonoblivious sort. This requires MAX(LOCAL_LENGTH * 2, 512) elements for
      * both the array and buffer, so use the second half of the array given to
      * us (which should be of length MAX(LOCAL_LENGTH * 2, 512) * 2). */
+    elem_t *buf = arr + MAX(local_length * 2, 512);
     ret = nonoblivious_sort(arr, buf, length, local_length, num_threads);
     if (ret) {
         goto exit_free_marked_prefix_sums;
