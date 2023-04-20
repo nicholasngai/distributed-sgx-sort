@@ -69,6 +69,7 @@ struct swap_remote_range_args {
     size_t remote_idx;
     size_t count;
     bool descending;
+    size_t partition_id;
     size_t num_threads;
 };
 static void swap_remote_range(void *args_, size_t thread_idx) {
@@ -78,6 +79,7 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
     size_t remote_idx = args->remote_idx;
     size_t count = args->count;
     bool descending = args->descending;
+    size_t partition_id = args->partition_id;
     size_t num_threads = args->num_threads;
     size_t local_start = get_local_start(world_rank);
     int remote_rank = get_index_address(remote_idx);
@@ -96,8 +98,8 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
         /* Post receive for remote elems to buffer. */
         mpi_tls_request_t request;
         ret = mpi_tls_irecv_bytes(buffer,
-                elems_to_swap * sizeof(*buffer), remote_rank, our_local_idx,
-                &request);
+                elems_to_swap * sizeof(*buffer), remote_rank,
+                partition_id + thread_idx, &request);
         if (ret) {
             handle_error_string("Error receiving elem bytes");
             return;
@@ -106,7 +108,8 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
         /* Send local elems to the remote. */
         ret =
             mpi_tls_send_bytes(arr + our_local_idx - local_start,
-                    elems_to_swap * sizeof(*arr), remote_rank, our_remote_idx);
+                    elems_to_swap * sizeof(*arr), remote_rank,
+                    partition_id + thread_idx);
         if (ret) {
             handle_error_string("Error sending elem bytes");
             return;
@@ -141,7 +144,7 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
 }
 
 static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
-        size_t count, bool descending, size_t num_threads) {
+        size_t count, bool descending, size_t partition_id, size_t num_threads) {
     // TODO Assumption: Only either a subset of range A is local, or a subset of
     // range B is local. For local-remote swaps, the subset of the remote range
     // correspondingw with the local range is entirely contained within a single
@@ -164,6 +167,7 @@ static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
             .remote_idx = b_start + a_local_start - a_start,
             .count = a_local_end - a_local_start,
             .descending = descending,
+            .partition_id = partition_id,
             .num_threads = num_threads,
         };
         struct thread_work work;
@@ -187,6 +191,7 @@ static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
             .remote_idx = a_start + b_local_start - b_start,
             .count = b_local_end - b_local_start,
             .descending = descending,
+            .partition_id = partition_id,
             .num_threads = num_threads,
         };
         struct thread_work work;
@@ -211,6 +216,7 @@ struct threaded_args {
     size_t start;
     size_t length;
     bool descending;
+    size_t partition_id;
     size_t num_threads;
 };
 
@@ -220,6 +226,7 @@ static void merge(void *args_) {
     size_t start = args->start;
     size_t length = args->length;
     bool descending = args->descending;
+    size_t partition_id = args->partition_id;
     size_t num_threads = args->num_threads;
 
     switch (length) {
@@ -228,7 +235,7 @@ static void merge(void *args_) {
             /* Do nothing. */
             break;
         case 2: {
-            swap_range(arr, start, start + 1, 1, descending, 1);
+            swap_range(arr, start, start + 1, 1, descending, partition_id, 1);
             break;
         }
         default: {
@@ -238,7 +245,7 @@ static void merge(void *args_) {
             size_t right_length = length - left_length;
             size_t right_start = start + left_length;
             swap_range(arr, start, right_start, left_length, descending,
-                    num_threads);
+                    partition_id, num_threads);
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only merge the left. The right is completely remote. */
                 struct threaded_args left_args = {
@@ -246,6 +253,7 @@ static void merge(void *args_) {
                     .start = start,
                     .length = left_length,
                     .descending = descending,
+                    .partition_id = partition_id,
                     .num_threads = num_threads,
                 };
                 merge(&left_args);
@@ -256,28 +264,30 @@ static void merge(void *args_) {
                     .start = right_start,
                     .length = right_length,
                     .descending = descending,
+                    .partition_id = partition_id,
                     .num_threads = num_threads,
                 };
                 merge(&right_args);
             } else {
                 /* Merge both. */
-                size_t right_threads = num_threads / 2;
                 struct threaded_args left_args = {
                     .arr = arr,
                     .start = start,
                     .length = left_length,
                     .descending = descending,
-                    .num_threads = MAX(num_threads - right_threads, 1),
                 };
                 struct threaded_args right_args = {
                     .arr = arr,
                     .start = right_start,
                     .length = right_length,
                     .descending = descending,
-                    .num_threads = MAX(right_threads, 1),
                 };
 
                 if (num_threads > 1) {
+                    left_args.partition_id = partition_id;
+                    left_args.num_threads = num_threads / 2;
+                    right_args.partition_id = partition_id + num_threads / 2;
+                    right_args.num_threads = num_threads / 2;
                     struct thread_work right_work = {
                         .type = THREAD_WORK_SINGLE,
                         .single = {
@@ -289,6 +299,10 @@ static void merge(void *args_) {
                     merge(&left_args);
                     thread_wait(&right_work);
                 } else {
+                    left_args.partition_id = partition_id;
+                    left_args.num_threads = 1;
+                    right_args.partition_id = partition_id;
+                    right_args.num_threads = 1;
                     merge(&left_args);
                     merge(&right_args);
                 }
@@ -304,6 +318,7 @@ static void sort(void *args_) {
     size_t start = args->start;
     size_t length = args->length;
     bool descending = args->descending;
+    size_t partition_id = args->partition_id;
     size_t num_threads = args->num_threads;
 
     switch (length) {
@@ -312,7 +327,7 @@ static void sort(void *args_) {
             /* Do nothing. */
             break;
         case 2: {
-            swap_range(arr, start, start + 1, 1, descending, 1);
+            swap_range(arr, start, start + 1, 1, descending, partition_id, 1);
             break;
         }
         default: {
@@ -328,6 +343,7 @@ static void sort(void *args_) {
                     .start = start,
                     .length = left_length,
                     .descending = descending,
+                    .partition_id = partition_id,
                     .num_threads = num_threads,
                 };
                 sort(&left_args);
@@ -338,29 +354,30 @@ static void sort(void *args_) {
                     .start = right_start,
                     .length = right_length,
                     .descending = !descending,
+                    .partition_id = partition_id,
                     .num_threads = num_threads,
                 };
                 sort(&right_args);
             } else {
                 /* Sort both. */
-                size_t right_threads =
-                    num_threads * right_length / length;
                 struct threaded_args left_args = {
                     .arr = arr,
                     .start = start,
                     .length = left_length,
                     .descending = descending,
-                    .num_threads = MAX(num_threads - right_threads, 1),
                 };
                 struct threaded_args right_args = {
                     .arr = arr,
                     .start = right_start,
                     .length = right_length,
                     .descending = !descending,
-                    .num_threads = MAX(right_threads, 1),
                 };
 
                 if (num_threads > 1) {
+                    left_args.partition_id = partition_id;
+                    left_args.num_threads = num_threads / 2;
+                    right_args.partition_id = partition_id + num_threads / 2;
+                    right_args.num_threads = num_threads / 2;
                     struct thread_work right_work = {
                         .type = THREAD_WORK_SINGLE,
                         .single = {
@@ -372,6 +389,10 @@ static void sort(void *args_) {
                     sort(&left_args);
                     thread_wait(&right_work);
                 } else {
+                    left_args.partition_id = partition_id;
+                    left_args.num_threads = 1;
+                    right_args.partition_id = partition_id;
+                    right_args.num_threads = 1;
                     sort(&left_args);
                     sort(&right_args);
                 }
@@ -400,6 +421,7 @@ void bitonic_sort(elem_t *arr, size_t length, size_t num_threads) {
         .start = 0,
         .length = total_length,
         .descending = false,
+        .partition_id = 0,
         .num_threads = num_threads,
     };
     sort(&args);
