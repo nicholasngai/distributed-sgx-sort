@@ -138,8 +138,8 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
         /* Post receive for remote elems to buffer. */
         mpi_tls_request_t request;
         ret = mpi_tls_irecv_bytes(buffer,
-                elems_to_swap * sizeof(*buffer), remote_rank, our_local_idx,
-                &request);
+                elems_to_swap * sizeof(*buffer), remote_rank,
+                our_local_idx / SWAP_CHUNK_SIZE, &request);
         if (ret) {
             handle_error_string("Error receiving elem bytes");
             goto exit;
@@ -148,7 +148,8 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
         /* Send local elems to the remote. */
         ret =
             mpi_tls_send_bytes(arr + our_local_idx - local_start,
-                    elems_to_swap * sizeof(*arr), remote_rank, our_remote_idx);
+                    elems_to_swap * sizeof(*arr), remote_rank,
+                    our_remote_idx / SWAP_CHUNK_SIZE);
         if (ret) {
             handle_error_string("Error sending elem bytes");
             goto exit;
@@ -316,7 +317,9 @@ static void compact(void *args_) {
     int mid_rank = get_index_address(mid_idx);
     /* Use START + LENGTH / 2 as the tag (the midpoint index) since that's
      * guaranteed to be unique across iterations. */
-    int tag = OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (start + length / 2);
+    int tag =
+        OCOMPACT_MARKED_COUNT_MPI_TAG
+            + (start + length / 2) / SWAP_CHUNK_SIZE;
     size_t left_marked_count;
     size_t mid_prefix_sum;
     if (world_rank == mid_rank) {
@@ -525,7 +528,9 @@ static void shuffle(void *args_) {
     };
     int master_rank = get_index_address(start);
     int final_rank = get_index_address(start + length - 1);
-    int tag = OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (start + length / 2);
+    int tag =
+        OCOMPACT_MARKED_COUNT_MPI_TAG
+            + (start + length / 2) / SWAP_CHUNK_SIZE;
     size_t num_to_mark;
     size_t marked_in_prev;
     if (master_rank == final_rank) {
