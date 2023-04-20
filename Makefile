@@ -54,7 +54,7 @@ THIRD_PARTY_LIBS = $(LIBOBLIVIOUS_LIB)
 
 CPPFLAGS = -I. \
 	-I$(LIBOBLIVIOUS)/include
-CFLAGS = -O3 -Wall -Wextra -Werror
+CFLAGS = -march=native -mno-avx512f -O3 -Wall -Wextra -Werror
 LDFLAGS = \
 	-L$(LIBOBLIVIOUS)
 LDLIBS = \
