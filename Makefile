@@ -138,7 +138,7 @@ $(ENCLAVE_TARGET).signed: $(ENCLAVE_TARGET) $(ENCLAVE_KEY) $(ENCLAVE_PUBKEY) $(E
 $(ENCLAVE_KEY):
 	openssl genrsa -out $@ -3 3072
 
-$(ENCLAVE_PUBKEY): $(ENCLAVE_KEY) $(ENCLAVE_CONF)
+$(ENCLAVE_PUBKEY): $(ENCLAVE_KEY)
 	openssl rsa -in $< -pubout -out $@
 
 # Common.
