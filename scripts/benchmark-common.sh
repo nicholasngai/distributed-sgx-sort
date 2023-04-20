@@ -1,5 +1,7 @@
 #!/bin/sh
 
+. scripts/az/common.sh
+
 REPEAT=4
 
 if [ -z "${ENCLAVE_OFFSET+x}" ]; then
@@ -26,11 +28,15 @@ fi
 deallocate_az_vm() {
     first=$1
     last=$2
+
+    vm_ids=
     i=$first
     while [ "$i" -lt "$last" ]; do
-        az vm deallocate -g enclave_group -n "enclave$i" --no-wait
+        vm_ids="$vm_ids /subscriptions/$SUBSCRIPTION/resourceGroups/$GROUP/providers/Microsoft.Compute/virtualMachines/enclave$i"
+
         i=$(( i + 1 ))
     done
+    az vm deallocate --ids $vm_ids
 }
 
 get_mem_usage() {
