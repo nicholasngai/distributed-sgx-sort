@@ -50,7 +50,7 @@ for e in 32 16 8 4 2 1; do
                 continue
             fi
 
-            set_elem_size "$b" "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
+            set_sort_params "$a" "$e" "$b" "$s" "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
 
             for t in 1 2 4 8; do
                 if [ "$a" = 'bitonic' ]; then

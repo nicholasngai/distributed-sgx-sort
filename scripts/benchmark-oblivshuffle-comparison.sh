@@ -38,7 +38,7 @@ for b in 256 512 1024 2048 4096; do
         continue
     fi
 
-    set_elem_size $b
+    set_sort_params "$a" "$e" "$b" "$s" "$ENCLAVE_OFFSET" "$ENCLAVE_OFFSET"
 
     cmd="$cmd_template $a $s $t $REPEAT"
     echo "Command: $cmd"

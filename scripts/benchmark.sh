@@ -52,6 +52,8 @@ for e in 32 16 8 4 2 1; do
                 continue
             fi
 
+            set_sort_params "$a" "$e" "$b" "$s" "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
+
             for t in 1 2 4 8; do
                 if [ "$a" = 'bitonic' ]; then
                     output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-chunked$BITONIC_CHUNK_SIZE-elemsize$b-size$s-threads$t.txt"

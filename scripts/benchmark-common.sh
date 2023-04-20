@@ -46,14 +46,32 @@ get_mem_usage() {
         bucket|orshuffle)
             echo $(( elem_size * num_elems * 4 / num_enclaves ))
             ;;
+        *)
+            echo 'Invalid algorithm' >&2
+            exit 1
     esac
 }
 
-set_elem_size() {
-    elem_size=$1
-    first=$2
-    last=$3
+set_sort_params() {
+    algorithm=$1
+    num_enclaves=$2
+    elem_size=$3
+    num_elems=$4
+    first=$5
+    last=$6
+
+    # Rewrite ELEM_SIZE.
     find . -name '*.[ch]' -print0 | xargs -0 sed -Ei "s/^#define (ELEM_SIZE) .*\$/#define \\1 $elem_size/"
+
+    # Reconfigure NumHeapPages in enclave config.
+    mem_usage=$(get_mem_usage "$algorithm" "$num_enclaves" "$elem_size" "$num_elems")
+    num_heap_pages=$(( mem_usage / 4096 * 10 / 8 ))
+    if [ $num_heap_pages -lt 1048576 ]; then
+        num_heap_pages=1048576
+    fi
+    sed -Ei "s/^(NumHeapPages)=[0-9]+\$/\1=$num_heap_pages/" enclave/parallel.conf
+
+    # Make and sync.
     make -j >/dev/null
     ./scripts/sync.sh "$first" "$last" >/dev/null
 }

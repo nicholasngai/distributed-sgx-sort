@@ -54,6 +54,8 @@ for e in 32 16 8 4 2 1; do
         ./scripts/sync.sh
 
         for s in 256 4096 65536 1048576 16777216; do
+            set_sort_params "$a" "$e" "$b" "$s" "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
+
             for t in 1 2 4; do
                 output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$b-elemsize128-size$s-threads$t.txt"
                 if [ -f "$output_filename" ]; then
