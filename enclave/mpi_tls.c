@@ -11,11 +11,11 @@
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/ssl.h>
-#include "common/crypto.h"
 #include "common/defs.h"
 #include "common/error.h"
 #include "common/ocalls.h"
 #include "common/util.h"
+#include "enclave/crypto.h"
 #include "enclave/parallel_t.h"
 #include "enclave/synch.h"
 #include "enclave/util.h"

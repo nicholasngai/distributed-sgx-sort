@@ -1,8 +1,7 @@
-#include "crypto.h"
+#include "enclave/crypto.h"
 #include <limits.h>
 #include <stddef.h>
 #include <string.h>
-#include <threads.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/gcm.h>
@@ -12,7 +11,7 @@ mbedtls_entropy_context entropy_ctx;
 
 struct thread_local_ctx ctxs[THREAD_LOCAL_LIST_MAXLEN];
 size_t ctx_len;
-thread_local struct thread_local_ctx *ctx;
+_Thread_local struct thread_local_ctx *ctx;
 
 int rand_init(void) {
     mbedtls_entropy_init(&entropy_ctx);

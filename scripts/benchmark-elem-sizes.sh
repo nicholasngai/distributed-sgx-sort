@@ -15,10 +15,19 @@ mkdir -p "$BENCHMARK_DIR"
 
 s=1048576
 last_e=
+
+cleanup() {
+    if "$AZ" && [ -n "$last_e" ]; then
+        deallocate_az_vm "$ENCLAVE_OFFSET" "$(( last_e + ENCLAVE_OFFSET ))"
+    fi
+}
+trap cleanup EXIT
+
 for e in 32 16 8 4 2 1; do
     if "$AZ" && [ -n "$last_e" ]; then
         deallocate_az_vm "$(( e + ENCLAVE_OFFSET ))" "$(( last_e + ENCLAVE_OFFSET ))"
     fi
+    last_e=$e
 
     # Build command template.
     hosts=''
@@ -66,10 +75,4 @@ for e in 32 16 8 4 2 1; do
             done
         done
     done
-
-    last_e=$e
 done
-
-if "$AZ" && [ -n "$last_e" ]; then
-    deallocate_az_vm "$ENCLAVE_OFFSET" "$(( last_e + ENCLAVE_OFFSET ))"
-fi

@@ -7,15 +7,16 @@
 #include <limits.h>
 #include "common/ocalls.h"
 
-static inline unsigned long next_pow2l(unsigned long x) {
+static inline unsigned long long next_pow2ll(unsigned long long x) {
 #ifdef __GNUC__
-    unsigned long next = 1 << (sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1);
+    unsigned long long next =
+        1llu << (sizeof(x) * CHAR_BIT - __builtin_clzll(x) - 1);
     if (next < x) {
         next <<= 1;
     }
     return next;
 #else
-    unsigned long next = 1;
+    unsigned long long next = 1;
     while (next < x) {
         next <<= 1;
     }
@@ -23,11 +24,11 @@ static inline unsigned long next_pow2l(unsigned long x) {
 #endif
 }
 
-static inline unsigned long log2li(unsigned long x) {
+static inline unsigned long long log2ll(unsigned long long x) {
 #ifdef __GNUC__
-    return sizeof(x) * CHAR_BIT - __builtin_clzl(x) - 1;
+    return sizeof(x) * CHAR_BIT - __builtin_clzll(x) - 1;
 #else
-    unsigned long log = -1;
+    unsigned long long log = -1;
     while (x) {
         log++;
         x >>= 1;
@@ -47,6 +48,52 @@ static inline double get_time_difference(struct ocall_timespec *start,
     return (double) (end->tv_sec * 1000000000 + end->tv_nsec
             - (start->tv_sec * 1000000000 + start->tv_nsec))
         / 1000000000;
+}
+
+static inline uint16_t htons(uint16_t hostshort) {
+    union {
+        unsigned char bytes[sizeof(uint16_t)];
+        uint16_t t;
+    } u;
+    u.bytes[0] = (hostshort >> CHAR_BIT) & UCHAR_MAX;
+    u.bytes[1] = hostshort & UCHAR_MAX;
+    return u.t;
+}
+
+static inline uint16_t ntohs(uint16_t netshort) {
+    union {
+        unsigned char bytes[sizeof(uint16_t)];
+        uint16_t t;
+    } u = {
+        .t = netshort,
+    };
+    return ((uint16_t) u.bytes[0]) << CHAR_BIT
+        | u.bytes[1];
+}
+
+static inline uint32_t htonl(uint32_t hostlong) {
+    union {
+        unsigned char bytes[sizeof(uint32_t)];
+        uint32_t t;
+    } u;
+    u.bytes[0] = (hostlong >> (CHAR_BIT * 3)) & UCHAR_MAX;
+    u.bytes[1] = (hostlong >> (CHAR_BIT * 2)) & UCHAR_MAX;
+    u.bytes[2] = (hostlong >> CHAR_BIT) & UCHAR_MAX;
+    u.bytes[3] = hostlong & UCHAR_MAX;
+    return u.t;
+}
+
+static inline uint32_t ntohl(uint32_t netlong) {
+    union {
+        unsigned char bytes[sizeof(uint32_t)];
+        uint32_t t;
+    } u = {
+        .t = netlong,
+    };
+    return ((uint32_t) u.bytes[0]) << (CHAR_BIT * 3)
+        | ((uint32_t) u.bytes[1]) << (CHAR_BIT * 2)
+        | ((uint32_t) u.bytes[2]) << CHAR_BIT
+        | u.bytes[3];
 }
 
 static inline uint64_t htonll(uint64_t hostll) {
@@ -84,18 +131,5 @@ static inline uint64_t ntohll(uint64_t netll) {
 
 void *bsearch_ge(const void *key, const void *arr, size_t num_elems,
         size_t elem_size, int (*comparator)(const void *a, const void *b));
-
-static inline uint16_t do_ntohs(uint16_t netshort) {
-    union {
-        uint16_t netshort;
-        unsigned char bytes[2];
-    } u = {
-        .netshort = netshort
-    };
-    uint16_t hostshort =
-        (u.bytes[0] << 8)
-            | u.bytes[1];
-    return hostshort;
-}
 
 #endif /* distributed-sgx-sort/common/util.h */

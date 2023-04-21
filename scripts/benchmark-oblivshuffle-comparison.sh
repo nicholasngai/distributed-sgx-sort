@@ -22,6 +22,13 @@ warm_up="$cmd_template bitonic 256 1"
 echo "Warming up: $warm_up"
 $warm_up
 
+cleanup() {
+    if "$AZ"; then
+        deallocate_az_vm "$ENCLAVE_OFFSET" "$(( ENCLAVE_OFFSET + 1 ))"
+    fi
+}
+trap cleanup EXIT
+
 for b in 256 512 1024 2048 4096; do
     echo "Elem size: $b"
 
@@ -37,7 +44,3 @@ for b in 256 512 1024 2048 4096; do
     echo "Command: $cmd"
     $cmd | tee "$output_filename"
 done
-
-if "$AZ"; then
-    deallocate_az_vm "$ENCLAVE_OFFSET" "$(( ENCLAVE_OFFSET + 1 ))"
-fi

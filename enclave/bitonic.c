@@ -96,8 +96,8 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
         /* Post receive for remote elems to buffer. */
         mpi_tls_request_t request;
         ret = mpi_tls_irecv_bytes(buffer,
-                elems_to_swap * sizeof(*buffer), remote_rank, our_local_idx,
-                &request);
+                elems_to_swap * sizeof(*buffer), remote_rank,
+                our_local_idx / SWAP_CHUNK_SIZE, &request);
         if (ret) {
             handle_error_string("Error receiving elem bytes");
             return;
@@ -106,7 +106,8 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
         /* Send local elems to the remote. */
         ret =
             mpi_tls_send_bytes(arr + our_local_idx - local_start,
-                    elems_to_swap * sizeof(*arr), remote_rank, our_remote_idx);
+                    elems_to_swap * sizeof(*arr), remote_rank,
+                    our_remote_idx / SWAP_CHUNK_SIZE);
         if (ret) {
             handle_error_string("Error sending elem bytes");
             return;
@@ -389,7 +390,7 @@ static void sort(void *args_) {
 void bitonic_sort(elem_t *arr, size_t length, size_t num_threads) {
     total_length = length;
 
-    if (1lu << log2li(length) != length) {
+    if (1lu << log2ll(length) != length) {
         printf("Length must be a multiple of 2\n");
         goto exit;
     }

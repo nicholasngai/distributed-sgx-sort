@@ -11,11 +11,11 @@
 #include <string.h>
 #include <time.h>
 #include <liboblivious/primitives.h>
-#include "common/crypto.h"
 #include "common/defs.h"
 #include "common/error.h"
 #include "common/ocalls.h"
 #include "common/util.h"
+#include "enclave/crypto.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/nonoblivious.h"
 #include "enclave/parallel_enc.h"
@@ -143,8 +143,8 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
         /* Post receive for remote elems to buffer. */
         mpi_tls_request_t request;
         ret = mpi_tls_irecv_bytes(buffer,
-                elems_to_swap * sizeof(*buffer), remote_rank, our_local_idx,
-                &request);
+                elems_to_swap * sizeof(*buffer), remote_rank,
+                our_local_idx / SWAP_CHUNK_SIZE, &request);
         if (ret) {
             handle_error_string("Error receiving elem bytes");
             goto exit;
@@ -153,7 +153,8 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
         /* Send local elems to the remote. */
         ret =
             mpi_tls_send_bytes(arr + our_local_idx - local_start,
-                    elems_to_swap * sizeof(*arr), remote_rank, our_remote_idx);
+                    elems_to_swap * sizeof(*arr), remote_rank,
+                    our_remote_idx / SWAP_CHUNK_SIZE);
         if (ret) {
             handle_error_string("Error sending elem bytes");
             goto exit;
@@ -320,7 +321,9 @@ static void compact(void *args_) {
     int mid_rank = get_index_address(mid_idx);
     /* Use START + LENGTH / 2 as the tag (the midpoint index) since that's
      * guaranteed to be unique across iterations. */
-    int tag = OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (start + length / 2);
+    int tag =
+        OCOMPACT_MARKED_COUNT_MPI_TAG
+            + (start + length / 2) / SWAP_CHUNK_SIZE;
     size_t left_marked_count;
     size_t mid_prefix_sum;
     if (world_rank == mid_rank) {
@@ -394,17 +397,17 @@ static void compact(void *args_) {
         .start = start,
         .length = length / 2,
         .offset = offset % (length / 2),
-        .ret = 0,
     };
     struct compact_args right_args = {
         .arr = arr,
         .start = start + length / 2,
         .length = length / 2,
         .offset = (offset + left_marked_count) % (length / 2),
-        .ret = 0,
     };
     if (start + length / 2 >= local_start + local_length) {
         /* Right is remote; do just the left. */
+        left_args.marked = marked,
+        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = num_threads;
         compact(&left_args);
         if (left_args.ret) {
@@ -413,6 +416,8 @@ static void compact(void *args_) {
         }
     } else if (start + length / 2 <= local_start) {
         /* Left is remote; do just the right. */
+        right_args.marked = marked,
+        right_args.marked_prefix_sums = marked_prefix_sums,
         right_args.num_threads = num_threads;
         compact(&right_args);
         if (right_args.ret) {
@@ -421,7 +426,11 @@ static void compact(void *args_) {
         }
     } else if (num_threads > 1) {
         /* Do both in a threaded manner. */
+        left_args.marked = marked,
+        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = num_threads / 2;
+        right_args.marked = marked + length / 2,
+        right_args.marked_prefix_sums = marked_prefix_sums + length / 2,
         right_args.num_threads = num_threads / 2;
         struct thread_work right_work = {
             .type = THREAD_WORK_SINGLE,
@@ -439,7 +448,11 @@ static void compact(void *args_) {
         thread_wait(&right_work);
     } else {
         /* Do both in our own thread. */
+        left_args.marked = marked,
+        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = 1;
+        right_args.marked = marked + length / 2,
+        right_args.marked_prefix_sums = marked_prefix_sums + length / 2,
         right_args.num_threads = 1;
         compact(&left_args);
         if (left_args.ret) {
@@ -465,11 +478,7 @@ static void compact(void *args_) {
     }
 
 exit:
-    {
-        int expected = 0;
-        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
-                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-    }
+    args->ret = ret;
 }
 
 struct shuffle_args {
@@ -518,7 +527,9 @@ static void shuffle(void *args_) {
     };
     int master_rank = get_index_address(start);
     int final_rank = get_index_address(start + length - 1);
-    int tag = OCOMPACT_MARKED_COUNT_MPI_TAG + (int) (start + length / 2);
+    int tag =
+        OCOMPACT_MARKED_COUNT_MPI_TAG
+            + (start + length / 2) / SWAP_CHUNK_SIZE;
     size_t num_to_mark;
     size_t marked_in_prev;
     if (master_rank == final_rank) {
@@ -609,7 +620,6 @@ static void shuffle(void *args_) {
         .length = length,
         .offset = 0,
         .num_threads = num_threads,
-        .ret = 0,
     };
     compact(&compact_args);
     if (compact_args.ret) {
@@ -622,16 +632,16 @@ static void shuffle(void *args_) {
         .arr = arr,
         .start = start,
         .length = length / 2,
-        .ret = 0,
     };
     struct shuffle_args right_args = {
         .arr = arr,
         .start = start + length / 2,
         .length = length / 2,
-        .ret = 0,
     };
     if (start + length / 2 >= local_start + local_length) {
         /* Right is remote; do just the left. */
+        left_args.marked = marked,
+        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = num_threads;
         shuffle(&left_args);
         if (left_args.ret) {
@@ -640,6 +650,8 @@ static void shuffle(void *args_) {
         }
     } else if (start + length / 2 <= local_start) {
         /* Left is remote; do just the right. */
+        right_args.marked = marked,
+        right_args.marked_prefix_sums = marked_prefix_sums,
         right_args.num_threads = num_threads;
         shuffle(&right_args);
         if (right_args.ret) {
@@ -648,7 +660,11 @@ static void shuffle(void *args_) {
         }
     } else if (num_threads > 1) {
         /* Do both in a threaded manner. */
+        left_args.marked = marked,
+        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = num_threads / 2;
+        right_args.marked = marked + length / 2,
+        right_args.marked_prefix_sums = marked_prefix_sums + length / 2,
         right_args.num_threads = num_threads / 2;
         struct thread_work right_work = {
             .type = THREAD_WORK_SINGLE,
@@ -666,7 +682,11 @@ static void shuffle(void *args_) {
         thread_wait(&right_work);
     } else {
         /* Do both in our own thread. */
+        left_args.marked = marked,
+        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = 1;
+        right_args.marked = marked,
+        right_args.marked_prefix_sums = marked_prefix_sums,
         right_args.num_threads = 1;
         shuffle(&left_args);
         if (left_args.ret) {
@@ -683,11 +703,7 @@ static void shuffle(void *args_) {
     ret = 0;
 
 exit:
-    {
-        int expected = 0;
-        __atomic_compare_exchange_n(&args->ret, &expected, ret, false,
-                __ATOMIC_RELAXED, __ATOMIC_RELAXED);
-    }
+    args->ret = ret;
 }
 
 /* For assign random ORP IDs to ARR[i * LENGTH / NUM_THREADS] to
@@ -749,12 +765,25 @@ int orshuffle_sort(elem_t *arr, size_t length, size_t num_threads) {
 
     total_length = length;
 
+    bool *marked = malloc(local_length * sizeof(*marked));
+    if (!marked) {
+        perror("malloc marked arr");
+        ret = errno;
+        goto exit;
+    }
+    size_t *marked_prefix_sums =
+        malloc(local_length * sizeof(*marked_prefix_sums));
+    if (!marked_prefix_sums) {
+        perror("malloc marked prefix sums arr");
+        ret = errno;
+        goto exit_free_marked;
+    }
+
     struct shuffle_args shuffle_args = {
         .arr = arr,
         .start = 0,
         .length = length,
         .num_threads = num_threads,
-        .ret = 0,
     };
     shuffle(&shuffle_args);
     if (shuffle_args.ret) {

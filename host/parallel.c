@@ -1,6 +1,9 @@
-#include <stdio.h>
-#include <time.h>
+#include <errno.h>
 #include <pthread.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 #include <mpi.h>
 #include "common/error.h"
 #include "common/ocalls.h"
@@ -208,8 +211,6 @@ exit:
 
 int main(int argc, char **argv) {
     int ret = -1;
-    size_t num_threads = -1;
-    size_t num_runs = 1;
 
     /* Read arguments. */
 
@@ -243,46 +244,47 @@ int main(int argc, char **argv) {
     }
 #undef SORT_TYPE_STR
 
-    size_t length;
-    {
+    errno = 0;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-        ssize_t l = atoll(argv[3]);
+    size_t length = strtoull(argv[3], NULL, 10);
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-        ssize_t l = atoll(argv[2]);
+    size_t length = strtoull(argv[2], NULL, 10);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-        if (l < 0) {
-            printf("Invalid array size\n");
-            return ret;
-        }
-        length = l;
+    if (errno) {
+        printf("Invalid array size\n");
+        return ret;
     }
 
+    errno = 0;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    ssize_t n = atoll(argv[4]);
+    size_t num_threads = strtoll(argv[4], NULL, 10);
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ssize_t n = atoll(argv[3]);
+    size_t num_threads = strtoll(argv[3], NULL, 10);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    if (n < 0) {
+    if (errno) {
         printf("Invalid number of threads\n");
         return ret;
     }
-    num_threads = n;
 
+    size_t num_runs = 1;
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     if (argc >= 6) {
-        ssize_t n = atoll(argv[5]);
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (argc >= 5) {
-        ssize_t n = atoll(argv[4]);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-        if (n < 0) {
+        errno = 0;
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+        num_runs = strtoull(argv[5], NULL, 10);
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+        num_runs = strtoull(argv[4], NULL, 10);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+        if (errno) {
             printf("Invalid number of runs\n");
             return ret;
         }
-        num_runs = n;
     }
 
-    if (sort_type == SORT_OPAQUE && n > 1) {
+    if (sort_type == SORT_OPAQUE && num_threads > 1) {
         printf("Opaque sort does not support more than 1 thread\n");
         return ret;
     }

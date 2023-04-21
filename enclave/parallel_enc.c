@@ -2,7 +2,6 @@
 #include <string.h>
 #include <liboblivious/primitives.h>
 #include <mbedtls/ctr_drbg.h>
-#include "common/crypto.h"
 #include "common/defs.h"
 #include "common/elem_t.h"
 #include "common/error.h"
@@ -10,6 +9,7 @@
 #include "common/util.h"
 #include "enclave/bitonic.h"
 #include "enclave/bucket.h"
+#include "enclave/crypto.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/opaque.h"
 #include "enclave/orshuffle.h"
@@ -84,7 +84,7 @@ int ecall_sort_alloc_arr(size_t total_length_, enum sort_type sort_type) {
              * number of enclaves (since each enclaves needs at least two
              * buckets. */
             size_t num_buckets =
-                MAX(next_pow2l(total_length) * 2 / BUCKET_SIZE,
+                MAX(next_pow2ll(total_length) * 2 / BUCKET_SIZE,
                         (size_t) world_size * 2);
             size_t local_num_buckets =
                 num_buckets * (world_rank + 1) / world_size
