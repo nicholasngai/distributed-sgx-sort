@@ -6,13 +6,13 @@ set -euo pipefail
 SCRIPTPATH="$( cd -- "$(dirname "$0")" > /dev/null 2>&1 ; pwd -P )"
 ROOTPATH="$( dirname "${SCRIPTPATH}" )"
 
-if [ $# -eq 2 ]; then
-    first=$1
-    last=$2
-else
-    first=0
-    last=31
+if [ $# -lt 2 ]; then
+    echo "Usage: $0 <first> <last>"
+    exit 1
 fi
+
+first=$1
+last=$2
 
 mkdir -p ${ROOTPATH}
 
