@@ -18,6 +18,7 @@ t=1
 # Build command template.
 cmd_template="mpiexec -hosts enclave$ENCLAVE_OFFSET ./host/parallel ./enclave/parallel_enc.signed"
 
+set_sort_params bitonic "$e" "$b" 4096 "$ENCLAVE_OFFSET" "$ENCLAVE_OFFSET"
 warm_up="$cmd_template bitonic 256 1"
 echo "Warming up: $warm_up"
 $warm_up

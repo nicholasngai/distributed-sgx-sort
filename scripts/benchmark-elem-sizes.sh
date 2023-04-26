@@ -39,6 +39,7 @@ for e in 32 16 8 4 2 1; do
     hosts="${hosts%,}"
     cmd_template="mpiexec -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed"
 
+    set_sort_params bitonic "$e" 128 4096 "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
     warm_up="$cmd_template bitonic 4096 1"
     echo "Warming up: $warm_up"
     $warm_up
