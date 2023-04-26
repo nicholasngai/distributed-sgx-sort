@@ -327,11 +327,11 @@ static void compact(void *args_) {
          * middle element. */
         if (world_rank == master_rank) {
             /* We are also the master, so set the local variable. */
-            mid_prefix_sum = marked_prefix_sums[mid_idx - start];
+            mid_prefix_sum = marked_prefix_sums[mid_idx - local_start];
         } else {
             /* Send it to the master. */
             ret =
-                mpi_tls_send_bytes(&marked_prefix_sums[mid_idx - start],
+                mpi_tls_send_bytes(&marked_prefix_sums[mid_idx - local_start],
                         sizeof(*marked_prefix_sums), master_rank, tag);
             if (ret) {
                 handle_error_string(
@@ -357,7 +357,9 @@ static void compact(void *args_) {
         }
 
         /* Compute the number of marked elements. */
-        left_marked_count = mid_prefix_sum - marked_prefix_sums[0] + marked[0];
+        left_marked_count =
+            mid_prefix_sum - marked_prefix_sums[start - local_start]
+                + marked[start - local_start];
 
         /* Send it to everyone else. */
         for (int rank = master_rank + 1; rank <= final_rank; rank++) {
@@ -395,16 +397,14 @@ static void compact(void *args_) {
     };
     struct compact_args right_args = {
         .arr = arr,
-        .marked = marked + length / 2,
-        .marked_prefix_sums = marked_prefix_sums + length / 2,
+        .marked = marked,
+        .marked_prefix_sums = marked_prefix_sums,
         .start = start + length / 2,
         .length = length / 2,
         .offset = (offset + left_marked_count) % (length / 2),
     };
     if (start + length / 2 >= local_start + local_length) {
         /* Right is remote; do just the left. */
-        left_args.marked = marked,
-        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = num_threads;
         compact(&left_args);
         if (left_args.ret) {
@@ -413,8 +413,6 @@ static void compact(void *args_) {
         }
     } else if (start + length / 2 <= local_start) {
         /* Left is remote; do just the right. */
-        right_args.marked = marked,
-        right_args.marked_prefix_sums = marked_prefix_sums,
         right_args.num_threads = num_threads;
         compact(&right_args);
         if (right_args.ret) {
@@ -423,11 +421,7 @@ static void compact(void *args_) {
         }
     } else if (num_threads > 1) {
         /* Do both in a threaded manner. */
-        left_args.marked = marked,
-        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = num_threads / 2;
-        right_args.marked = marked + length / 2,
-        right_args.marked_prefix_sums = marked_prefix_sums + length / 2,
         right_args.num_threads = num_threads / 2;
         struct thread_work right_work = {
             .type = THREAD_WORK_SINGLE,
@@ -445,11 +439,7 @@ static void compact(void *args_) {
         thread_wait(&right_work);
     } else {
         /* Do both in our own thread. */
-        left_args.marked = marked,
-        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = 1;
-        right_args.marked = marked + length / 2,
-        right_args.marked_prefix_sums = marked_prefix_sums + length / 2,
         right_args.num_threads = 1;
         compact(&left_args);
         if (left_args.ret) {
@@ -639,18 +629,20 @@ static void shuffle(void *args_) {
     /* Recursively shuffle. */
     struct shuffle_args left_args = {
         .arr = arr,
+        .marked = marked,
+        .marked_prefix_sums = marked_prefix_sums,
         .start = start,
         .length = length / 2,
     };
     struct shuffle_args right_args = {
         .arr = arr,
+        .marked = marked,
+        .marked_prefix_sums = marked_prefix_sums,
         .start = start + length / 2,
         .length = length / 2,
     };
     if (start + length / 2 >= local_start + local_length) {
         /* Right is remote; do just the left. */
-        left_args.marked = marked,
-        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = num_threads;
         shuffle(&left_args);
         if (left_args.ret) {
@@ -659,8 +651,6 @@ static void shuffle(void *args_) {
         }
     } else if (start + length / 2 <= local_start) {
         /* Left is remote; do just the right. */
-        right_args.marked = marked,
-        right_args.marked_prefix_sums = marked_prefix_sums,
         right_args.num_threads = num_threads;
         shuffle(&right_args);
         if (right_args.ret) {
@@ -669,11 +659,7 @@ static void shuffle(void *args_) {
         }
     } else if (num_threads > 1) {
         /* Do both in a threaded manner. */
-        left_args.marked = marked,
-        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = num_threads / 2;
-        right_args.marked = marked + length / 2,
-        right_args.marked_prefix_sums = marked_prefix_sums + length / 2,
         right_args.num_threads = num_threads / 2;
         struct thread_work right_work = {
             .type = THREAD_WORK_SINGLE,
@@ -691,11 +677,7 @@ static void shuffle(void *args_) {
         thread_wait(&right_work);
     } else {
         /* Do both in our own thread. */
-        left_args.marked = marked,
-        left_args.marked_prefix_sums = marked_prefix_sums,
         left_args.num_threads = 1;
-        right_args.marked = marked,
-        right_args.marked_prefix_sums = marked_prefix_sums,
         right_args.num_threads = 1;
         shuffle(&left_args);
         if (left_args.ret) {
