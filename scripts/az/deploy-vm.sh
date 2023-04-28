@@ -11,8 +11,8 @@ if [ "$#" -lt 2 ]; then
     exit 1
 fi
 
-VM_START=$1
-VM_STOP=$2
+first=$1
+last=$2
 
 cd "$(dirname "$0")"
 
@@ -22,8 +22,8 @@ cd "$(dirname "$0")"
 az group create -g "$GROUP" --location "$LOCATION"
 
 existing_vms=$(az vm list -g "$GROUP" -o tsv | cut -d "$(printf '\t')" -f 16)
-i=$VM_START
-while [ "$i" -le "$VM_STOP" ]; do
+i=$first
+while [ "$i" -le "$last" ]; do
     (
         vm_name="$(get_vm_name "$i")"
 
