@@ -58,7 +58,7 @@ get_mem_usage() {
     esac
 }
 
-set_sort_params() {
+set_sort_params_unlocked () {
     algorithm=$1
     num_enclaves=$2
     elem_size=$3
@@ -66,22 +66,25 @@ set_sort_params() {
     first=$5
     last=$6
 
+    # Rewrite ELEM_SIZE.
+    find . -name '*.[ch]' -print0 | xargs -0 sed -Ei "s/^#define (ELEM_SIZE) .*\$/#define \\1 $elem_size/"
+
+    # Reconfigure NumHeapPages in enclave config.
+    mem_usage=$(get_mem_usage "$algorithm" "$num_enclaves" "$elem_size" "$num_elems")
+    num_heap_pages=$(( mem_usage / 4096 * 3 / 2 ))
+    if [ $num_heap_pages -lt 1048576 ]; then
+        num_heap_pages=1048576
+    fi
+    sed -Ei "s/^(NumHeapPages)=[0-9]+\$/\1=$num_heap_pages/" enclave/parallel.conf
+
+    # Make and sync.
+    make -j >/dev/null
+    ./scripts/sync.sh "$first" "$last" >/dev/null
+}
+
+set_sort_params() {
     (
         flock 9
-
-        # Rewrite ELEM_SIZE.
-        find . -name '*.[ch]' -print0 | xargs -0 sed -Ei "s/^#define (ELEM_SIZE) .*\$/#define \\1 $elem_size/"
-
-        # Reconfigure NumHeapPages in enclave config.
-        mem_usage=$(get_mem_usage "$algorithm" "$num_enclaves" "$elem_size" "$num_elems")
-        num_heap_pages=$(( mem_usage / 4096 * 3 / 2 ))
-        if [ $num_heap_pages -lt 1048576 ]; then
-            num_heap_pages=1048576
-        fi
-        sed -Ei "s/^(NumHeapPages)=[0-9]+\$/\1=$num_heap_pages/" enclave/parallel.conf
-
-        # Make and sync.
-        make -j >/dev/null
-        ./scripts/sync.sh "$first" "$last" >/dev/null
+        set_sort_params_unlocked "$@"
     ) 9<.
 }

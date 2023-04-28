@@ -10,7 +10,7 @@ BENCHMARK_DIR=benchmarks
 
 mkdir -p "$BENCHMARK_DIR"
 
-a=bucket
+a=bitonic
 b=128
 s=16777216
 t=1
@@ -23,7 +23,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for e in 16 4 1; do
+for e in 16 4; do
     if "$AZ" && [ -n "$last_e" ]; then
         deallocate_az_vm "$(( e + ENCLAVE_OFFSET ))" "$(( last_e + ENCLAVE_OFFSET ))"
     fi
@@ -44,16 +44,16 @@ for e in 16 4 1; do
     echo "Warming up: $warm_up"
     $warm_up
 
-    for z in 512 1024 2048 4096 8192 16384 32768 65536 131072 262144 524288 1048576 2097152 4194304; do
-        echo "Bucket size: $z"
+    for c in 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384; do
+        echo "Chunk size: $c"
 
         (
             flock 9
-            sed -Ei "s/^#define (BUCKET_SIZE) .*\$/#define \\1 $z/" enclave/bucket.h
+            sed -Ei "s/^#define (SWAP_CHUNK_SIZE) .*\$/#define \\1 $c/" enclave/bitonic.c
             set_sort_params_unlocked "$a" "$e" "$b" "$s" "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
         ) 9<.
 
-        output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$z-elemsize$b-size$s-threads$t.txt"
+        output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-chunked$c-elemsize$b-size$s-threads$t.txt"
         if [ -f "$output_filename" ]; then
             echo "Output file $output_filename already exists; skipping"
             continue
