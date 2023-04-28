@@ -45,11 +45,21 @@ get_mem_usage() {
     elem_size=$3
     num_elems=$4
 
+    # Azure SGX seems to have an issue where using a quarter or more of the
+    # VM memory in the working set causes serious peformance degradations. The
+    # memory usage values here are thus all artificially doubled for bitonic
+    # sort and bcuket sort in order to account for this. ORShuffle never uses
+    # the entire EPC memory at once as part of its working set, it does not need
+    # to be doubled.
+
     case "$algorithm" in
         bitonic)
-            echo $(( elem_size * num_elems / num_enclaves ))
+            echo $(( elem_size * num_elems / num_enclaves * 2 ))
             ;;
-        bucket|orshuffle)
+        bucket)
+            echo $(( elem_size * num_elems * 4 / num_enclaves * 2 ))
+            ;;
+        orshuffle)
             echo $(( elem_size * num_elems * 4 / num_enclaves ))
             ;;
         *)
