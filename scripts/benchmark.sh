@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 BENCHMARK_DIR=benchmarks
 BITONIC_CHUNK_SIZE=4096
 BUCKET_SIZE=512
-MAX_MEM_SIZE=34359738368
+MAX_MEM_SIZE=$(( 1 << 35 ))
 
 mkdir -p "$BENCHMARK_DIR"
 
