@@ -1,31 +1,34 @@
-#!/bin/bash
+#!/bin/sh
 
-set -euo pipefail
+set -eux
 
-if [ $(id -u) -ne 0 ]; then
-    echo 'This script must be run as root!'
-    exit 13
-fi
+sudo apt install -y curl
 
-apt install -y curl
+sudo mkdir -p /etc/apt/keyrings
 
 if ! [ -f /etc/apt/sources.list.d/intel-sgx.list ]; then
-    echo 'deb [arch=amd64] https://download.01.org/intel-sgx/sgx_repo/ubuntu focal main' | tee /etc/apt/sources.list.d/intel-sgx.list
+    echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/intel-sgx-deb.gpg] https://download.01.org/intel-sgx/sgx_repo/ubuntu focal main' \
+        | sudo tee /etc/apt/sources.list.d/intel-sgx.list
 fi
-if ! [ -f /etc/apt/trusted.gpg.d/intel-sgx-deb.asc ]; then
-    curl -Lo /etc/apt/trusted.gpg.d/intel-sgx-deb.asc https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key
+if ! [ -f /etc/apt/keyrings/intel-sgx-deb.gpg ]; then
+    curl -fsSL https://download.01.org/intel-sgx/sgx_repo/ubuntu/intel-sgx-deb.key \
+        | gpg --dearmor \
+        | sudo tee /etc/apt/keyrings/intel-sgx-deb.gpg >/dev/null
 fi
 
 if ! [ -f /etc/apt/sources.list.d/msprod.list ]; then
-    echo "deb [arch=amd64] https://packages.microsoft.com/ubuntu/20.04/prod focal main" | tee /etc/apt/sources.list.d/msprod.list
+    echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/ubuntu/20.04/prod focal main' \
+        | sudo tee /etc/apt/sources.list.d/msprod.list
 fi
-if ! [ -f /etc/apt/trusted.gpg.d/microsoft.asc ]; then
-    curl -Lo /etc/apt/trusted.gpg.d/microsoft.asc https://packages.microsoft.com/keys/microsoft.asc
+if ! [ -f /etc/apt/keyrings/microsoft.gpg ]; then
+    curl -fsSL /etc/apt/trusted.gpg.d/microsoft.asc https://packages.microsoft.com/keys/microsoft.asc \
+        | gpg --dearmor \
+        | sudo tee /etc/apt/keyrings/microsoft.gpg >/dev/null
 fi
 
-apt update
-apt upgrade -y
-apt install -y \
+sudo apt update
+sudo apt upgrade -y
+sudo apt install -y \
     az-dcap-client \
     build-essential \
     libmbedtls12 \

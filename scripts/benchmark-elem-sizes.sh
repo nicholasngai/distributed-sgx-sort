@@ -13,7 +13,7 @@ MAX_MEM_SIZE=$(( 1 << 35 ))
 
 mkdir -p "$BENCHMARK_DIR"
 
-b=128
+s=16777216
 last_e=
 
 cleanup() {
@@ -39,13 +39,13 @@ for e in 32 16 8 4 2 1; do
     hosts="${hosts%,}"
     cmd_template="mpiexec -hosts $hosts ./host/parallel ./enclave/parallel_enc.signed"
 
-    set_sort_params bitonic "$e" "$b" 4096 "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
+    set_sort_params bitonic "$e" 128 4096 "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
     warm_up="$cmd_template bitonic 4096 1"
     echo "Warming up: $warm_up"
     $warm_up
 
     for a in bitonic bucket orshuffle; do
-        for s in 16777216 33554432 67108864 134217728 268435456 536870912 1073741824; do
+        for b in 32 128 512 1024 4096; do
             if [ "$(get_mem_usage "$a" "$e" "$b" "$s")" -gt "$MAX_MEM_SIZE" ]; then
                 echo "Skipping $a with E = $e, b = $b, and N = $s due to size"
                 continue

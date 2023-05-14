@@ -4,7 +4,7 @@
 #include <mpi.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include "common/node_t.h"
+#include "common/elem_t.h"
 #include "host/error.h"
 
 static inline int init_mpi(int *argc, char ***argv, int *world_rank, int *world_size) {
@@ -48,9 +48,9 @@ static inline bool is_pow2(size_t val) {
     return i == val;
 }
 
-static inline int node_comparator(const void *a_, const void *b_) {
-    const node_t *a = a_;
-    const node_t *b = b_;
+static inline int elem_comparator(const void *a_, const void *b_) {
+    const elem_t *a = a_;
+    const elem_t *b = b_;
     return (a->key > b->key) - (a->key < b->key);
 }
 

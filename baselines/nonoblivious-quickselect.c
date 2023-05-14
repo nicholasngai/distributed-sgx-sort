@@ -7,8 +7,8 @@
 #include <string.h>
 #include <time.h>
 #include "baselines/common.h"
+#include "common/elem_t.h"
 #include "common/error.h"
-#include "common/node_t.h"
 #include "common/util.h"
 #include "host/error.h"
 
@@ -44,13 +44,13 @@ struct sample {
     uint64_t orp_id;
 };
 
-static int node_sample_node_comparator(const node_t *a, const struct sample *b) {
+static int elem_sample_elem_comparator(const elem_t *a, const struct sample *b) {
     int comp_key = (a->key > b->key) - (a->key < b->key);
     int comp_orp_id = (a->orp_id > b->orp_id) - (a->orp_id < b->orp_id);
     return (comp_key << 1) + comp_orp_id;
 }
 
-static int distributed_quickselect_helper(node_t *arr, size_t local_length,
+static int distributed_quickselect_helper(elem_t *arr, size_t local_length,
         size_t *targets, struct sample *samples, size_t *sample_idxs,
         size_t num_targets, size_t left, size_t right) {
     int ret;
@@ -60,7 +60,7 @@ static int distributed_quickselect_helper(node_t *arr, size_t local_length,
         goto exit;
     }
 
-    /* Get the next master by choosing the lowest node with a non-empty
+    /* Get the next master by choosing the lowest elem with a non-empty
      * slice. */
     bool ready = true;
     bool not_ready = false;
@@ -106,12 +106,12 @@ static int distributed_quickselect_helper(node_t *arr, size_t local_length,
     /* Get pivot. */
     struct sample pivot;
     if (world_rank == master_rank) {
-        /* Use first node as pivot. This is a random selection since this
+        /* Use first elem as pivot. This is a random selection since this
          * samplesort should happen after ORP. */
         pivot.key = arr[left].key;
         pivot.orp_id = arr[left].orp_id;
 
-        /* Send pivot to all other nodes. */
+        /* Send pivot to all other elems. */
         for (int i = 0; i < world_size; i++) {
             if (i != world_rank) {
                 ret = wrap_mpi_send_bytes(&pivot, sizeof(pivot), i, 0);
@@ -148,7 +148,7 @@ static int distributed_quickselect_helper(node_t *arr, size_t local_length,
             /* Scan left for elements greater than the pivot. */
 
             /* If found, start scanning right. */
-            if (node_sample_node_comparator(&arr[partition_left], &pivot) > 0) {
+            if (elem_sample_elem_comparator(&arr[partition_left], &pivot) > 0) {
                 partition_state = PARTITION_SCAN_RIGHT;
             } else {
                 partition_left++;
@@ -160,9 +160,9 @@ static int distributed_quickselect_helper(node_t *arr, size_t local_length,
             /* Scan right for elements less than the pivot. */
 
             /* If found, swap and start scanning left. */
-            if (node_sample_node_comparator(&arr[partition_right - 1], &pivot)
+            if (elem_sample_elem_comparator(&arr[partition_right - 1], &pivot)
                     < 0) {
-                node_t temp;
+                elem_t temp;
                 memcpy(&temp, &arr[partition_left], sizeof(*arr));
                 memcpy(&arr[partition_left], &arr[partition_right - 1],
                         sizeof(*arr));
@@ -182,7 +182,7 @@ static int distributed_quickselect_helper(node_t *arr, size_t local_length,
     /* Finish partitioning by swapping the pivot into the center, if we are the
      * master. */
     if (world_rank == master_rank) {
-        node_t temp;
+        elem_t temp;
         memcpy(&temp, &arr[partition_right - 1], sizeof(*arr));
         memcpy(&arr[partition_right - 1], &arr[left], sizeof(*arr));
         memcpy(&arr[left], &temp, sizeof(*arr));
@@ -293,7 +293,7 @@ exit:
  * LOCAL_START. Resulting samples are stored in SAMPLES. TARGETS must be a
  * sorted array. */
 
-static int distributed_quickselect(node_t *arr, size_t local_length,
+static int distributed_quickselect(elem_t *arr, size_t local_length,
         size_t *targets, struct sample *samples, size_t *sample_idxs,
         size_t num_targets) {
     int ret =
@@ -309,7 +309,7 @@ exit:
 }
 
 /* Performs a non-oblivious samplesort across all enclaves. */
-static int distributed_sample_partition(node_t *arr, node_t *out,
+static int distributed_sample_partition(elem_t *arr, elem_t *out,
         size_t local_length, size_t total_length) {
     size_t src_local_start = total_length * world_rank / world_size;
     size_t src_local_length =
@@ -345,7 +345,7 @@ static int distributed_sample_partition(node_t *arr, node_t *out,
             (sample_idxs[world_rank + 1] - sample_idxs[world_rank])
                 * sizeof(*out));
 
-    /* Construct asynchronous send requests to send nodes to the remote. */
+    /* Construct asynchronous send requests to send elems to the remote. */
     for (int i = 0; i < world_size; i++) {
         if (i != world_rank) {
             ret = wrap_mpi_isend_bytes(arr + sample_idxs[i],
@@ -358,7 +358,7 @@ static int distributed_sample_partition(node_t *arr, node_t *out,
         }
     }
 
-    /* Receive all incoming nodes. */
+    /* Receive all incoming elems. */
     for (int i = 0; i < world_size - 1; i++) {
         MPI_Status status;
         ret = wrap_mpi_recv_bytes(out + num_received,
@@ -383,16 +383,16 @@ exit:
     return ret;
 }
 
-int nonoblivious_sort(node_t *arr, size_t local_length, size_t total_length) {
+int nonoblivious_sort(elem_t *arr, size_t local_length, size_t total_length) {
     int ret;
 
     if (world_size == 1) {
-        qsort(arr, total_length, sizeof(*arr), node_comparator);
+        qsort(arr, total_length, sizeof(*arr), elem_comparator);
         ret = 0;
         goto exit;
     }
 
-    node_t *out = malloc(local_length * sizeof(*out));
+    elem_t *out = malloc(local_length * sizeof(*out));
     if (!out) {
         perror("malloc sort out");
         ret = errno;
@@ -407,7 +407,7 @@ int nonoblivious_sort(node_t *arr, size_t local_length, size_t total_length) {
     }
 
     /* Local quicksort. */
-    qsort(out, local_length, sizeof(*out), node_comparator);
+    qsort(out, local_length, sizeof(*out), elem_comparator);
 
 exit_free_out:
     free(out);
@@ -440,7 +440,7 @@ int main(int argc, char **argv) {
     size_t local_length = length / world_size;
 
     /* Allocate array. */
-    node_t *arr = calloc(local_length, sizeof(node_t));
+    elem_t *arr = calloc(local_length, sizeof(elem_t));
     if (!arr) {
         perror("alloc array");
         ret = errno;

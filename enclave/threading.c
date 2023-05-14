@@ -30,6 +30,7 @@ void thread_work_push(struct thread_work *work) {
             break;
         case THREAD_WORK_ITER:
             if (!work->iter.count) {
+                sema_up(&work->done);
                 return;
             }
             work->iter.curr = 0;
