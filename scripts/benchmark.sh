@@ -45,7 +45,7 @@ for e in 32 16 8 4 2 1; do
     $warm_up
 
     for a in bitonic bucket orshuffle; do
-        for s in 256 4096 65536 1048576 4194304 16777216 67108864 268435456; do
+        for s in 16777216 33554432 67108864 134217728 268435456 536870912 1073741824; do
             if [ "$(get_mem_usage "$a" "$e" "$b" "$s")" -gt "$MAX_MEM_SIZE" ]; then
                 echo "Skipping $a with E = $e, b = $b, and N = $s due to size"
                 continue

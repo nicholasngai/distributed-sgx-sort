@@ -13,7 +13,7 @@ MAX_MEM_SIZE=$(( 1 << 35 ))
 
 mkdir -p "$BENCHMARK_DIR"
 
-s=1048576
+s=16777216
 last_e=
 
 cleanup() {
@@ -45,7 +45,7 @@ for e in 32 16 8 4 2 1; do
     $warm_up
 
     for a in bitonic bucket orshuffle; do
-        for b in 32 128 512 2048 8192 32768; do
+        for b in 32 128 512 1024 4096; do
             if [ "$(get_mem_usage "$a" "$e" "$b" "$s")" -gt "$MAX_MEM_SIZE" ]; then
                 echo "Skipping $a with E = $e, b = $b, and N = $s due to size"
                 continue
