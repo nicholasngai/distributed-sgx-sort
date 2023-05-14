@@ -1,11 +1,15 @@
 #include "enclave/opaque.h"
+#include <errno.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <liboblivious/primitives.h>
 #include "common/defs.h"
 #include "common/elem_t.h"
 #include "common/error.h"
+#include "common/util.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
 
@@ -323,11 +327,25 @@ int opaque_sort(elem_t *arr, size_t length) {
     elem_t *buf = arr + local_length;
     int ret;
 
+    struct timespec time_start;
+    if (clock_gettime(CLOCK_REALTIME, &time_start)) {
+        handle_error_string("Error getitng time");
+        ret = errno;
+        goto exit;
+    }
+
     /* Step 1: Local sort. */
     local_bitonic_sort(arr, 0, local_length, false);
 
     if (world_size == 1) {
         ret = 0;
+        goto exit;
+    }
+
+    struct timespec time_localsort1;
+    if (clock_gettime(CLOCK_REALTIME, &time_localsort1)) {
+        handle_error_string("Error getitng time");
+        ret = errno;
         goto exit;
     }
 
@@ -338,8 +356,22 @@ int opaque_sort(elem_t *arr, size_t length) {
         goto exit;
     }
 
+    struct timespec time_transpose1;
+    if (clock_gettime(CLOCK_REALTIME, &time_transpose1)) {
+        handle_error_string("Error getitng time");
+        ret = errno;
+        goto exit;
+    }
+
     /* Step 3: Local sort. */
     local_bitonic_sort(buf, 0, local_length, false);
+
+    struct timespec time_localsort2;
+    if (clock_gettime(CLOCK_REALTIME, &time_localsort2)) {
+        handle_error_string("Error getitng time");
+        ret = errno;
+        goto exit;
+    }
 
     /* Step 4: Transpose. */
     ret = transpose(buf, arr, local_length, true);
@@ -348,8 +380,22 @@ int opaque_sort(elem_t *arr, size_t length) {
         goto exit;
     }
 
+    struct timespec time_transpose2;
+    if (clock_gettime(CLOCK_REALTIME, &time_transpose2)) {
+        handle_error_string("Error getitng time");
+        ret = errno;
+        goto exit;
+    }
+
     /* Step 5: Local sort. */
     local_bitonic_sort(arr, 0, local_length, false);
+
+    struct timespec time_localsort3;
+    if (clock_gettime(CLOCK_REALTIME, &time_localsort3)) {
+        handle_error_string("Error getitng time");
+        ret = errno;
+        goto exit;
+    }
 
     /* Step 6: Back shift. */
     ret = back_shift(arr, buf, local_length, false);
@@ -358,8 +404,22 @@ int opaque_sort(elem_t *arr, size_t length) {
         goto exit;
     }
 
+    struct timespec time_backshift;
+    if (clock_gettime(CLOCK_REALTIME, &time_backshift)) {
+        handle_error_string("Error getitng time");
+        ret = errno;
+        goto exit;
+    }
+
     /* Step 7: Local sort. */
     local_bitonic_sort(buf, 0, local_length, false);
+
+    struct timespec time_localsort4;
+    if (clock_gettime(CLOCK_REALTIME, &time_localsort4)) {
+        handle_error_string("Error getitng time");
+        ret = errno;
+        goto exit;
+    }
 
     /* Step 8: Forward shift. */
     ret = back_shift(buf, arr, local_length, true);
@@ -367,6 +427,33 @@ int opaque_sort(elem_t *arr, size_t length) {
         handle_error_string("Error in forward shift (step 8)");
         goto exit;
     }
+
+    struct timespec time_forwardshift;
+    if (clock_gettime(CLOCK_REALTIME, &time_forwardshift)) {
+        handle_error_string("Error getitng time");
+        ret = errno;
+        goto exit;
+    }
+
+    if (world_rank == 0) {
+        printf("column-localsort1  : %f\n",
+                get_time_difference(&time_start, &time_localsort1));
+        printf("column-transpose1  : %f\n",
+                get_time_difference(&time_localsort1, &time_transpose1));
+        printf("column-localsort2  : %f\n",
+                get_time_difference(&time_transpose1, &time_localsort2));
+        printf("column-transpose2  : %f\n",
+                get_time_difference(&time_localsort2, &time_transpose2));
+        printf("column-localsort3  : %f\n",
+                get_time_difference(&time_transpose2, &time_localsort3));
+        printf("column-backshift   : %f\n",
+                get_time_difference(&time_localsort3, &time_backshift));
+        printf("column-localsort4  : %f\n",
+                get_time_difference(&time_backshift, &time_localsort4));
+        printf("column-forwardshift: %f\n",
+                get_time_difference(&time_localsort4, &time_forwardshift));
+    }
+
 
 exit:
     return ret;
