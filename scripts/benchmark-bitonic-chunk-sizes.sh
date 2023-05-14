@@ -23,7 +23,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for e in 16 4; do
+for e in 32 16 8 4 2; do
     if "$AZ" && [ -n "$last_e" ]; then
         deallocate_az_vm "$(( e + ENCLAVE_OFFSET ))" "$(( last_e + ENCLAVE_OFFSET ))"
     fi
@@ -45,6 +45,10 @@ for e in 16 4; do
     $warm_up
 
     for c in 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 8192 16384; do
+        if [ "$e" -ne 4 ] && [ "$e" -ne 16 ] && [ "$c" -lt 64 ]; then
+            continue
+        fi
+
         echo "Chunk size: $c"
 
         (
