@@ -19,6 +19,10 @@
 #include "enclave/synch.h"
 #include "enclave/threading.h"
 
+/* The number of buckets to send/receive from the remote at a time during
+ * merge-split. */
+#define SWAP_CHUNK_BUCKETS 8
+
 static size_t total_length;
 
 /* Thread-local buffer used for generic operations. */
@@ -42,7 +46,7 @@ static size_t get_local_bucket_start(int rank) {
 
 int bucket_init(void) {
     /* Allocate buffer. */
-    buffer = malloc(BUCKET_SIZE * 2 * sizeof(*buffer));
+    buffer = malloc(BUCKET_SIZE * MAX(SWAP_CHUNK_BUCKETS, 2) * sizeof(*buffer));
     if (!buffer) {
         perror("Error allocating buffer");
         goto exit;
@@ -175,14 +179,17 @@ static void merge_split_swapper(size_t a, size_t b, bool should_swap, void *aux_
     o_memswap(elem_a, elem_b, sizeof(*elem_a), should_swap);
 }
 
-/* Merge BUCKET1 and BUCKET2 and split such that BUCKET1 contains all elements
- * corresponding with bit 0 and BUCKET2 contains all elements corresponding with
- * bit 1, with the bit given by the bit in BIT_IDX of the elems' ORP IDs. Note
- * that this is a modified version of the merge-split algorithm from the paper,
- * since the elements are swapped in-place rather than being swapped between
- * different buckets on different layers. */
-static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
-        size_t bit_idx) {
+/* Merge (BUCKET1 + i, BUCKET2 + i) for i = 0, ..., CHUNK_BUCKETS - 1 and split
+ * each such that the BUCKET1 buckets contains all elements corresponding with
+ * bit 0 and the BUCKET2 buckets contains all elements corresponding with bit
+ * 1, with the bit given by the bit in BIT_IDX of the nodes' ORP IDs.
+ * CHUNK_BUCKETS may be no more than SWAP_CHUNK_BUCKETS.
+ *
+ * Note that this is a modified version of the merge-split algorithm from the
+ * paper, since the elements are swapped in-place rather than being swapped
+ * between different buckets on different layers. */
+static int merge_split_chunk(elem_t *arr, size_t bucket1_idx, size_t
+        bucket2_idx, size_t bit_idx, size_t chunk_buckets) {
     int ret = -1;
     int bucket1_rank = get_bucket_rank(bucket1_idx);
     int bucket2_rank = get_bucket_rank(bucket2_idx);
@@ -197,116 +204,133 @@ static int merge_split(elem_t *arr, size_t bucket1_idx, size_t bucket2_idx,
     }
 
     /* Load bucket 1 elems if local. */
-    elem_t *bucket1 = NULL;
+    elem_t *bucket1_buckets = NULL;
     if (bucket1_local) {
-        bucket1 = arr + (bucket1_idx - local_bucket_start) * BUCKET_SIZE;
+        bucket1_buckets = arr + (bucket1_idx - local_bucket_start) * BUCKET_SIZE;
     }
 
     /* Load bucket 2 elems if local. */
-    elem_t *bucket2 = NULL;
+    elem_t *bucket2_buckets = NULL;
     if (bucket2_local) {
-        bucket2 = arr + (bucket2_idx - local_bucket_start) * BUCKET_SIZE;
+        bucket2_buckets = arr + (bucket2_idx - local_bucket_start) * BUCKET_SIZE;
     }
 
-    /* If remote, send the current count and then our local buckets. Then,
-     * receive the sent count and remote buckets from the other elem. */
-    if (!bucket1 || !bucket2) {
+    /* If remote, send our local buckets then receive the remote buckets from
+     * the other node. */
+    if (!bucket1_buckets || !bucket2_buckets) {
         int local_bucket_idx = bucket1_local ? bucket1_idx : bucket2_idx;
         int nonlocal_bucket_idx = bucket1_local ? bucket2_idx : bucket1_idx;
         int nonlocal_rank = bucket1_local ? bucket2_rank : bucket1_rank;
 
-        /* Post receive for remote bucket. */
-        mpi_tls_request_t bucket_request;
-        ret = mpi_tls_irecv_bytes(buffer, sizeof(*buffer) * BUCKET_SIZE,
-                nonlocal_rank, nonlocal_bucket_idx, &bucket_request);
+        /* Post receive for remote buckets. */
+        mpi_tls_request_t request;
+        ret = mpi_tls_irecv_bytes(buffer,
+                sizeof(*buffer) * BUCKET_SIZE * chunk_buckets, nonlocal_rank,
+                nonlocal_bucket_idx, &request);
         if (ret) {
-            handle_error_string("Error receiving remote bucket into %d from %d",
+            handle_error_string(
+                    "Error receiving remote buckets into %d from %d",
                     world_rank, nonlocal_rank);
             goto exit;
         }
-        if (bucket1) {
-            bucket2 = buffer;
+        if (bucket1_buckets) {
+            bucket2_buckets = buffer;
         } else {
-            bucket1 = buffer;
+            bucket1_buckets = buffer;
         }
 
         /* Send local bucket. */
-        ret = mpi_tls_send_bytes(
-                bucket1_local ? bucket1 : bucket2,
-                sizeof(*bucket1) * BUCKET_SIZE, nonlocal_rank,
+        ret =
+            mpi_tls_send_bytes(
+                bucket1_local ? bucket1_buckets : bucket2_buckets,
+                sizeof(*bucket1_buckets) * BUCKET_SIZE, nonlocal_rank,
                 local_bucket_idx);
         if (ret) {
-            handle_error_string("Error sending local bucket from %d to %d",
+            handle_error_string("Error sending local buckets from %d to %d",
                     world_rank, nonlocal_rank);
             goto exit;
         }
 
-        /* Wait for count and bucket to come in. */
-        ret = mpi_tls_wait(&bucket_request, MPI_TLS_STATUS_IGNORE);
+        /* Wait for bucket receive. */
+        ret = mpi_tls_wait(&request, MPI_TLS_STATUS_IGNORE);
         if (ret) {
             handle_error_string(
-                    "Error waiting on receive for bucket into %d from %d",
+                    "Error waiting on receive for buckets into %d from %d",
                     world_rank, nonlocal_rank);
             goto exit;
         }
     }
 
-    /* Count number of elements with corresponding bit 1. */
-    size_t count1 = 0;
-    for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        /* Obliviously increment count. */
-        count1 += ((bucket1[i].orp_id >> bit_idx) & 1) & !bucket1[i].is_dummy;
-    }
-    for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        /* Obliviously increment count. */
-        count1 += ((bucket2[i].orp_id >> bit_idx) & 1) & !bucket2[i].is_dummy;
-    }
+    /* Perform merge-split for each bucket. */
+    for (size_t i = 0; i < chunk_buckets; i++) {
+        elem_t *bucket1 = &bucket1_buckets[i];
+        elem_t *bucket2 = &bucket2_buckets[i];
 
-    /* There are count1 elements with bit 1, so we need to assign BUCKET_SIZE -
-     * count1 dummy elements to have bit 1, with the remaining dummy elements
-     * assigned with bit 0. */
-    count1 = BUCKET_SIZE - count1;
+        /* The number of elements with corresponding bit 1. */
+        size_t count1 = 0;
+        for (size_t j = 0; j < BUCKET_SIZE; j++) {
+            /* Obliviously increment count. */
+            count1 +=
+                ((bucket1[j].orp_id >> bit_idx) & 1) & !bucket1[j].is_dummy;
+        }
+        for (size_t j = 0; j < BUCKET_SIZE; j++) {
+            /* Obliviously increment count. */
+            count1 +=
+                ((bucket2[j].orp_id >> bit_idx) & 1) & !bucket2[j].is_dummy;
+        }
 
-    /* Assign dummy elements. */
-    for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        /* If count1 > 0 and the elem is a dummy element, set BIT_IDX bit of ORP
-         * ID and decrement count1. Else, clear BIT_IDX bit of ORP ID. */
-        bucket1[i].orp_id &= ~(bucket1[i].is_dummy << bit_idx);
-        bucket1[i].orp_id |= ((bool) count1 & bucket1[i].is_dummy) << bit_idx;
-        count1 -= (bool) count1 & bucket1[i].is_dummy;
-    }
-    for (size_t i = 0; i < BUCKET_SIZE; i++) {
-        /* If count1 > 0 and the elem is a dummy element, set BIT_IDX bit of ORP
-         * ID and decrement count1. Else, clear BIT_IDX bit of ORP ID. */
-        bucket2[i].orp_id &= ~(bucket2[i].is_dummy << bit_idx);
-        bucket2[i].orp_id |= ((bool) count1 & bucket2[i].is_dummy) << bit_idx;
-        count1 -= (bool) count1 & bucket2[i].is_dummy;
-    }
+        /* There are count1 elements with bit 1, so we need to assign
+         * BUCKET_SIZE - count1 dummy elements to have bit 1, with the
+         * remaining dummy elements assigned with bit 0. */
+        count1 = BUCKET_SIZE - count1;
 
-    /* Oblivious bitonic sort elements according to BIT_IDX bit of ORP id. */
-    struct merge_split_ocompact_aux aux = {
-        .bucket1 = bucket1,
-        .bucket2 = bucket2,
-        .bit_idx = bit_idx,
-    };
-    o_compact_generate_swaps(BUCKET_SIZE * 2, merge_split_is_marked, merge_split_swapper, &aux);
+        /* Assign dummy elements. */
+        for (size_t j = 0; j < BUCKET_SIZE; j++) {
+            /* If count1 > 0 and the node is a dummy element, set BIT_IDX bit
+             * of ORP ID and decrement count1. Else, clear BIT_IDX bit of ORP
+             * ID. */
+            bucket1[j].orp_id &= ~(bucket1[j].is_dummy << bit_idx);
+            bucket1[j].orp_id |=
+                ((bool) count1 & bucket1[j].is_dummy) << bit_idx;
+            count1 -= (bool) count1 & bucket1[j].is_dummy;
+        }
+        for (size_t j = 0; j < BUCKET_SIZE; j++) {
+            /* If count1 > 0 and the node is a dummy element, set BIT_IDX bit
+             * of ORP ID and decrement count1. Else, clear BIT_IDX bit of ORP
+             * ID. */
+            bucket2[j].orp_id &= ~(bucket2[j].is_dummy << bit_idx);
+            bucket2[j].orp_id |=
+                ((bool) count1 & bucket2[j].is_dummy) << bit_idx;
+            count1 -= (bool) count1 & bucket2[j].is_dummy;
+        }
+
+        /* Oblivious bitonic sort elements according to BIT_IDX bit of ORP
+         * id. */
+        struct merge_split_ocompact_aux aux = {
+            .bucket1 = bucket1,
+            .bucket2 = bucket2,
+            .bit_idx = bit_idx,
+        };
+        o_compact_generate_swaps(BUCKET_SIZE * 2, merge_split_is_marked,
+                merge_split_swapper, &aux);
+    }
 
     ret = 0;
 
 exit:
-
     return ret;
 }
 
 /* Performs the merge_split operation over a starting bucket specified by an
- * index. The BUCKET_IDX parameter is just a way of dividing work between
- * threads. Iterating from 0 to NUM_BUCKETS / 2 when BUCKET_OFFSET == 0 is
- * equivalent to
+ * index. The IDX parameter is just a way of dividing work between threads.
+ * Iterating from 0 to NUM_BUCKETS / CHUNK_BUCKETS / 2 when BUCKET_OFFSET == 0
+ * is equivalent to
  *
  * for (size_t bucket_start = 0; bucket_start < num_buckets;
  *         bucket_start += bucket_stride) {
  *     for (size_t bucket = bucket_start;
- *             bucket < bucket_start + bucket_stride / 2; bucket++) {
+ *             bucket < bucket_start + bucket_stride / 2;
+ *             bucket += SWAP_CHUNK_BUCKETS) {
  *         ...
  *     }
  * }
@@ -321,27 +345,34 @@ struct merge_split_idx_args {
     size_t bucket_stride;
     size_t bucket_offset;
     size_t num_buckets;
+    size_t chunk_buckets;
 
     int ret;
 };
-static void merge_split_idx(void *args_, size_t bucket_idx) {
+
+static void merge_split_idx(void *args_, size_t idx) {
     struct merge_split_idx_args *args = args_;
     elem_t *arr = args->arr;
     size_t bit_idx = args->bit_idx;
     size_t bucket_stride = args->bucket_stride;
     size_t bucket_offset = args->bucket_offset;
     size_t num_buckets = args->num_buckets;
+    size_t chunk_buckets = args->chunk_buckets;
     int ret;
 
     if (bit_idx % 2 == 1) {
-        bucket_idx = num_buckets / 2 - bucket_idx - 1;
+        idx = num_buckets / chunk_buckets / 2 - idx - 1;
     }
 
-    size_t bucket =
-        bucket_idx % (bucket_stride / 2)
-            + bucket_idx / (bucket_stride / 2) * bucket_stride + bucket_offset;
+    size_t bucket = (idx * chunk_buckets)
+            % (bucket_stride / 2)
+        + (idx * chunk_buckets) / (bucket_stride / 2)
+            * bucket_stride
+        + bucket_offset;
     size_t other_bucket = bucket + bucket_stride / 2;
-    ret = merge_split(arr, bucket, other_bucket, bit_idx);
+    ret =
+        merge_split_chunk(arr, bucket, other_bucket, bit_idx,
+                chunk_buckets);
     if (ret) {
         handle_error_string(
                 "Error in merge split with indices %lu and %lu\n", bucket,
@@ -375,6 +406,7 @@ static int bucket_route(elem_t *arr, size_t num_levels, size_t start_bit_idx) {
     }
     for (size_t bit_idx = 0; bit_idx < num_levels; bit_idx++) {
         size_t bucket_stride = 2u << bit_idx;
+        size_t chunk_buckets = MIN(bucket_stride / 2, SWAP_CHUNK_BUCKETS);
 
         /* Create iterative task for merge split. */
         struct merge_split_idx_args args = {
@@ -383,13 +415,14 @@ static int bucket_route(elem_t *arr, size_t num_levels, size_t start_bit_idx) {
             .bucket_stride = bucket_stride,
             .bucket_offset = bucket_start,
             .num_buckets = num_buckets,
+            .chunk_buckets = chunk_buckets,
         };
         struct thread_work work = {
             .type = THREAD_WORK_ITER,
             .iter = {
                 .func = merge_split_idx,
                 .arg = &args,
-                .count = num_buckets / 2,
+                .count = num_buckets / chunk_buckets / 2,
             },
         };
         thread_work_push(&work);
@@ -534,6 +567,7 @@ static void distributed_bucket_route(void *args_, size_t thread_idx) {
             /* This was a send request. */
 
             size_t our_send_idx =
+
                 __atomic_fetch_add(&send_idxs[index], world_size,
                         __ATOMIC_RELAXED);
             if (our_send_idx < num_local_buckets) {
