@@ -51,15 +51,25 @@ static size_t get_local_start(int rank) {
 /* Swapping. */
 
 static void swap_local_range(elem_t *arr, size_t a, size_t b, size_t count,
-        bool descending) {
+        bool crossover) {
     size_t local_start = get_local_start(world_rank);
 
-    for (size_t i = 0; i < count; i++) {
-        bool cond =
-            (arr[a + i - local_start].key > arr[b + i - local_start].key);
-        cond = cond != descending;
-        o_memswap(&arr[a + i - local_start], &arr[b + i - local_start],
-                sizeof(*arr), cond);
+    if (crossover) {
+        for (size_t i = 0; i < count; i++) {
+            bool cond =
+                arr[a + i - local_start].key
+                    > arr[b + count - 1 - i - local_start].key;
+            o_memswap(&arr[a + i - local_start],
+                    &arr[b + count - 1 - i - local_start], sizeof(*arr),
+                    cond);
+        }
+    } else {
+        for (size_t i = 0; i < count; i++) {
+            bool cond =
+                arr[a + i - local_start].key > arr[b + i - local_start].key;
+            o_memswap(&arr[a + i - local_start], &arr[b + i - local_start],
+                    sizeof(*arr), cond);
+        }
     }
 }
 
@@ -68,7 +78,7 @@ struct swap_remote_range_args {
     size_t local_idx;
     size_t remote_idx;
     size_t count;
-    bool descending;
+    bool crossover;
     size_t num_threads;
 };
 static void swap_remote_range(void *args_, size_t thread_idx) {
@@ -77,27 +87,38 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
     size_t local_idx = args->local_idx;
     size_t remote_idx = args->remote_idx;
     size_t count = args->count;
-    bool descending = args->descending;
+    bool crossover = args->crossover;
     size_t num_threads = args->num_threads;
+    int ret;
+
     size_t local_start = get_local_start(world_rank);
     int remote_rank = get_index_address(remote_idx);
-    int ret;
 
     /* Swap elems in maximum chunk sizes of SWAP_CHUNK_SIZE and iterate until no
      * count is remaining. */
     size_t start = thread_idx * count / num_threads;
     size_t end = (thread_idx + 1) * count / num_threads;
-    size_t our_local_idx = local_idx + start;
-    size_t our_remote_idx = remote_idx + start;
+    size_t our_local_idx =
+        crossover && local_idx > remote_idx
+            ? local_idx + count - start
+            : local_idx + start;
+    size_t our_remote_idx =
+        crossover && local_idx < remote_idx
+            ? remote_idx + count - start
+            : remote_idx + start;
     size_t our_count = end - start;
     while (our_count) {
-        size_t elems_to_swap = MIN(count, SWAP_CHUNK_SIZE);
+        size_t elems_to_swap = MIN(our_count, SWAP_CHUNK_SIZE);
 
         /* Post receive for remote elems to buffer. */
         mpi_tls_request_t request;
-        ret = mpi_tls_irecv_bytes(buffer,
-                elems_to_swap * sizeof(*buffer), remote_rank,
-                our_local_idx / SWAP_CHUNK_SIZE, &request);
+        ret =
+            mpi_tls_irecv_bytes(buffer, elems_to_swap * sizeof(*buffer),
+                    remote_rank,
+                    crossover && local_idx < remote_idx
+                        ? (our_remote_idx - elems_to_swap) / SWAP_CHUNK_SIZE
+                        : our_remote_idx / SWAP_CHUNK_SIZE,
+                    &request);
         if (ret) {
             handle_error_string("Error receiving elem bytes");
             return;
@@ -105,9 +126,14 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
 
         /* Send local elems to the remote. */
         ret =
-            mpi_tls_send_bytes(arr + our_local_idx - local_start,
+            mpi_tls_send_bytes(
+                    crossover && our_local_idx > remote_idx
+                        ? arr + our_local_idx - elems_to_swap - local_start
+                        : arr + our_local_idx - local_start,
                     elems_to_swap * sizeof(*arr), remote_rank,
-                    our_remote_idx / SWAP_CHUNK_SIZE);
+                    crossover && local_idx > remote_idx
+                        ? (our_local_idx - elems_to_swap) / SWAP_CHUNK_SIZE
+                        : our_local_idx / SWAP_CHUNK_SIZE);
         if (ret) {
             handle_error_string("Error sending elem bytes");
             return;
@@ -121,28 +147,58 @@ static void swap_remote_range(void *args_, size_t thread_idx) {
         }
 
         /* Replace the local elements with the received remote elements if
-         * necessary. Assume we are sorting ascending. If the local index is
-         * lower, then we swap if the local element is lower. Likewise, if the
-         * local index is higher, than we swap if the local element is higher.
-         * If descending, everything is reversed. */
-        for (size_t i = 0; i < elems_to_swap; i++) {
-            bool cond =
-                (our_local_idx < our_remote_idx)
-                    == (arr[our_local_idx + i - local_start].key > buffer[i].key);
-            cond = cond != descending;
-            o_memcpy(&arr[our_local_idx + i - local_start], &buffer[i],
-                    sizeof(*arr), cond);
+         * necessary. If the local index is lower, then we swap if the local
+         * element is lower. Likewise, if the local index is higher, than we
+         * swap if the local element is higher. */
+        if (crossover) {
+            if (our_local_idx < our_remote_idx) {
+                for (size_t i = 0; i < elems_to_swap; i++) {
+                    bool cond =
+                        arr[our_local_idx + i - local_start].key
+                            > buffer[elems_to_swap - 1 - i].key;
+                    o_memcpy(&arr[our_local_idx + i - local_start],
+                            &buffer[elems_to_swap - 1 - i], sizeof(*arr), cond);
+                }
+            } else {
+                for (size_t i = 0; i < elems_to_swap; i++) {
+                    bool cond =
+                        arr[our_local_idx - elems_to_swap + i - local_start].key
+                            < buffer[elems_to_swap - 1 - i].key;
+                    o_memcpy(
+                            &arr[our_local_idx - elems_to_swap + i - local_start],
+                            &buffer[elems_to_swap - 1 - i], sizeof(*arr), cond);
+                }
+            }
+        } else {
+            for (size_t i = 0; i < elems_to_swap; i++) {
+                bool cond =
+                    (our_local_idx < our_remote_idx)
+                        == (arr[our_local_idx + i - local_start].key
+                                > buffer[i].key);
+                o_memcpy(&arr[our_local_idx + i - local_start], &buffer[i],
+                        sizeof(*arr), cond);
+            }
         }
 
         /* Bump pointers, decrement count, and continue. */
-        our_local_idx += elems_to_swap;
-        our_remote_idx += elems_to_swap;
+        if (crossover) {
+            if (local_idx < remote_idx) {
+                our_local_idx += elems_to_swap;
+                our_remote_idx -= elems_to_swap;
+            } else {
+                our_local_idx -= elems_to_swap;
+                our_remote_idx += elems_to_swap;
+            }
+        } else {
+            our_local_idx += elems_to_swap;
+            our_remote_idx += elems_to_swap;
+        }
         our_count -= elems_to_swap;
     }
 }
 
 static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
-        size_t count, bool descending, size_t num_threads) {
+        size_t count, bool crossover, size_t num_threads) {
     // TODO Assumption: Only either a subset of range A is local, or a subset of
     // range B is local. For local-remote swaps, the subset of the remote range
     // correspondingw with the local range is entirely contained within a single
@@ -155,16 +211,20 @@ static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
     bool b_is_local = b_start < local_end && b_start + count > local_start;
 
     if (a_is_local && b_is_local) {
-        swap_local_range(arr, a_start, b_start, count, descending);
+        swap_local_range(arr, a_start, b_start, count, crossover);
     } else if (a_is_local) {
         size_t a_local_start = MAX(a_start, local_start);
         size_t a_local_end = MIN(a_start + count, local_end);
         struct swap_remote_range_args args = {
             .arr = arr,
             .local_idx = a_local_start,
-            .remote_idx = b_start + a_local_start - a_start,
+            .remote_idx =
+                crossover
+                    ? b_start + count - (a_local_start - a_start)
+                        - (a_local_end - a_local_start)
+                    : b_start + a_local_start - a_start,
             .count = a_local_end - a_local_start,
-            .descending = descending,
+            .crossover = crossover,
             .num_threads = num_threads,
         };
         struct thread_work work;
@@ -185,9 +245,13 @@ static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
         struct swap_remote_range_args args = {
             .arr = arr,
             .local_idx = b_local_start,
-            .remote_idx = a_start + b_local_start - b_start,
+            .remote_idx =
+                crossover
+                    ? a_start + count - (b_local_start - b_start)
+                        - (b_local_end - b_local_start)
+                    : a_start + b_local_start - b_start,
             .count = b_local_end - b_local_start,
-            .descending = descending,
+            .crossover = crossover,
             .num_threads = num_threads,
         };
         struct thread_work work;
@@ -207,20 +271,19 @@ static void swap_range(elem_t *arr, size_t a_start, size_t b_start,
 
 /* Bitonic sort. */
 
-struct threaded_args {
+struct merge_args {
     elem_t *arr;
     size_t start;
     size_t length;
-    bool descending;
+    bool crossover;
     size_t num_threads;
 };
-
 static void merge(void *args_) {
-    struct threaded_args *args = args_;
+    struct merge_args *args = args_;
     elem_t *arr = args->arr;
     size_t start = args->start;
     size_t length = args->length;
-    bool descending = args->descending;
+    bool crossover = args->crossover;
     size_t num_threads = args->num_threads;
 
     switch (length) {
@@ -229,7 +292,7 @@ static void merge(void *args_) {
             /* Do nothing. */
             break;
         case 2: {
-            swap_range(arr, start, start + 1, 1, descending, 1);
+            swap_range(arr, start, start + 1, 1, false, 1);
             break;
         }
         default: {
@@ -238,21 +301,21 @@ static void merge(void *args_) {
             size_t left_length = length / 2;
             size_t right_length = length - left_length;
             size_t right_start = start + left_length;
-            swap_range(arr, start, right_start, left_length, descending,
+            swap_range(arr, start, right_start, left_length, crossover,
                     num_threads);
 
             /* Recursively merge. */
-            struct threaded_args left_args = {
+            struct merge_args left_args = {
                 .arr = arr,
                 .start = start,
                 .length = left_length,
-                .descending = descending,
+                .crossover = false,
             };
-            struct threaded_args right_args = {
+            struct merge_args right_args = {
                 .arr = arr,
                 .start = right_start,
                 .length = right_length,
-                .descending = descending,
+                .crossover = false,
             };
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only merge the left. The right is completely remote. */
@@ -289,12 +352,17 @@ static void merge(void *args_) {
     }
 }
 
+struct sort_args {
+    elem_t *arr;
+    size_t start;
+    size_t length;
+    size_t num_threads;
+};
 static void sort(void *args_) {
-    struct threaded_args *args = args_;
+    struct sort_args *args = args_;
     elem_t *arr = args->arr;
     size_t start = args->start;
     size_t length = args->length;
-    bool descending = args->descending;
     size_t num_threads = args->num_threads;
 
     switch (length) {
@@ -303,7 +371,7 @@ static void sort(void *args_) {
             /* Do nothing. */
             break;
         case 2: {
-            swap_range(arr, start, start + 1, 1, descending, 1);
+            swap_range(arr, start, start + 1, 1, false, 1);
             break;
         }
         default: {
@@ -312,17 +380,15 @@ static void sort(void *args_) {
             size_t left_length = length / 2;
             size_t right_length = length - left_length;
             size_t right_start = start + left_length;
-            struct threaded_args left_args = {
+            struct sort_args left_args = {
                 .arr = arr,
                 .start = start,
                 .length = left_length,
-                .descending = descending,
             };
-            struct threaded_args right_args = {
+            struct sort_args right_args = {
                 .arr = arr,
                 .start = right_start,
                 .length = right_length,
-                .descending = !descending,
             };
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only sort the left. The right is completely remote. */
@@ -356,7 +422,14 @@ static void sort(void *args_) {
             }
 
             /* Bitonic merge. */
-            merge(args);
+            struct merge_args merge_args = {
+                .arr = arr,
+                .start = start,
+                .length = length,
+                .crossover = true,
+                .num_threads = num_threads,
+            };
+            merge(&merge_args);
             break;
         }
     }
@@ -373,11 +446,10 @@ void bitonic_sort(elem_t *arr, size_t length, size_t num_threads) {
     }
 
     /* Start work for this thread. */
-    struct threaded_args args = {
+    struct sort_args args = {
         .arr = arr,
         .start = 0,
         .length = total_length,
-        .descending = false,
         .num_threads = num_threads,
     };
     sort(&args);
