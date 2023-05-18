@@ -240,59 +240,49 @@ static void merge(void *args_) {
             size_t right_start = start + left_length;
             swap_range(arr, start, right_start, left_length, descending,
                     num_threads);
+
+            /* Recursively merge. */
+            struct threaded_args left_args = {
+                .arr = arr,
+                .start = start,
+                .length = left_length,
+                .descending = descending,
+            };
+            struct threaded_args right_args = {
+                .arr = arr,
+                .start = right_start,
+                .length = right_length,
+                .descending = descending,
+            };
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only merge the left. The right is completely remote. */
-                struct threaded_args left_args = {
-                    .arr = arr,
-                    .start = start,
-                    .length = left_length,
-                    .descending = descending,
-                    .num_threads = num_threads,
-                };
+                left_args.num_threads = num_threads;
                 merge(&left_args);
             } else if (right_start <= get_local_start(world_rank)) {
                 /* Only merge the right. The left is completely remote. */
-                struct threaded_args right_args = {
-                    .arr = arr,
-                    .start = right_start,
-                    .length = right_length,
-                    .descending = descending,
-                    .num_threads = num_threads,
-                };
+                right_args.num_threads = num_threads;
                 merge(&right_args);
-            } else {
-                /* Merge both. */
+            } else if (num_threads > 1) {
+                /* Merge both with separate threads. */
                 size_t right_threads = num_threads / 2;
-                struct threaded_args left_args = {
-                    .arr = arr,
-                    .start = start,
-                    .length = left_length,
-                    .descending = descending,
-                    .num_threads = MAX(num_threads - right_threads, 1),
+                left_args.num_threads = num_threads - right_threads;
+                right_args.num_threads = right_threads;
+                struct thread_work right_work = {
+                    .type = THREAD_WORK_SINGLE,
+                    .single = {
+                        .func = merge,
+                        .arg = &right_args,
+                    },
                 };
-                struct threaded_args right_args = {
-                    .arr = arr,
-                    .start = right_start,
-                    .length = right_length,
-                    .descending = descending,
-                    .num_threads = MAX(right_threads, 1),
-                };
-
-                if (num_threads > 1) {
-                    struct thread_work right_work = {
-                        .type = THREAD_WORK_SINGLE,
-                        .single = {
-                            .func = merge,
-                            .arg = &right_args,
-                        },
-                    };
-                    thread_work_push(&right_work);
-                    merge(&left_args);
-                    thread_wait(&right_work);
-                } else {
-                    merge(&left_args);
-                    merge(&right_args);
-                }
+                thread_work_push(&right_work);
+                merge(&left_args);
+                thread_wait(&right_work);
+            } else {
+                /* Merge both in our own thread. */
+                left_args.num_threads = 1;
+                right_args.num_threads = 1;
+                merge(&left_args);
+                merge(&right_args);
             }
             break;
          }
@@ -317,65 +307,52 @@ static void sort(void *args_) {
             break;
         }
         default: {
-            /* Sort left half forwards and right half in reverse to create a
-             * bitonic sequence. */
+            /* Recursively sort left half forwards and right half in reverse to
+             * create a bitonic sequence. */
             size_t left_length = length / 2;
             size_t right_length = length - left_length;
             size_t right_start = start + left_length;
+            struct threaded_args left_args = {
+                .arr = arr,
+                .start = start,
+                .length = left_length,
+                .descending = descending,
+            };
+            struct threaded_args right_args = {
+                .arr = arr,
+                .start = right_start,
+                .length = right_length,
+                .descending = !descending,
+            };
             if (right_start >= get_local_start(world_rank + 1)) {
                 /* Only sort the left. The right is completely remote. */
-                struct threaded_args left_args = {
-                    .arr = arr,
-                    .start = start,
-                    .length = left_length,
-                    .descending = descending,
-                    .num_threads = num_threads,
-                };
+                left_args.num_threads = num_threads;
                 sort(&left_args);
             } else if (right_start <= get_local_start(world_rank)) {
                 /* Only sort the right. The left is completely remote. */
-                struct threaded_args right_args = {
-                    .arr = arr,
-                    .start = right_start,
-                    .length = right_length,
-                    .descending = !descending,
-                    .num_threads = num_threads,
-                };
+                right_args.num_threads = num_threads;
                 sort(&right_args);
+            } else if (num_threads > 1) {
+                /* Sort both with separate threads. */
+                size_t right_threads = num_threads / 2;
+                left_args.num_threads = num_threads - right_threads;
+                right_args.num_threads = right_threads;
+                struct thread_work right_work = {
+                    .type = THREAD_WORK_SINGLE,
+                    .single = {
+                        .func = sort,
+                        .arg = &right_args,
+                    },
+                };
+                thread_work_push(&right_work);
+                sort(&left_args);
+                thread_wait(&right_work);
             } else {
-                /* Sort both. */
-                size_t right_threads =
-                    num_threads * right_length / length;
-                struct threaded_args left_args = {
-                    .arr = arr,
-                    .start = start,
-                    .length = left_length,
-                    .descending = descending,
-                    .num_threads = MAX(num_threads - right_threads, 1),
-                };
-                struct threaded_args right_args = {
-                    .arr = arr,
-                    .start = right_start,
-                    .length = right_length,
-                    .descending = !descending,
-                    .num_threads = MAX(right_threads, 1),
-                };
-
-                if (num_threads > 1) {
-                    struct thread_work right_work = {
-                        .type = THREAD_WORK_SINGLE,
-                        .single = {
-                            .func = sort,
-                            .arg = &right_args,
-                        },
-                    };
-                    thread_work_push(&right_work);
-                    sort(&left_args);
-                    thread_wait(&right_work);
-                } else {
-                    sort(&left_args);
-                    sort(&right_args);
-                }
+                /* Sort both in our own thread. */
+                left_args.num_threads = 1;
+                right_args.num_threads = 1;
+                sort(&left_args);
+                sort(&right_args);
             }
 
             /* Bitonic merge. */
