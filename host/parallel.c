@@ -306,17 +306,17 @@ int main(int argc, char **argv) {
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     oe_enclave_t *enclave;
     oe_result_t result;
-    int flags = 0;
-#ifdef OE_DEBUG
-    flags |= OE_ENCLAVE_FLAG_DEBUG;
-#endif
-#ifdef OE_SIMULATION
-    flags |= OE_ENCLAVE_FLAG_SIMULATE;
-#endif
     result = oe_create_parallel_enclave(
             argv[1],
             OE_ENCLAVE_TYPE_AUTO,
-            flags,
+            0
+#ifdef OE_DEBUG
+                | OE_ENCLAVE_FLAG_DEBUG
+#endif
+#ifdef OE_SIMULATION
+                | OE_ENCLAVE_FLAG_SIMULATE
+#endif
+            ,
             NULL,
             0,
             &enclave);
