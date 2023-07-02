@@ -1,0 +1,13 @@
+host/membenchmark
+host/membenchmark_u.h
+host/membenchmark_u.c
+host/membenchmark_args.h
+enclave/membenchmark_enc
+enclave/membenchmark_enc.signed
+enclave/membenchmark_t.h
+enclave/membenchmark_t.c
+enclave/membenchmark_args.h
+enclave/membenchmark.pem
+enclave/membenchmark.pub
+*.d
+*.o
