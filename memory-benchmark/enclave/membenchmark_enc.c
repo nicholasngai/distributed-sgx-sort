@@ -4,12 +4,6 @@
 #include <stdlib.h>
 #include "enclave/membenchmark_t.h"
 
-#ifdef __GNUC__
-#define UNUSED __attribute__((unused))
-#else
-#define UNUSED
-#endif
-
 static char *_arr;
 static size_t _len;
 static size_t _num_threads;
