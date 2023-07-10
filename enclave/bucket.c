@@ -165,6 +165,17 @@ struct merge_split_ocompact_aux {
     size_t bit_idx;
 };
 
+#ifdef DISTRIBUTED_SGX_SORT_MICROBENCHMARK_NOOCOMPACT
+static void merge_split_swapper(size_t a, size_t b, void *aux_) {
+    struct merge_split_ocompact_aux *aux = aux_;
+    elem_t *elem_a =
+        &(a < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[a % BUCKET_SIZE];
+    elem_t *elem_b =
+        &(b < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[b % BUCKET_SIZE];
+    bool cond = ((elem_a->orp_id & ~elem_b->orp_id) >> aux->bit_idx) & 1;
+    o_memswap(elem_a, elem_b, sizeof(*elem_a), cond);
+}
+#else
 static bool merge_split_is_marked(size_t index, void *aux_) {
     /* The element is marked if the BIT_IDX'th bit of the ORP ID of the element
      * is set to 0. */
@@ -182,6 +193,7 @@ static void merge_split_swapper(size_t a, size_t b, bool should_swap, void *aux_
         &(b < BUCKET_SIZE ? aux->bucket1 : aux->bucket2)[b % BUCKET_SIZE];
     o_memswap(elem_a, elem_b, sizeof(*elem_a), should_swap);
 }
+#endif
 
 /* Merge (BUCKET1 + i, BUCKET2 + i) for i = 0, ..., CHUNK_BUCKETS - 1 and split
  * each such that the BUCKET1 buckets contains all elements corresponding with
@@ -315,8 +327,12 @@ static int merge_split_chunk(elem_t *arr, size_t bucket1_idx, size_t
             .bucket2 = bucket2,
             .bit_idx = bit_idx,
         };
+#ifdef DISTRIBUTED_SGX_SORT_MICROBENCHMARK_NOOCOMPACT
+        o_sort_generate_swaps(BUCKET_SIZE * 2, merge_split_swapper, &aux);
+#else
         o_compact_generate_swaps(BUCKET_SIZE * 2, merge_split_is_marked,
                 merge_split_swapper, &aux);
+#endif
     }
 
     ret = 0;
