@@ -1,0 +1,12 @@
+enclave {
+    from "openenclave/edl/syscall.edl" import *;
+    from "platform.edl" import *;
+
+    untrusted {
+    };
+
+    trusted {
+        public int ecall_benchmark(size_t alloc_size, size_t num_threads);
+        public void ecall_thread_work(size_t thread_idx);
+    };
+};
