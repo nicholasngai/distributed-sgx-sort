@@ -23,6 +23,10 @@
  * merge-split. */
 #define SWAP_CHUNK_BUCKETS 8
 
+#ifdef DISTRIBUTED_SGX_SORT_MICROBENCHMARK_NOXORSWAP
+#define LIBOBLIVIOUS_CMOV
+#endif
+
 static size_t total_length;
 
 /* Thread-local buffer used for generic operations. */
@@ -445,6 +449,7 @@ exit:
     return ret;
 }
 
+#ifndef DISTRIBUTED_SGX_SORT_MICROBENCHMARK_NOROUTE
 /* Distribute and receive elements from buckets in ARR to buckets in OUT.
  * Bucket i is sent to enclave i % E. */
 struct distributed_bucket_route_args {
@@ -599,6 +604,7 @@ exit:
                 __ATOMIC_RELEASE, __ATOMIC_RELAXED);
     }
 }
+#endif
 
 /* Compares elements first by sorting real elements before dummy elements, and
  * then by their ORP ID. */
@@ -688,7 +694,9 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
     size_t local_start = local_bucket_start * BUCKET_SIZE;
     size_t local_length = num_local_buckets * BUCKET_SIZE;
 
+#ifndef DISTRIBUTED_SGX_SORT_MICROBENCHMARK_NOROUTE
     size_t send_idxs[world_size];
+#endif
 
     elem_t *buf = arr + local_length;
 
@@ -716,6 +724,15 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         goto exit;
     }
 
+#ifdef DISTRIBUTED_SGX_SORT_MICROBENCHMARK_NOROUTE
+    ret = bucket_route(buf, log2ll(world_size * num_local_buckets), 0);
+    if (ret) {
+        handle_error_string("Error routing elements through butterfly network");
+        goto exit;
+    }
+
+    memcpy(arr, buf, local_length * sizeof(*arr));
+#else
     size_t route_levels1 = log2ll(world_size);
     ret = bucket_route(buf, route_levels1, 0);
     if (ret) {
@@ -757,6 +774,7 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
         handle_error_string("Error routing elements through butterfly network");
         goto exit;
     }
+#endif
 
     struct timespec time_merge_split;
     if (clock_gettime(CLOCK_REALTIME, &time_merge_split)) {
