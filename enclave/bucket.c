@@ -225,7 +225,7 @@ static int merge_split_chunk(elem_t *arr, size_t bucket1_idx, size_t
         /* Post receive for remote buckets. */
         mpi_tls_request_t request;
         ret = mpi_tls_irecv_bytes(buffer,
-                sizeof(*buffer) * BUCKET_SIZE * chunk_buckets, nonlocal_rank,
+                sizeof(*buffer) * chunk_buckets * BUCKET_SIZE, nonlocal_rank,
                 nonlocal_bucket_idx, &request);
         if (ret) {
             handle_error_string(
@@ -243,8 +243,8 @@ static int merge_split_chunk(elem_t *arr, size_t bucket1_idx, size_t
         ret =
             mpi_tls_send_bytes(
                 bucket1_local ? bucket1_buckets : bucket2_buckets,
-                sizeof(*bucket1_buckets) * BUCKET_SIZE, nonlocal_rank,
-                local_bucket_idx);
+                sizeof(*bucket1_buckets) * chunk_buckets * BUCKET_SIZE,
+                nonlocal_rank, local_bucket_idx);
         if (ret) {
             handle_error_string("Error sending local buckets from %d to %d",
                     world_rank, nonlocal_rank);
