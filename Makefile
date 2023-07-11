@@ -87,8 +87,6 @@ $(SGX_EDGE): $(APP_NAME).edl
 
 CPPFLAGS += -MMD
 
-%.d: $(SGX_EDGE);
-
 # Third-party deps.
 
 $(LIBOBLIVIOUS_LIB):
@@ -108,7 +106,7 @@ HOST_LDLIBS = \
 	-lmbedcrypto \
 	$(LDLIBS)
 
-$(HOST_DIR)/%.o: $(HOST_DIR)/%.c
+$(HOST_DIR)/%.o: $(HOST_DIR)/%.c $(HOST_EDGE_HEADERS)
 	$(CC) $(HOST_CFLAGS) $(HOST_CPPFLAGS) -c -o $@ $<
 
 $(HOST_TARGET): $(HOST_OBJS) $(HOST_EDGE_OBJS) $(COMMON_OBJS) $(THIRD_PARTY_LIBS)
@@ -126,7 +124,7 @@ ENCLAVE_LDLIBS = \
 	$(shell pkg-config oeenclave-$(C_COMPILER) --variable=mbedtlslibs) \
 	$(LDLIBS)
 
-$(ENCLAVE_DIR)/%.o: $(ENCLAVE_DIR)/%.c
+$(ENCLAVE_DIR)/%.o: $(ENCLAVE_DIR)/%.c $(ENCLAVE_EDGE_HEADERS)
 	$(CC) $(ENCLAVE_CFLAGS) $(ENCLAVE_CPPFLAGS) -c -o $@ $<
 
 $(ENCLAVE_TARGET): $(ENCLAVE_OBJS) $(ENCLAVE_EDGE_OBJS) $(COMMON_OBJS) $(THIRD_PARTY_LIBS)
