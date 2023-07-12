@@ -2,7 +2,7 @@
 
 set -eux
 
-sudo apt install -y curl
+sudo apt install -y curl gnupg
 
 sudo mkdir -p /etc/apt/keyrings
 
