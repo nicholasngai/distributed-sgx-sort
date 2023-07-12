@@ -67,7 +67,7 @@ int main(int argc, char **argv) {
     }
 
     /* Benchmark. */
-    for (size_t size = 1lu << 20; size <= 1lu << 30; size *= 4) {
+    for (size_t size = 1lu << 20; size <= 1lu << 40; size *= 2) {
         for (size_t num_threads = 1; num_threads <= 8; num_threads *= 2) {
             /* Spawn threads. */
             pthread_t threads[num_threads];
