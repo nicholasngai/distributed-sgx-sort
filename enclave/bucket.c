@@ -850,6 +850,8 @@ int bucket_sort(elem_t *arr, size_t length, size_t num_threads) {
                 get_time_difference(&time_assign_ids, &time_merge_split));
         printf("compression      : %f\n",
                 get_time_difference(&time_merge_split, &time_compress));
+        printf("shuffle          : %f\n",
+                get_time_difference(&time_start, &time_compress));
     }
 
 exit:
