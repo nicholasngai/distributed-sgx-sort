@@ -1,4 +1,9 @@
 #include "enclave/bucket.h"
+
+#ifdef DISTRIBUTED_SGX_SORT_MICROBENCHMARK_NOXORSWAP
+#define LIBOBLIVIOUS_CMOV
+#endif
+
 #include <errno.h>
 #include <string.h>
 #include <stddef.h>
@@ -22,10 +27,6 @@
 /* The number of buckets to send/receive from the remote at a time during
  * merge-split. */
 #define SWAP_CHUNK_BUCKETS 8
-
-#ifdef DISTRIBUTED_SGX_SORT_MICROBENCHMARK_NOXORSWAP
-#define LIBOBLIVIOUS_CMOV
-#endif
 
 static size_t total_length;
 
