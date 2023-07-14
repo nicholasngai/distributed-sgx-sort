@@ -2,7 +2,7 @@
 
 . scripts/az/common.sh
 
-REPEAT=4
+REPEAT=1
 
 if [ -z "${ENCLAVE_OFFSET+x}" ]; then
     ENCLAVE_OFFSET=0
@@ -54,10 +54,10 @@ get_mem_usage() {
 
     case "$algorithm" in
         bitonic)
-            echo $(( elem_size * num_elems / num_enclaves * 2 ))
+            echo $(( elem_size * num_elems / num_enclaves ))
             ;;
         bucket)
-            echo $(( elem_size * num_elems * 4 / num_enclaves * 2 ))
+            echo $(( elem_size * num_elems * 4 / num_enclaves ))
             ;;
         orshuffle)
             echo $(( elem_size * num_elems * 4 / num_enclaves ))
