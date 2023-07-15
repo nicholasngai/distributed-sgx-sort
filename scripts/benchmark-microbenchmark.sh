@@ -14,7 +14,6 @@ MAX_MEM_SIZE=$(( 1 << 35 ))
 mkdir -p "$BENCHMARK_DIR"
 
 s=16777216
-t=1
 b=128
 last_e=
 
@@ -62,13 +61,17 @@ for e in 32 8 2; do
         sed -Ei'' "$SED_CLEAR_FLAGS;s/^(CPPFLAGS) =( ?)/\\1 = $flag\\2/" Makefile
         make clean
         set_sort_params bucket "$e" "$b" "$s" "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
-        output_filename="$BENCHMARK_DIR/$algorithm-sgx2-enclaves$e-bucketsize$BUCKET_SIZE-chunked512-elemsize$b-size$s-threads$t.txt"
-        if [ -f "$output_filename" ]; then
-            echo "Output file $output_filename already exists; skipping"
-            continue
-        fi
-        cmd="$cmd_template bucket $s $t $REPEAT"
-        echo "Command: $cmd"
-        $cmd | tee "$output_filename"
+
+        for t in 1 8; do
+            output_filename="$BENCHMARK_DIR/$algorithm-sgx2-enclaves$e-bucketsize$BUCKET_SIZE-chunked512-elemsize$b-size$s-threads$t.txt"
+            if [ -f "$output_filename" ]; then
+                echo "Output file $output_filename already exists; skipping"
+                continue
+            fi
+
+            cmd="$cmd_template bucket $s $t $REPEAT"
+            echo "Command: $cmd"
+            $cmd | tee "$output_filename"
+        done
     done
 done
