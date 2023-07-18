@@ -215,10 +215,10 @@ int main(int argc, char **argv) {
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
     if (argc < 5) {
-        printf("usage: %s enclave_image {bitonic|bucket|opaque|orshuffle} array_size num_threads [num_runs]\n", argv[0]);
+        printf("Usage: %s <enclave image> {bitonic|bucket|opaque|orshuffle} <array size> <num threads> [num runs]\n", argv[0]);
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (argc < 4) {
-        printf("usage: %s {bitonic|bucket|opaque|orshuffle} array_size num_threads [num_runs]\n", argv[0]);
+        printf("Usage: %s {bitonic|bucket|opaque|orshuffle} <array size> <num threads> [num runs]\n", argv[0]);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
         return 0;
     }
