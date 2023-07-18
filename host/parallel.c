@@ -18,6 +18,16 @@
 static int world_rank;
 static int world_size;
 
+static void usage(char **argv) {
+#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
+        printf("Usage: %s <enclave image> {bitonic|bucket|opaque|orshuffle} <array size> <num threads> [num runs]\n", argv[0]);
+        printf("Usage: %s <enclave image> join <array size> <join size> <num threads> [num runs]\n", argv[0]);
+#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+        printf("Usage: %s {bitonic|bucket|opaque|orshuffle} <array size> <num threads> [num runs]\n", argv[0]);
+        printf("Usage: %s join <array size> <join size> <num threads> [num runs]\n", argv[0]);
+#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+}
+
 static int init_mpi(int *argc, char ***argv) {
     int ret;
 
@@ -214,74 +224,57 @@ int main(int argc, char **argv) {
     /* Read arguments. */
 
 #ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    if (argc < 5) {
-        printf("Usage: %s <enclave image> {bitonic|bucket|opaque|orshuffle} <array size> <num threads> [num runs]\n", argv[0]);
+    int argi = 2;
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    if (argc < 4) {
-        printf("Usage: %s {bitonic|bucket|opaque|orshuffle} <array size> <num threads> [num runs]\n", argv[0]);
+    int argi = 1;
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+
+    if (argc + 1 <= argi + 3) {
+        usage(argv);
         return 0;
     }
 
-#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-#define SORT_TYPE_STR (argv[2])
-#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-#define SORT_TYPE_STR (argv[1])
-#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     enum sort_type sort_type;
-    if (strcmp(SORT_TYPE_STR, "bitonic") == 0) {
+    if (strcmp(argv[argi], "bitonic") == 0) {
         sort_type = SORT_BITONIC;
-    } else if (strcmp(SORT_TYPE_STR, "bucket") == 0) {
+    } else if (strcmp(argv[argi], "bucket") == 0) {
         sort_type = SORT_BUCKET;
-    } else if (strcmp(SORT_TYPE_STR, "opaque") == 0) {
+    } else if (strcmp(argv[argi], "opaque") == 0) {
         sort_type = SORT_OPAQUE;
-    } else if (strcmp(SORT_TYPE_STR, "orshuffle") == 0) {
+    } else if (strcmp(argv[argi], "orshuffle") == 0) {
         sort_type = SORT_ORSHUFFLE;
     } else {
         printf("Invalid sort type\n");
         return ret;
     }
-#undef SORT_TYPE_STR
+    argi++;
 
     errno = 0;
-#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    size_t length = strtoull(argv[3], NULL, 10);
-#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    size_t length = strtoull(argv[2], NULL, 10);
-#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    size_t length = strtoull(argv[argi], NULL, 10);
     if (errno) {
         printf("Invalid array size\n");
         return ret;
     }
+    argi++;
 
     errno = 0;
-#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    size_t num_threads = strtoll(argv[4], NULL, 10);
-#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    size_t num_threads = strtoll(argv[3], NULL, 10);
-#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    size_t num_threads = strtoll(argv[argi], NULL, 10);
     if (errno) {
         printf("Invalid number of threads\n");
         return ret;
     }
+    argi++;
 
     size_t num_runs = 1;
-#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-    if (argc >= 6) {
-#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    if (argc >= 5) {
-#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+    if (argc > argi) {
         errno = 0;
-#ifndef DISTRIBUTED_SGX_SORT_HOSTONLY
-        num_runs = strtoull(argv[5], NULL, 10);
-#else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-        num_runs = strtoull(argv[4], NULL, 10);
-#endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
+        num_runs = strtoull(argv[argi], NULL, 10);
         if (errno) {
             printf("Invalid number of runs\n");
             return ret;
         }
     }
+    argi++;
 
     if (sort_type == SORT_OPAQUE && num_threads > 1) {
         printf("Opaque sort does not support more than 1 thread\n");
