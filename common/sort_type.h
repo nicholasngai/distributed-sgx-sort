@@ -7,6 +7,7 @@ enum sort_type {
     SORT_BUCKET,
     SORT_OPAQUE,
     SORT_ORSHUFFLE,
+    OJOIN,
 };
 
 #endif /* distributed-sgx-sort/common/sort_type.h */
