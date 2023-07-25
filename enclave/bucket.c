@@ -26,7 +26,7 @@
 
 /* The number of buckets to send/receive from the remote at a time during
  * merge-split. */
-#define SWAP_CHUNK_BUCKETS 8
+#define SWAP_CHUNK_BUCKETS 1
 
 static size_t total_length;
 
