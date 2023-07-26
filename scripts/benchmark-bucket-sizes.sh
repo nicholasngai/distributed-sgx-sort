@@ -7,6 +7,7 @@ cd "$(dirname "$0")/.."
 . scripts/benchmark-common.sh
 
 BENCHMARK_DIR=benchmarks
+BITONIC_CHUNK_SIZE=4096
 
 mkdir -p "$BENCHMARK_DIR"
 
@@ -53,7 +54,7 @@ for e in 16 4 1; do
             set_sort_params_unlocked "$a" "$e" "$b" "$s" "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
         ) 9<.
 
-        output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$z-elemsize$b-size$s-threads$t.txt"
+        output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$z-chunked$BITONIC_CHUNK_SIZE-elemsize$b-size$s-threads$t.txt"
         if [ -f "$output_filename" ]; then
             echo "Output file $output_filename already exists; skipping"
             continue
