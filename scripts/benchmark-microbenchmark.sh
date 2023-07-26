@@ -63,7 +63,7 @@ for e in 32 8 2; do
         set_sort_params bucket "$e" "$b" "$s" "$ENCLAVE_OFFSET" "$(( e + ENCLAVE_OFFSET - 1 ))"
 
         for t in 1 8; do
-            output_filename="$BENCHMARK_DIR/$algorithm-sgx2-enclaves$e-bucketsize$BUCKET_SIZE-chunked512-elemsize$b-size$s-threads$t.txt"
+            output_filename="$BENCHMARK_DIR/$algorithm-sgx2-enclaves$e-bucketsize$BUCKET_SIZE-chunked$BUCKET_SIZE-elemsize$b-size$s-threads$t.txt"
             if [ -f "$output_filename" ]; then
                 echo "Output file $output_filename already exists; skipping"
                 continue

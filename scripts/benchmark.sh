@@ -57,9 +57,9 @@ for e in 32 16 8 4 2 1; do
                 if [ "$a" = 'bitonic' ]; then
                     output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-chunked$BITONIC_CHUNK_SIZE-elemsize$b-size$s-threads$t.txt"
                 elif [ "$a" = 'bucket' ]; then
-                    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$BUCKET_SIZE-elemsize$b-size$s-threads$t.txt"
+                    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$BUCKET_SIZE-chunked$BUCKET_SIZE-elemsize$b-size$s-threads$t.txt"
                 elif [ "$a" = 'orshuffle' ]; then
-                    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-elemsize$b-size$s-threads$t.txt"
+                    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-chunked$BITONIC_CHUNK_SIZE-elemsize$b-size$s-threads$t.txt"
                 else
                     echo 'Invalid algorithm' >&2
                     exit -1

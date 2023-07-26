@@ -33,7 +33,7 @@ trap cleanup EXIT
 for b in 256 512 1024 2048 4096; do
     echo "Elem size: $b"
 
-    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-elemsize$b-size$s-threads$t.txt"
+    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-chunked$BUCKET_SIZE-elemsize$b-size$s-threads$t.txt"
     if [ -f "$output_filename" ]; then
         echo "Output file $output_filename already exists; skipping"
         continue
