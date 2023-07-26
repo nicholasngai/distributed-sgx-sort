@@ -91,7 +91,7 @@ int time_sort(enum sort_type sort_type, size_t length, size_t join_length) {
         goto exit;
     }
 #else /* DISTRIBUTED_SGX_SORT_HOSTONLY */
-    ret = ecall_sort_alloc_arr(length, sort_type);
+    ret = ecall_sort_alloc_arr(length, sort_type, join_length);
 #endif /* DISTRIBUTED_SGX_SORT_HOSTONLY */
     if (ret) {
         handle_error_string("Error allocating array in enclave");
@@ -278,6 +278,11 @@ int main(int argc, char **argv) {
         join_length = strtoll(argv[argi], NULL, 10);
         if (errno) {
             printf("Invalid join length\n");
+            return ret;
+        }
+
+        if (join_length > length) {
+            printf("Join length must be less than or equal to array length\n");
             return ret;
         }
 

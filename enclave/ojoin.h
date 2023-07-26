@@ -8,6 +8,6 @@
 
 int ojoin_init(void);
 void ojoin_free(void);
-int ojoin(elem_t *arr, size_t length, size_t num_threads);
+int ojoin(elem_t *arr, size_t length, size_t join_length, size_t num_threads);
 
 #endif /* distributed-sgx-sort/enclave/ojoin.h */

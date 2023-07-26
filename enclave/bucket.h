@@ -6,7 +6,12 @@
 
 #define BUCKET_SIZE 512
 
+/* The number of buckets to send/receive from the remote at a time during
+ * merge-split. */
+#define SWAP_CHUNK_BUCKETS 8
+
 int bucket_init(void);
+void bucket_init_prealloc(elem_t *buffer);
 void bucket_free(void);
 int bucket_sort(elem_t *arr, size_t length, size_t num_threads);
 

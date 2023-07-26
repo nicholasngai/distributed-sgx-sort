@@ -24,10 +24,6 @@
 #include "enclave/synch.h"
 #include "enclave/threading.h"
 
-/* The number of buckets to send/receive from the remote at a time during
- * merge-split. */
-#define SWAP_CHUNK_BUCKETS 8
-
 static size_t total_length;
 
 /* Thread-local buffer used for generic operations. */
@@ -61,6 +57,10 @@ int bucket_init(void) {
 
 exit:
     return -1;
+}
+
+void bucket_init_prealloc(elem_t *buffer_) {
+    buffer = buffer_;
 }
 
 void bucket_free(void) {
