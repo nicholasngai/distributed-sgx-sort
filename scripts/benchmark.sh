@@ -44,7 +44,7 @@ for e in 32 16 8 4 2 1; do
     echo "Warming up: $warm_up"
     $warm_up
 
-    for a in bitonic bucket orshuffle; do
+    for a in bitonic bucket orshuffle join; do
         for s in 16777216 33554432 67108864 134217728 268435456 536870912 1073741824; do
             if [ "$(get_mem_usage "$a" "$e" "$b" "$s")" -gt "$MAX_MEM_SIZE" ]; then
                 echo "Skipping $a with E = $e, b = $b, and N = $s due to size"
@@ -60,6 +60,8 @@ for e in 32 16 8 4 2 1; do
                     output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$BUCKET_SIZE-chunked$BUCKET_SIZE-elemsize$b-size$s-threads$t.txt"
                 elif [ "$a" = 'orshuffle' ]; then
                     output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-chunked$BITONIC_CHUNK_SIZE-elemsize$b-size$s-threads$t.txt"
+                elif [ "$a" = 'join' ]; then
+                    output_filename="$BENCHMARK_DIR/$a-sgx2-enclaves$e-bucketsize$BUCKET_SIZE-chunked$BUCKET_SIZE-elemsize$b-size$s-threads$t.txt"
                 else
                     echo 'Invalid algorithm' >&2
                     exit -1
@@ -70,7 +72,7 @@ for e in 32 16 8 4 2 1; do
                     continue
                 fi
 
-                cmd="$cmd_template $a $s $t $REPEAT"
+                cmd="$cmd_template $a $s $(if [ "$a" = 'join' ]; then echo 256; fi) $t $REPEAT"
                 echo "Command: $cmd"
                 $cmd | tee "$output_filename"
             done
