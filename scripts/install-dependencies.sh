@@ -2,6 +2,8 @@
 
 set -eux
 
+sudo apt update
+
 sudo apt install -y curl gnupg
 
 sudo mkdir -p /etc/apt/keyrings
