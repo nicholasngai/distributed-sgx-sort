@@ -62,6 +62,9 @@ get_mem_usage() {
         orshuffle)
             echo $(( elem_size * num_elems * 4 / num_enclaves ))
             ;;
+        join)
+            echo $(( elem_size * num_elems * 4 / num_enclaves * 2 ))
+            ;;
         *)
             echo 'Invalid algorithm' >&2
             exit 1

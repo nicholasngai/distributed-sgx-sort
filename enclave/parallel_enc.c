@@ -9,6 +9,7 @@
 #include "enclave/bucket.h"
 #include "enclave/crypto.h"
 #include "enclave/mpi_tls.h"
+#include "enclave/ojoin.h"
 #include "enclave/opaque.h"
 #include "enclave/orshuffle.h"
 #include "enclave/threading.h"
@@ -23,6 +24,7 @@ int world_size;
 
 static elem_t *arr;
 static size_t total_length;
+static size_t join_length;
 
 static volatile enum sort_type sort_type;
 
@@ -56,13 +58,17 @@ exit_free_rand:
     return ret;
 }
 
-int ecall_sort_alloc_arr(size_t total_length_, enum sort_type sort_type) {
+int ecall_sort_alloc_arr(size_t total_length_, enum sort_type sort_type,
+        size_t join_length_) {
     total_length = total_length_;
+    join_length = join_length_;
     size_t local_length =
         ((world_rank + 1) * total_length + world_size - 1) / world_size
             - (world_rank * total_length + world_size - 1) / world_size;
     int ret;
+    (void) join_length;
 
+    /* Establish sort size. */
     size_t data_size;
     size_t alloc_size;
     switch (sort_type) {
@@ -70,6 +76,7 @@ int ecall_sort_alloc_arr(size_t total_length_, enum sort_type sort_type) {
             data_size = local_length;
             alloc_size = local_length;
             break;
+        case OJOIN:
         case SORT_BUCKET: {
             /* The total number of buckets is the max of either double the
              * number of buckets needed to hold all the elements or double the
@@ -102,15 +109,32 @@ int ecall_sort_alloc_arr(size_t total_length_, enum sort_type sort_type) {
             goto exit;
         }
     }
+
+    /* Allocate array. */
     arr = calloc(alloc_size, sizeof(*arr));
     if (!arr) {
         perror("malloc arr");
         ret = -1;
         goto exit;
     }
+
+    /* Populate array. */
     srand(world_rank + 1);
-    for (size_t i = 0; i < data_size; i++) {
-        arr[i].key = rand();
+    if (sort_type == OJOIN) {
+        size_t request_start =
+            data_size
+                - (join_length / world_size
+                        + (join_length % world_size <= (size_t) world_rank));
+        for (size_t i = 0; i < request_start; i++) {
+            arr[i].key = rand() & ~1;
+        }
+        for (size_t i = request_start; i < data_size; i++) {
+            arr[i].key = arr[(i - request_start) / 4].key | 1;
+        }
+    } else {
+        for (size_t i = 0; i < data_size; i++) {
+            arr[i].key = rand();
+        }
     }
 
     ret = 0;
@@ -259,6 +283,20 @@ void ecall_start_work(void) {
             orshuffle_free();
             break;
 
+        case OJOIN:
+            /* Initialize o-join. */
+            if (ojoin_init()) {
+                handle_error_string("Error initializing ojoin");
+                return;
+            }
+
+            /* Start work. */
+            thread_start_work();
+
+            /* Free sort. */
+            ojoin_free();
+            break;
+
         case SORT_UNSET:
             handle_error_string("Invalid sort type");
             goto exit;
@@ -352,6 +390,31 @@ int ecall_orshuffle_sort(void) {
 
     /* Sort. */
     ret = orshuffle_sort(arr, total_length, total_num_threads);
+    if (ret) {
+        handle_error_string("Error in ORShuffle sort");
+        goto exit_free_sort;
+    }
+
+exit_free_sort:
+    orshuffle_free();
+exit:
+    return ret;
+}
+
+int ecall_ojoin(void) {
+    int ret;
+
+    sort_type = OJOIN;
+
+    /* Initialize sort. */
+    ret = ojoin_init();
+    if (ret) {
+        handle_error_string("Error initializing sort");
+        goto exit;
+    }
+
+    /* Sort. */
+    ret = ojoin(arr, total_length, join_length, total_num_threads);
     if (ret) {
         handle_error_string("Error in ORShuffle sort");
         goto exit_free_sort;
