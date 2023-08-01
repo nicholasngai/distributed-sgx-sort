@@ -62,6 +62,9 @@ get_mem_usage() {
         orshuffle)
             echo $(( elem_size * num_elems * 4 / num_enclaves ))
             ;;
+        opaque)
+            echo $(( elem_size * num_elems * 2 / num_enclaves * 2 ))
+            ;;
         join)
             echo $(( elem_size * num_elems * 4 / num_enclaves * 2 ))
             ;;
