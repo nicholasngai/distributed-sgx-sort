@@ -209,7 +209,8 @@ static int transpose(elem_t *arr, elem_t *out, size_t local_length,
             ret =
                 mpi_tls_irecv_bytes(bufs[rank],
                         CHUNK_SIZE * sizeof(*bufs[rank]),
-                        MPI_TLS_ANY_SOURCE, 0, &requests[rank]);
+                        MPI_TLS_ANY_SOURCE, OPAQUE_TRANSPOSE_MPI_TAG,
+                        &requests[rank]);
             if (ret) {
                 handle_error_string("Error posting receive into %d", rank);
                 goto exit_free_bufs;
@@ -231,8 +232,8 @@ static int transpose(elem_t *arr, elem_t *out, size_t local_length,
             /* Post send request. */
             ret =
                 mpi_tls_isend_bytes(bufs[rank],
-                        elems_to_decrypt * sizeof(*bufs[rank]), rank, 0,
-                        &requests[rank]);
+                        elems_to_decrypt * sizeof(*bufs[rank]), rank,
+                        OPAQUE_TRANSPOSE_MPI_TAG, &requests[rank]);
             if (ret) {
                 handle_error_string("Error posting send from %d to %d",
                         world_rank, rank);
@@ -266,7 +267,8 @@ static int transpose(elem_t *arr, elem_t *out, size_t local_length,
                 ret =
                     mpi_tls_irecv_bytes(bufs[index],
                             CHUNK_SIZE * sizeof(*bufs[index]),
-                            MPI_TLS_ANY_SOURCE, 0, &requests[index]);
+                            MPI_TLS_ANY_SOURCE, OPAQUE_TRANSPOSE_MPI_TAG,
+                            &requests[index]);
                 if (ret) {
                     handle_error_string("Error posting receive into %d",
                             (int) index);
@@ -296,8 +298,8 @@ static int transpose(elem_t *arr, elem_t *out, size_t local_length,
                 /* Post another send request. */
                 ret =
                     mpi_tls_isend_bytes(bufs[index],
-                            elems_to_decrypt * sizeof(*bufs[index]), index, 0,
-                            &requests[index]);
+                            elems_to_decrypt * sizeof(*bufs[index]), index,
+                            OPAQUE_TRANSPOSE_MPI_TAG, &requests[index]);
                 if (ret) {
                     handle_error_string("Error posting send from %d to %d",
                             world_rank, (int) index);

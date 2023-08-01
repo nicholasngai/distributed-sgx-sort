@@ -52,5 +52,7 @@ int mpi_tls_waitany(size_t count, mpi_tls_request_t *requests, size_t *index,
 #define QUICKSELECT_MPI_TAG 4
 #define BALANCE_MPI_TAG 5
 #define OCOMPACT_MARKED_COUNT_MPI_TAG 6
+#define OPAQUE_TRANSPOSE_MPI_TAG 7
+#define OPAQUE_BACKSHIFT_MPI_TAG 8
 
 #endif /* distributed-sgx-sort/enclave/mpi_tls.h */
