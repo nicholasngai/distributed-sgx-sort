@@ -344,11 +344,19 @@ static int back_shift(elem_t *arr, elem_t *out, size_t local_length,
         (!reverse ? world_rank + 1 : world_rank + world_size - 1) % world_size;
     int recv_rank =
         (!reverse ? world_rank + world_size - 1 : world_rank + 1) % world_size;
-    size_t send_offset = !reverse || world_rank == 0 ? local_length / 2 : 0;
+    size_t send_offset;
+    size_t send_last;
+    if (!reverse || world_rank == 0) {
+        send_offset = local_length / 2;
+        send_last = local_length;
+    } else {
+        send_offset = 0;
+        send_last = local_length / 2;
+    }
     size_t recv_offset = local_length / 2;
 
     /* Send the right half. */
-    size_t elems_to_send = MIN(local_length / 2, CHUNK_SIZE);
+    size_t elems_to_send = MIN(send_last - send_offset, CHUNK_SIZE);
     ret =
         mpi_tls_isend_bytes(arr + send_offset, elems_to_send * sizeof(*arr),
                 send_rank, 0, send_request);
@@ -357,11 +365,11 @@ static int back_shift(elem_t *arr, elem_t *out, size_t local_length,
                 send_rank);
         goto exit;
     }
-    send_offset += elems_to_send;
 
     /* Receive the left half. */
+    size_t elems_to_recv = MIN(local_length - recv_offset, CHUNK_SIZE);
     ret =
-        mpi_tls_irecv_bytes(out + recv_offset, CHUNK_SIZE * sizeof(*out),
+        mpi_tls_irecv_bytes(out + recv_offset, elems_to_recv * sizeof(*out),
                 recv_rank, 0, recv_request);
     if (ret) {
         handle_error_string("Error posting recv into %d from %d", world_rank,
@@ -369,14 +377,13 @@ static int back_shift(elem_t *arr, elem_t *out, size_t local_length,
         goto exit;
     }
 
-    while (send_offset < (reverse ? local_length / 2 : local_length)
-            || recv_offset < local_length) {
+    while (send_offset < send_last || recv_offset < local_length) {
         mpi_tls_status_t status;
         bool is_recv;
         if (recv_offset >= local_length) {
             ret = mpi_tls_wait(send_request, &status);
             is_recv = false;
-        } else if (send_offset >= local_length) {
+        } else if (send_offset >= send_last) {
             ret = mpi_tls_wait(recv_request, &status);
             is_recv = true;
         } else {
@@ -396,9 +403,11 @@ static int back_shift(elem_t *arr, elem_t *out, size_t local_length,
 
             /* Post another receive if necessary. */
             if (recv_offset < local_length) {
+                size_t elems_to_recv =
+                    MIN(local_length - recv_offset, CHUNK_SIZE);
                 ret =
                     mpi_tls_irecv_bytes(out + recv_offset,
-                            CHUNK_SIZE * sizeof(*out), recv_rank, 0,
+                            elems_to_recv * sizeof(*out), recv_rank, 0,
                             recv_request);
                 if (ret) {
                     handle_error_string("Error posting recv into %d from %d",
@@ -407,20 +416,21 @@ static int back_shift(elem_t *arr, elem_t *out, size_t local_length,
                 }
             }
         } else {
+            /* Increment send offset. */
+            send_offset += elems_to_send;
+
             /* Post another send if necessary. */
-            if (send_offset < local_length) {
-                size_t elems_to_send =
-                    MIN(local_length - send_offset, CHUNK_SIZE);
+            if (send_offset < send_last) {
+                size_t elems_to_send = MIN(send_last - send_offset, CHUNK_SIZE);
                 ret =
                     mpi_tls_isend_bytes(arr + send_offset,
                             elems_to_send * sizeof(*arr), send_rank, 0,
                             send_request);
                 if (ret) {
-                    handle_error_string("Error posting send from %d to %d", world_rank,
-                            send_rank);
+                    handle_error_string("Error posting send from %d to %d",
+                            world_rank, send_rank);
                     goto exit;
                 }
-                send_offset += elems_to_send;
             }
         }
     }
