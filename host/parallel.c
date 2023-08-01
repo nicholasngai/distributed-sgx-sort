@@ -313,11 +313,6 @@ int main(int argc, char **argv) {
     }
     argi++;
 
-    if (sort_type == SORT_OPAQUE && num_threads > 1) {
-        printf("Opaque sort does not support more than 1 thread\n");
-        return ret;
-    }
-
     /* Init MPI. */
 
     ret = init_mpi(&argc, &argv);

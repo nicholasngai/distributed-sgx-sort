@@ -291,13 +291,12 @@ static void merge(void *args_) {
         case 1:
             /* Do nothing. */
             break;
-        case 2: {
+
+        case 2:
             swap_range(arr, start, start + 1, 1, false, 1);
             break;
-        }
+
         default: {
-            /* If the length is odd, bubble sort an element to the end of the
-             * array and leave it there. */
             size_t left_length = length / 2;
             size_t right_length = length - left_length;
             size_t right_start = start + left_length;
@@ -370,13 +369,13 @@ static void sort(void *args_) {
         case 1:
             /* Do nothing. */
             break;
-        case 2: {
+
+        case 2:
             swap_range(arr, start, start + 1, 1, false, 1);
             break;
-        }
+
         default: {
-            /* Recursively sort left half forwards and right half in reverse to
-             * create a bitonic sequence. */
+            /* Recursively sort left and right halves. */
             size_t left_length = length / 2;
             size_t right_length = length - left_length;
             size_t right_start = start + left_length;

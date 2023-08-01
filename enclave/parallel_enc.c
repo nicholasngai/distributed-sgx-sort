@@ -266,7 +266,8 @@ void ecall_start_work(void) {
             break;
 
         case SORT_OPAQUE:
-            /* Nothing to do. */
+            /* Start work. */
+            thread_start_work();
             break;
 
         case SORT_ORSHUFFLE:
@@ -366,7 +367,7 @@ int ecall_opaque_sort(void) {
     sort_type = SORT_BUCKET;
 
     /* Sort. */
-    ret = opaque_sort(arr, total_length);
+    ret = opaque_sort(arr, total_length, total_num_threads);
     if (ret) {
         handle_error_string("Error in Opaque sort");
         goto exit;

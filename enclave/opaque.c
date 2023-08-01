@@ -12,6 +12,7 @@
 #include "common/util.h"
 #include "enclave/mpi_tls.h"
 #include "enclave/parallel_enc.h"
+#include "enclave/threading.h"
 
 /* Array index and world rank relationship helpers. */
 
@@ -19,33 +20,26 @@ static size_t get_local_start(size_t length, int rank) {
     return (rank * length + world_size - 1) / world_size;
 }
 
-static void swap(elem_t *arr, size_t a, size_t b, bool descending) {
-    o_memswap(&arr[a], &arr[b], sizeof(*arr),
-            (arr[a].key > arr[b].key) != descending);
+static void swap(elem_t *arr, size_t a, size_t b) {
+    o_memswap(&arr[a], &arr[b], sizeof(*arr), arr[a].key > arr[b].key);
 }
 
-static void local_bitonic_merge(void *arr, size_t start, size_t length,
-        bool descending) {
-    switch (length) {
-        case 0:
-        case 1:
-            /* Do nothing. */
-            break;
+struct local_bitonic_merge_args {
+    elem_t *arr;
+    size_t start;
+    size_t length;
+    bool crossover;
+    size_t num_threads;
+};
 
-        default:
-            for (size_t i = start; i < start + length / 2; i++) {
-                swap(arr, i, i + length / 2, descending);
-            }
+static void local_bitonic_merge(void *args_) {
+    struct local_bitonic_merge_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t start = args->start;
+    size_t length = args->length;
+    bool crossover = args->crossover;
+    size_t num_threads = args->num_threads;
 
-            local_bitonic_merge(arr, start, length / 2, descending);
-            local_bitonic_merge(arr, start + length / 2, length / 2,
-                    descending);
-            break;
-    }
-}
-
-static void local_bitonic_sort(void *arr, size_t start, size_t length,
-        bool descending) {
     switch (length) {
         case 0:
         case 1:
@@ -53,16 +47,130 @@ static void local_bitonic_sort(void *arr, size_t start, size_t length,
             break;
 
         case 2:
-            swap(arr, start, start + 1, descending);
+            swap(arr, start, start + 1);
             break;
 
-        default:
-            local_bitonic_sort(arr, start, length / 2, descending);
-            local_bitonic_sort(arr, start + length / 2, length / 2,
-                    !descending);
+        default: {
+            if (crossover) {
+                for (size_t i = 0; i < length / 2; i++) {
+                    swap(arr, start + i, start + length - i - 1);
+                }
+            } else {
+                for (size_t i = 0; i < length / 2; i++) {
+                    swap(arr, start + i, start + length / 2 + i);
+                }
+            }
 
-            local_bitonic_merge(arr, start, length, descending);
+            /* Recursively merge. */
+            struct local_bitonic_merge_args left_args = {
+                .arr = arr,
+                .start = start,
+                .length = length / 2,
+                .crossover = false,
+            };
+            struct local_bitonic_merge_args right_args = {
+                .arr = arr,
+                .start = start + length / 2,
+                .length = length / 2,
+                .crossover = false,
+            };
+            if (num_threads > 1) {
+                /* Merge both with separate threads. */
+                size_t right_threads = num_threads / 2;
+                left_args.num_threads = num_threads - right_threads;
+                right_args.num_threads = right_threads;
+                struct thread_work right_work = {
+                    .type = THREAD_WORK_SINGLE,
+                    .single = {
+                        .func = local_bitonic_merge,
+                        .arg = &right_args,
+                    },
+                };
+                thread_work_push(&right_work);
+                local_bitonic_merge(&left_args);
+                thread_wait(&right_work);
+            } else {
+                /* Merge both in our own thread. */
+                left_args.num_threads = 1;
+                right_args.num_threads = 1;
+                local_bitonic_merge(&left_args);
+                local_bitonic_merge(&right_args);
+            }
             break;
+        }
+    }
+}
+
+struct local_bitonic_sort_args {
+    elem_t *arr;
+    size_t start;
+    size_t length;
+    size_t num_threads;
+};
+
+static void local_bitonic_sort(void *args_) {
+    struct local_bitonic_sort_args *args = args_;
+    elem_t *arr = args->arr;
+    size_t start = args->start;
+    size_t length = args->length;
+    size_t num_threads = args->num_threads;
+
+    switch (length) {
+        case 0:
+        case 1:
+            /* Do nothing. */
+            break;
+
+        case 2:
+            swap(arr, start, start + 1);
+            break;
+
+        default: {
+            /* Recursively sort left and right halves. */
+            struct local_bitonic_sort_args left_args = {
+                .arr = arr,
+                .start = start,
+                .length = length / 2,
+            };
+            struct local_bitonic_sort_args right_args = {
+                .arr = arr,
+                .start = start + length / 2,
+                .length = length / 2,
+            };
+            if (num_threads > 1) {
+                /* Sort both with separate threads. */
+                size_t right_threads = num_threads / 2;
+                left_args.num_threads = num_threads - right_threads;
+                right_args.num_threads = right_threads;
+                struct thread_work right_work = {
+                    .type = THREAD_WORK_SINGLE,
+                    .single = {
+                        .func = local_bitonic_sort,
+                        .arg = &right_args,
+                    },
+                };
+                thread_work_push(&right_work);
+                local_bitonic_sort(&left_args);
+                thread_wait(&right_work);
+            } else {
+                /* Sort both in our own thread. */
+                left_args.num_threads = 1;
+                right_args.num_threads = 1;
+                local_bitonic_sort(&left_args);
+                local_bitonic_sort(&right_args);
+            }
+
+            /* Bitonic merge. */
+            struct local_bitonic_merge_args merge_args = {
+                .arr = arr,
+                .start = start,
+                .length = length,
+                .crossover = true,
+                .num_threads = num_threads,
+            };
+            local_bitonic_merge(&merge_args);
+            break;
+        }
     }
 }
 
@@ -321,7 +429,7 @@ exit:
     return ret;
 }
 
-int opaque_sort(elem_t *arr, size_t length) {
+int opaque_sort(elem_t *arr, size_t length, size_t num_threads) {
     size_t local_start = get_local_start(length, world_rank);
     size_t local_length = get_local_start(length, world_rank + 1) - local_start;
     elem_t *buf = arr + local_length;
@@ -335,7 +443,15 @@ int opaque_sort(elem_t *arr, size_t length) {
     }
 
     /* Step 1: Local sort. */
-    local_bitonic_sort(arr, 0, local_length, false);
+    {
+        struct local_bitonic_sort_args sort_args = {
+            .arr = arr,
+            .start = 0,
+            .length = local_length,
+            .num_threads = num_threads,
+        };
+        local_bitonic_sort(&sort_args);
+    }
 
     if (world_size == 1) {
         ret = 0;
@@ -364,7 +480,15 @@ int opaque_sort(elem_t *arr, size_t length) {
     }
 
     /* Step 3: Local sort. */
-    local_bitonic_sort(buf, 0, local_length, false);
+    {
+        struct local_bitonic_sort_args sort_args = {
+            .arr = buf,
+            .start = 0,
+            .length = local_length,
+            .num_threads = num_threads,
+        };
+        local_bitonic_sort(&sort_args);
+    }
 
     struct timespec time_localsort2;
     if (clock_gettime(CLOCK_REALTIME, &time_localsort2)) {
@@ -388,7 +512,15 @@ int opaque_sort(elem_t *arr, size_t length) {
     }
 
     /* Step 5: Local sort. */
-    local_bitonic_sort(arr, 0, local_length, false);
+    {
+        struct local_bitonic_sort_args sort_args = {
+            .arr = arr,
+            .start = 0,
+            .length = local_length,
+            .num_threads = num_threads,
+        };
+        local_bitonic_sort(&sort_args);
+    }
 
     struct timespec time_localsort3;
     if (clock_gettime(CLOCK_REALTIME, &time_localsort3)) {
@@ -412,7 +544,15 @@ int opaque_sort(elem_t *arr, size_t length) {
     }
 
     /* Step 7: Local sort. */
-    local_bitonic_sort(buf, 0, local_length, false);
+    {
+        struct local_bitonic_sort_args sort_args = {
+            .arr = buf,
+            .start = 0,
+            .length = local_length,
+            .num_threads = num_threads,
+        };
+        local_bitonic_sort(&sort_args);
+    }
 
     struct timespec time_localsort4;
     if (clock_gettime(CLOCK_REALTIME, &time_localsort4)) {

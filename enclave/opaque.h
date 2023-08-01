@@ -4,6 +4,6 @@
 #include <stddef.h>
 #include "common/elem_t.h"
 
-int opaque_sort(elem_t *arr, size_t length);
+int opaque_sort(elem_t *arr, size_t length, size_t num_threads);
 
 #endif /* distributed-sgx-sort/enclave/opauqe.h */
