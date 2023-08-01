@@ -361,44 +361,54 @@ static int back_shift(elem_t *arr, elem_t *out, size_t local_length,
     size_t elems_to_send = MIN(send_last - send_offset, CHUNK_SIZE);
     ret =
         mpi_tls_isend_bytes(arr + send_offset, elems_to_send * sizeof(*arr),
-                send_rank, 0, send_request);
+                send_rank, OPAQUE_BACKSHIFT_MPI_TAG, send_request);
     if (ret) {
         handle_error_string("Error posting send from %d to %d", world_rank,
                 send_rank);
         goto exit;
     }
+    send_offset += elems_to_send;
 
     /* Receive the left half. */
     size_t elems_to_recv = MIN(local_length - recv_offset, CHUNK_SIZE);
     ret =
         mpi_tls_irecv_bytes(out + recv_offset, elems_to_recv * sizeof(*out),
-                recv_rank, 0, recv_request);
+                recv_rank, OPAQUE_BACKSHIFT_MPI_TAG, recv_request);
     if (ret) {
         handle_error_string("Error posting recv into %d from %d", world_rank,
                 recv_rank);
         goto exit;
     }
 
-    while (send_offset < send_last || recv_offset < local_length) {
+    size_t num_requests = 2;
+    while (num_requests) {
         mpi_tls_status_t status;
-        bool is_recv;
-        if (recv_offset >= local_length) {
-            ret = mpi_tls_wait(send_request, &status);
-            is_recv = false;
-        } else if (send_offset >= send_last) {
-            ret = mpi_tls_wait(recv_request, &status);
-            is_recv = true;
-        } else {
-            size_t index;
-            ret = mpi_tls_waitany(2, requests, &index, &status);
-            is_recv = index == 1;
-        }
+        size_t index;
+        ret = mpi_tls_waitany(2, requests, &index, &status);
         if (ret) {
             handle_error_string("Error waiting on request");
             goto exit;
         }
 
-        if (is_recv) {
+        if (index == 0) {
+            /* Post another send if necessary. */
+            if (send_offset < send_last) {
+                size_t elems_to_send = MIN(send_last - send_offset, CHUNK_SIZE);
+                ret =
+                    mpi_tls_isend_bytes(arr + send_offset,
+                            elems_to_send * sizeof(*arr), send_rank,
+                            OPAQUE_BACKSHIFT_MPI_TAG, send_request);
+                if (ret) {
+                    handle_error_string("Error posting send from %d to %d",
+                            world_rank, send_rank);
+                    goto exit;
+                }
+                send_offset += elems_to_send;
+            } else {
+                requests[index].type = MPI_TLS_NULL;
+                num_requests--;
+            }
+        } else {
             /* Increment receive offset. */
             size_t num_received_elems = status.count / sizeof(*out);
             recv_offset += num_received_elems;
@@ -409,30 +419,16 @@ static int back_shift(elem_t *arr, elem_t *out, size_t local_length,
                     MIN(local_length - recv_offset, CHUNK_SIZE);
                 ret =
                     mpi_tls_irecv_bytes(out + recv_offset,
-                            elems_to_recv * sizeof(*out), recv_rank, 0,
-                            recv_request);
+                            elems_to_recv * sizeof(*out), recv_rank,
+                            OPAQUE_BACKSHIFT_MPI_TAG, recv_request);
                 if (ret) {
                     handle_error_string("Error posting recv into %d from %d",
                             world_rank, recv_rank);
                     goto exit;
                 }
-            }
-        } else {
-            /* Increment send offset. */
-            send_offset += elems_to_send;
-
-            /* Post another send if necessary. */
-            if (send_offset < send_last) {
-                size_t elems_to_send = MIN(send_last - send_offset, CHUNK_SIZE);
-                ret =
-                    mpi_tls_isend_bytes(arr + send_offset,
-                            elems_to_send * sizeof(*arr), send_rank, 0,
-                            send_request);
-                if (ret) {
-                    handle_error_string("Error posting send from %d to %d",
-                            world_rank, send_rank);
-                    goto exit;
-                }
+            } else {
+                requests[index].type = MPI_TLS_NULL;
+                num_requests--;
             }
         }
     }
