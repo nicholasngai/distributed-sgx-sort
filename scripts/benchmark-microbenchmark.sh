@@ -24,7 +24,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for e in 32 8 2; do
+for e in 32 8 2 1; do
     if "$AZ" && [ -n "$last_e" ]; then
         deallocate_az_vm "$(( e + ENCLAVE_OFFSET ))" "$(( last_e + ENCLAVE_OFFSET ))"
     fi
