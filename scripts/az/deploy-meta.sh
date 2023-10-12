@@ -25,6 +25,8 @@ az vm create \
     -n "$MANAGER_NAME" \
     --size "$MANAGER_SIZE" \
     --image "$MANAGER_IMAGE" \
+    --subnet /subscriptions/"$SUBSCRIPTION"/resourceGroups/"$META_GROUP"/providers/Microsoft.Network/virtualNetworks/"$VNET"/subnets/"$SUBNET" \
+    --security-type TrustedLaunch \
+    --public-ip-sku Standard \
     --admin-username nngai \
-    --ssh-key-values ~/.ssh/id_rsa.pub \
-    --subnet /subscriptions/"$SUBSCRIPTION"/resourceGroups/"$META_GROUP"/providers/Microsoft.Network/virtualNetworks/"$VNET"/subnets/"$SUBNET"
+    --ssh-key-values ~/.ssh/id_rsa.pub
