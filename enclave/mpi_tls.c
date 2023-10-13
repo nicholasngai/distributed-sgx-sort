@@ -81,11 +81,24 @@ static int ciphersuites[] = {
 /* Bandwidth measurement. */
 size_t mpi_tls_bytes_sent;
 
+#if !defined(OE_SIMULATION) && !defined(OE_SIMULATION_CERT) && !defined(DISTRIBUTED_SGX_SORT_HOSTONLY)
 static int verify_callback(void *data UNUSED, mbedtls_x509_crt *crt UNUSED,
         int depth UNUSED, uint32_t *flags UNUSED) {
     // This is stubbed out due to the flakiness of Azure's DCAP environment.
     return 0;
 }
+#else /* OE_SIMULATION || OE_SIMULATION_CERT || DISTRIBUTED_SGX_SORT_HOSTONLY */
+static int verify_callback(void *data UNUSED, mbedtls_x509_crt *crt,
+        int depth UNUSED, uint32_t *flags UNUSED) {
+    if (crt->raw.len != sizeof(SIM_CERT)) {
+        return MBEDTLS_ERR_SSL_PEER_VERIFY_FAILED;
+    }
+    if (memcmp(crt->raw.p, SIM_CERT, sizeof(SIM_CERT))) {
+        return MBEDTLS_ERR_SSL_PEER_VERIFY_FAILED;
+    }
+    return 0;
+}
+#endif /* !OE_SIMULATION && !OE_SIMULATION_CERT && !DISTRIBUTED_SGX_SORT_HOSTONLY */
 
 /* Send callback, used only for the handshake. */
 static int send_callback(void *hs_session_, const unsigned char *buf,
