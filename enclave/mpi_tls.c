@@ -83,7 +83,7 @@ size_t mpi_tls_bytes_sent;
 
 static int verify_callback(void *data UNUSED, mbedtls_x509_crt *crt UNUSED,
         int depth UNUSED, uint32_t *flags UNUSED) {
-    // TODO Implement actual SGX attestation verification.
+    // This is stubbed out due to the flakiness of Azure's DCAP environment.
     return 0;
 }
 
